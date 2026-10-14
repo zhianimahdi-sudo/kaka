@@ -10,6 +10,7 @@ sheets_d.py — شیت‌های نمایش و کنترل: داشبورد و کن
 from __future__ import annotations
 
 from openpyxl.chart import BarChart, DoughnutChart, LineChart, Reference
+from openpyxl.chart.data_source import AxDataSource, StrData, StrRef, StrVal
 from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.marker import DataPoint
 from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
@@ -19,10 +20,26 @@ from openpyxl.styles import Border, Side
 
 import content as C
 import theme as T
+from sheets_c import MONTH_NAMES
 from theme import L, aln, banner, brd_box, fld, fnt, merge, note_line, put, section, style_sheet, table_header, widths
 
 
 # ═══════════════════════════════════════════════════════════════ داشبورد
+
+def _text_categories(chart, sheet, col, first, last, values, series_index=0):
+    """
+    تعیین برچسب‌های متنی محور با strRef (استاندارد اکسل برای مقوله‌های متنی).
+
+    نکته: openpyxl به‌صورت پیش‌فرض همیشه numRef می‌نویسد؛ اگر مقوله‌ها متن باشند
+    (نام عضو، نام ماه، نام خدمت) باید strRef نوشته شود تا برچسب‌ها در همهٔ نسخه‌ها
+    و همهٔ نمایشگرها درست دیده شوند. کش مقادیر هم نوشته می‌شود تا پیش از اولین
+    بازمحاسبه هم نمودار برچسب داشته باشد.
+    """
+    ref = f"'{sheet}'!${col}${first}:${col}${last}"
+    pts = [StrVal(idx=i, v=str(v)) for i, v in enumerate(values)]
+    chart.series[series_index].cat = AxDataSource(
+        strRef=StrRef(f=ref, strCache=StrData(ptCount=len(values), pt=pts)))
+
 
 def _filter_criteria():
     """
@@ -135,7 +152,7 @@ def build_dashboard(wb, rep):
     ch1.style = 2
     ch1.title = "کمیسیون خالص به تفکیک عضو (ریال)"
     ch1.add_data(Reference(rep, min_col=5, min_row=L.REP_B1_FIRST, max_row=L.REP_B1_LAST), titles_from_data=False)
-    ch1.set_categories(Reference(rep, min_col=1, min_row=L.REP_B1_FIRST, max_row=L.REP_B1_LAST))
+    _text_categories(ch1, L.S_REP, "A", L.REP_B1_FIRST, L.REP_B1_LAST, [m[0] for m in C.MEMBERS])
     ch1.series[0].graphicalProperties.solidFill = T.TEAL
     ch1.series[0].graphicalProperties.line.solidFill = T.NAVY
     ch1.gapWidth = 60
@@ -150,7 +167,7 @@ def build_dashboard(wb, rep):
     ch2.style = 2
     ch2.title = "روند ماهانهٔ کمیسیون خالص (ریال)"
     ch2.add_data(Reference(rep, min_col=6, min_row=L.REP_B2_FIRST, max_row=L.REP_B2_LAST), titles_from_data=False)
-    ch2.set_categories(Reference(rep, min_col=2, min_row=L.REP_B2_FIRST, max_row=L.REP_B2_LAST))
+    _text_categories(ch2, L.S_REP, "B", L.REP_B2_FIRST, L.REP_B2_LAST, MONTH_NAMES)
     ch2.series[0].graphicalProperties.line.solidFill = T.BLUE
     ch2.series[0].graphicalProperties.line.width = 28000
     ch2.series[0].smooth = False
@@ -162,7 +179,7 @@ def build_dashboard(wb, rep):
     ch3 = DoughnutChart()
     ch3.title = "سهم انواع خدمت از کمیسیون خالص"
     ch3.add_data(Reference(rep, min_col=7, min_row=L.REP_B3_FIRST, max_row=L.REP_B3_LAST), titles_from_data=False)
-    ch3.set_categories(Reference(rep, min_col=1, min_row=L.REP_B3_FIRST, max_row=L.REP_B3_LAST))
+    _text_categories(ch3, L.S_REP, "A", L.REP_B3_FIRST, L.REP_B3_LAST, [s_[0] for s_ in C.SERVICES])
     ch3.height, ch3.width = 8.2, 15.5
     ch3.holeSize = 55
     palette = [T.NAVY, T.BLUE, T.TEAL, T.GOLD, T.OK_FG, T.WARN_FG, T.MUTED, T.BAD_FG]
@@ -183,7 +200,7 @@ def build_dashboard(wb, rep):
     ch4.style = 2
     ch4.title = "تعداد پرونده در برابر کمیسیون خالص (ماهانه)"
     ch4.add_data(Reference(rep, min_col=3, min_row=L.REP_B2_FIRST, max_row=L.REP_B2_LAST), titles_from_data=False)
-    ch4.set_categories(Reference(rep, min_col=2, min_row=L.REP_B2_FIRST, max_row=L.REP_B2_LAST))
+    _text_categories(ch4, L.S_REP, "B", L.REP_B2_FIRST, L.REP_B2_LAST, MONTH_NAMES)
     ch4.series[0].graphicalProperties.solidFill = T.ACCENT
     ch4.series[0].graphicalProperties.line.solidFill = T.BLUE
     ch4.y_axis.title = "تعداد پرونده"
@@ -204,6 +221,12 @@ def build_dashboard(wb, rep):
     ch4l.y_axis.crosses = "max"
     ch4l.legend = None
     ch4 += ch4l
+    line_cat = AxDataSource(strRef=StrRef(
+        f=f"'{L.S_REP}'!$B${L.REP_B2_FIRST}:$B${L.REP_B2_LAST}",
+        strCache=StrData(ptCount=len(MONTH_NAMES),
+                         pt=[StrVal(idx=i, v=v) for i, v in enumerate(MONTH_NAMES)])))
+    for srs in ch4._charts[1].series:
+        srs.cat = line_cat
     ch4.height, ch4.width = 8.2, 15.5
     ws.add_chart(ch4, f"I{cr + 17}")
 
