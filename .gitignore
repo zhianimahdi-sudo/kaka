@@ -8,3 +8,6 @@ __pycache__/
 /tmp_reports/
 *.tmp.xlsx
 ~$*.xlsx
+
+# خروجی‌های آزمون ابزار شناخت
+reports/
