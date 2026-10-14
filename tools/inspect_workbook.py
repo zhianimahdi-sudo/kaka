@@ -34,51 +34,90 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------- utilities
 
 def _rule_def(rule):
-    """تبدیل یک قاعدهٔ فرمت شرطی به دیکشنری خوانا."""
-    dxf = rule.dxf
+    """
+    تبدیل یک قاعدهٔ فرمت شرطی به دیکشنری خوانا.
+
+    توجه: ساختار داخلی قواعد در نسخه‌های مختلف openpyxl متفاوت است (مثلاً در
+    colorScale رنگ‌ها در فهرست جدا و در dataBar در آبجکت خودش)؛ پس همه‌چیز با
+    getattr خوانده می‌شود تا این ابزار روی هر فایلی بدون خطا کار کند.
+    """
+    dxf = getattr(rule, "dxf", None)
     fmt = {}
-    if dxf is not None:
-        if dxf.font is not None:
+    try:
+        if dxf is not None and getattr(dxf, "font", None) is not None:
             fmt["font"] = {
-                "bold": dxf.font.b,
-                "italic": dxf.font.i,
-                "color": _color(dxf.font.color),
+                "bold": getattr(dxf.font, "b", None),
+                "italic": getattr(dxf.font, "i", None),
+                "color": _color(getattr(dxf.font, "color", None)),
             }
-        if dxf.fill is not None and dxf.fill.fgColor is not None:
-            fmt["fill"] = _color(dxf.fill.fgColor)
-        if dxf.border is not None:
+        if dxf is not None and getattr(dxf, "fill", None) is not None:
+            fmt["fill"] = _color(getattr(dxf.fill, "fgColor", None))
+        if dxf is not None and getattr(dxf, "border", None) is not None:
             edges = {}
             for side in ("left", "right", "top", "bottom"):
                 s = getattr(dxf.border, side, None)
-                if s is not None and s.style:
+                if s is not None and getattr(s, "style", None):
                     edges[side] = s.style
             if edges:
                 fmt["border"] = edges
+    except Exception as exc:  # pragma: no cover
+        fmt["error"] = f"{type(exc).__name__}: {exc}"
+
     data = {
-        "type": rule.type,
-        "operator": rule.operator,
-        "formula": list(rule.formula) if rule.formula else None,
-        "text": rule.text if rule.type == "containsText" else None,
-        "rank": rule.rank,
-        "percent": rule.percent,
-        "stopIfTrue": rule.stopIfTrue,
-        "priority": rule.priority,
+        "type": getattr(rule, "type", None),
+        "operator": getattr(rule, "operator", None),
+        "formula": list(rule.formula) if getattr(rule, "formula", None) else None,
+        "text": getattr(rule, "text", None) if getattr(rule, "type", None) == "containsText" else None,
+        "rank": getattr(rule, "rank", None),
+        "percent": getattr(rule, "percent", None),
+        "aboveAverage": getattr(rule, "aboveAverage", None),
+        "stopIfTrue": getattr(rule, "stopIfTrue", None),
+        "priority": getattr(rule, "priority", None),
         "format": fmt or None,
     }
-    if rule.type == "dataBar":
-        data["dataBar"] = {
-            "color": _color(rule.dataBar.color) if rule.dataBar else None,
-            "minLength": getattr(rule.dataBar, "minLength", None),
-            "maxLength": getattr(rule.dataBar, "maxLength", None),
-        }
-    if rule.type == "colorScale":
-        data["colorScale"] = (
-            [{"type": p.type, "value": p.val, "color": _color(p.color)} for p in rule.colorScale.cfvo]
-            if rule.colorScale
-            else None
-        )
-    if rule.type == "iconSet":
-        data["iconSet"] = rule.iconSet.iconSet if rule.iconSet else None
+
+    rtype = getattr(rule, "type", None)
+    try:
+        if rtype == "dataBar":
+            db = getattr(rule, "dataBar", None)
+            data["dataBar"] = {
+                "color": _color(getattr(db, "color", None)),
+                "showValue": getattr(db, "showValue", None),
+                "minLength": getattr(db, "minLength", None),
+                "maxLength": getattr(db, "maxLength", None),
+                "points": [
+                    {"type": getattr(p, "type", None), "value": getattr(p, "val", None)}
+                    for p in (getattr(db, "cfvo", None) or [])
+                ],
+            }
+        if rtype == "colorScale":
+            cs = getattr(rule, "colorScale", None)
+            colors = [getattr(c, "rgb", None) or _color(c) for c in (getattr(cs, "color", None) or [])]
+            points = list(getattr(cs, "cfvo", None) or [])
+            data["colorScale"] = [
+                {
+                    "type": getattr(p, "type", None),
+                    "value": getattr(p, "val", None),
+                    "color": colors[i] if i < len(colors) else None,
+                }
+                for i, p in enumerate(points)
+            ] or None
+        if rtype == "iconSet":
+            ic = getattr(rule, "iconSet", None)
+            data["iconSet"] = {
+                "style": getattr(ic, "iconSet", None),
+                "reverse": getattr(ic, "reverse", None),
+                "showValue": getattr(ic, "showValue", None),
+                "thresholds": [
+                    {"type": getattr(p, "type", None), "value": getattr(p, "val", None)}
+                    for p in (getattr(ic, "cfvo", None) or [])
+                ],
+            }
+        if rtype in ("containsText", "notContainsText", "beginsWith", "endsWith"):
+            data["text"] = getattr(rule, "text", None)
+    except Exception as exc:  # pragma: no cover
+        data["detail_error"] = f"{type(exc).__name__}: {exc}"
+
     return {k: v for k, v in data.items() if v is not None}
 
 
