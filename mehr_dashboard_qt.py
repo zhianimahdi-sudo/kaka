@@ -30,6 +30,7 @@ import html as html_module
 import json
 import math
 import os
+import re
 import sys
 import traceback
 from collections import Counter
@@ -45,19 +46,24 @@ try:
     from PyQt5.QtCore import (
         QAbstractTableModel,
         QByteArray,
+        QEasingCurve,
         QModelIndex,
+        QPoint,
         QPointF,
         QRectF,
         QSize,
+        QPropertyAnimation,
         QThread,
         Qt,
         QTimer,
         QUrl,
+        pyqtProperty,
         pyqtSignal,
     )
     from PyQt5.QtGui import (
         QBrush,
         QColor,
+        QConicalGradient,
         QDesktopServices,
         QFont,
         QFontDatabase,
@@ -73,23 +79,15 @@ try:
     )
     from PyQt5.QtWidgets import (
         QAbstractItemView,
-        QAction,
         QApplication,
-        QButtonGroup,
-        QCheckBox,
-        QComboBox,
+            QCheckBox,
         QDialog,
-        QDialogButtonBox,
-        QDockWidget,
         QFileDialog,
-        QFormLayout,
-        QFrame,
+            QFrame,
         QGridLayout,
-        QGroupBox,
         QHBoxLayout,
         QHeaderView,
         QLabel,
-        QLayout,
         QLineEdit,
         QListWidget,
         QListWidgetItem,
@@ -97,8 +95,7 @@ try:
         QMenu,
         QMessageBox,
         QPlainTextEdit,
-        QProgressBar,
-        QPushButton,
+            QPushButton,
         QScrollArea,
         QShortcut,
         QSizePolicy,
@@ -111,7 +108,6 @@ try:
         QStyleFactory,
         QTableView,
         QTextBrowser,
-        QToolButton,
         QVBoxLayout,
         QWidget,
     )
@@ -188,15 +184,15 @@ FILTER_CHOICES: List[Tuple[str, str]] = [
 # رنگ نمودارها، مطابق پالت نسخهٔ وب
 CHART_COLORS: Dict[str, List[str]] = {
     "type": [
-        "#0d6b63", "#1f8a7e", "#39a99a", "#6ec7b8", "#a7ded4",
-        "#f0b45a", "#d98e5f", "#b06a6a", "#7b8fa8", "#9a8ab5",
+        "#0E7A6A", "#18A492", "#3FBFAA", "#7FD8C8", "#B4E8DE",
+        "#C58A2E", "#E0A94A", "#2A63A6", "#7A6BB0", "#9B4A3F",
     ],
-    "status": ["#0f766e", "#2f9e8f", "#6ee7c7", "#a7f3d0", "#d1fae5"],
-    "progress": ["#92400e", "#c96f4a", "#e3a06b", "#f3c98b", "#fbe3c0"],
-    "completion": ["#b45309", "#d97706", "#f59e0b", "#fcd34d"],
+    "status": ["#0E7A6A", "#31C0AA", "#7FD8C8", "#C58A2E", "#9AA8A3"],
+    "progress": ["#BF3B32", "#E0A94A", "#2FA98F", "#0E7A6A", "#2A63A6"],
+    "completion": ["#BF3B32", "#E0A94A", "#2FA98F", "#0E7A6A"],
     "annex": [
-        "#8b5cf6", "#10b981", "#0ea5e9", "#f59e0b",
-        "#ef4444", "#ec4899", "#6366f1", "#14b8a6",
+        "#7A6BB0", "#167E5C", "#2A63A6", "#C58A2E",
+        "#BF3B32", "#B06A8E", "#4C6EA8", "#18A492",
     ],
 }
 
@@ -1133,79 +1129,137 @@ def empty_dashboard(message: str = "") -> DashboardData:
     )
 
 
+
+# ==========================================================================
+# سیستم طراحی (رنگ، قلم و استایل)
+# ==========================================================================
 # ---------------------------------------------------------------------------
-# پوسته و رنگ‌ها
+# سیستم طراحی (رنگ‌ها، فاصله‌ها، قلم و استایل)
 # ---------------------------------------------------------------------------
 THEMES: Dict[str, Dict[str, str]] = {
     "light": {
-        "bg": "#eef2f0",
-        "surface": "#ffffff",
-        "surface_alt": "#f6faf8",
-        "surface_soft": "#e8f0ed",
-        "border": "#d9e2df",
-        "border_soft": "#e7eeeb",
-        "text": "#1b2724",
-        "text_muted": "#66756f",
-        "primary": "#0d6b63",
-        "primary_dark": "#0a504a",
-        "primary_soft": "#dcefe9",
-        "accent": "#14b8a6",
-        "sidebar": "#173a34",
-        "sidebar_alt": "#1e4841",
-        "sidebar_text": "#e6f4ef",
-        "sidebar_muted": "#9ec9bd",
-        "danger": "#b91c1c",
-        "danger_soft": "#fde8e8",
-        "warning": "#b45309",
-        "warning_soft": "#fdf0d8",
-        "success": "#0f766e",
-        "success_soft": "#dcf5ec",
-        "info": "#0e7490",
-        "info_soft": "#dceff5",
-        "header": "#ffffff",
-        "shadow": "#9fb4ad",
-        "row_alt": "#f7fbfa",
-        "selection": "#d6ebe5",
-        "chart_grid": "#dfe8e5",
+        "name": "روشن",
+        "bg": "#F1F5F4",
+        "bg_2": "#E8F0EE",
+        "surface": "#FFFFFF",
+        "surface_2": "#F7FAF9",
+        "surface_3": "#EDF3F1",
+        "surface_inv": "#0E1F1B",
+        "border": "#E2EAE8",
+        "border_soft": "#EDF2F0",
+        "ink": "#0F1F1B",
+        "ink_2": "#42564F",
+        "ink_3": "#7A8C86",
+        "brand": "#0E7A6A",
+        "brand_2": "#18A492",
+        "brand_deep": "#0A5A4F",
+        "brand_soft": "#E1F2EE",
+        "brand_tint": "#F0F8F6",
+        "on_brand": "#FFFFFF",
+        "accent": "#C58A2E",
+        "accent_2": "#E3AD55",
+        "accent_soft": "#FBF1DE",
+        "danger": "#BF3B32",
+        "danger_soft": "#FBEAE8",
+        "warning": "#AE6813",
+        "warning_soft": "#FCF1DF",
+        "success": "#167E5C",
+        "success_soft": "#E3F4EB",
+        "info": "#2A63A6",
+        "info_soft": "#E8F0FA",
+        "selection": "#DCEFEC",
+        "row_alt": "#FAFCFB",
+        "chart_grid": "#E6EDEB",
+        "shadow": "#0B2A23",
+        "rail": "#0E211C",
+        "rail_2": "#13291F",
+        "rail_ink": "#DCEBE6",
+        "rail_muted": "#7E9C93",
+        "rail_active": "#1C3B33",
+        "scrim": "rgba(6, 20, 17, 0.45)",
+        "hero_1": "#0C5F52",
+        "hero_2": "#0E7A6A",
+        "hero_3": "#12A08C",
+        "hero_ink": "#EAFBF6",
+        "hero_muted": "#A8D8CD",
+        "paper": "#FFFFFF",
     },
     "dark": {
-        "bg": "#0f1614",
-        "surface": "#16211e",
-        "surface_alt": "#1a2723",
-        "surface_soft": "#1f312c",
-        "border": "#2a3b36",
-        "border_soft": "#233430",
-        "text": "#e9f2ef",
-        "text_muted": "#9db2ab",
-        "primary": "#2bb3a1",
-        "primary_dark": "#1d8a7c",
-        "primary_soft": "#1b3c36",
-        "accent": "#5eead4",
-        "sidebar": "#0b1412",
-        "sidebar_alt": "#13211e",
-        "sidebar_text": "#e3f2ee",
-        "sidebar_muted": "#8fb5ab",
-        "danger": "#f87171",
-        "danger_soft": "#3a1d1d",
-        "warning": "#fbbf24",
-        "warning_soft": "#3a2e17",
-        "success": "#34d399",
-        "success_soft": "#17352c",
-        "info": "#38bdf8",
-        "info_soft": "#15313d",
-        "header": "#10201c",
+        "name": "تیره",
+        "bg": "#0A1210",
+        "bg_2": "#0D1A16",
+        "surface": "#111C19",
+        "surface_2": "#16241F",
+        "surface_3": "#1B2D27",
+        "surface_inv": "#EAF3EF",
+        "border": "#253832",
+        "border_soft": "#1B2B26",
+        "ink": "#EAF3EF",
+        "ink_2": "#B4C6C0",
+        "ink_3": "#83988F",
+        "brand": "#31C0AA",
+        "brand_2": "#5BDCC6",
+        "brand_deep": "#1B8C7C",
+        "brand_soft": "#15342D",
+        "brand_tint": "#122620",
+        "on_brand": "#04211C",
+        "accent": "#E0A94A",
+        "accent_2": "#F2C777",
+        "accent_soft": "#33280F",
+        "danger": "#F0796E",
+        "danger_soft": "#3A1E1B",
+        "warning": "#E9B45B",
+        "warning_soft": "#392C16",
+        "success": "#4BD3A3",
+        "success_soft": "#133227",
+        "info": "#7FB6F0",
+        "info_soft": "#152B42",
+        "selection": "#1C3F38",
+        "row_alt": "#14211D",
+        "chart_grid": "#22332E",
         "shadow": "#000000",
-        "row_alt": "#182420",
-        "selection": "#1f4a42",
-        "chart_grid": "#263632",
+        "rail": "#070E0C",
+        "rail_2": "#0C1714",
+        "rail_ink": "#DDEBE6",
+        "rail_muted": "#769389",
+        "rail_active": "#16302A",
+        "scrim": "rgba(0, 0, 0, 0.58)",
+        "hero_1": "#0B3A32",
+        "hero_2": "#0D5346",
+        "hero_3": "#127A68",
+        "hero_ink": "#EAFBF6",
+        "hero_muted": "#9CCFC3",
+        "paper": "#0F1A17",
     },
 }
+
+# کلیدهای سازگاری با کدهای قدیمی (مدل جدول، دیالوگ‌ها و…)
+_LEGACY_ALIASES = {
+    "text": "ink",
+    "text_muted": "ink_3",
+    "primary": "brand",
+    "primary_dark": "brand_deep",
+    "primary_soft": "brand_soft",
+    "surface_alt": "surface_2",
+    "surface_soft": "surface_3",
+    "sidebar": "rail",
+    "sidebar_alt": "rail_2",
+    "sidebar_text": "rail_ink",
+    "sidebar_muted": "rail_muted",
+    "header": "surface",
+}
+for _theme_colors in THEMES.values():
+    for _legacy_key, _fresh_key in _LEGACY_ALIASES.items():
+        _theme_colors.setdefault(_legacy_key, _theme_colors[_fresh_key])
+
+RADIUS = {"card": 18, "inner": 12, "chip": 9, "button": 12}
+SPACE = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 22, "xxl": 30}
 
 FONT_CANDIDATES = [
     "Vazirmatn",
     "Vazirmatn UI",
-    "IRANSans",
     "IRANSansX",
+    "IRANSans",
     "Sahel",
     "Shabnam",
     "Noto Sans Arabic",
@@ -1213,7 +1267,6 @@ FONT_CANDIDATES = [
     "Tahoma",
     "DejaVu Sans",
 ]
-
 
 _LOADED_FONTS: List[str] = []
 
@@ -1238,646 +1291,1176 @@ def load_custom_fonts() -> List[str]:
 
 def pick_font_family() -> str:
     available = set(QFontDatabase().families())
+    loaded = set(_LOADED_FONTS)
     for name in FONT_CANDIDATES:
-        if name in available:
+        if name in loaded or name in available:
             return name
-    return QApplication.font().family() if QApplication.instance() else "Sans Serif"
+    fallback = QApplication.font().family() if QApplication.instance() else "Sans Serif"
+    return fallback or "Sans Serif"
+
+
+def font_family() -> str:
+    return pick_font_family()
+
+
+def app_font(size: int = 10, weight: int = QFont.Normal) -> QFont:
+    font = QFont(font_family())
+    font.setPointSize(size)
+    font.setWeight(weight)
+    font.setStyleStrategy(QFont.PreferAntialias)
+    font.setHintingPreference(QFont.PreferFullHinting)
+    return font
+
+
+def mix(color_a: str, color_b: str, ratio: float) -> QColor:
+    """ترکیب دو رنگ (ratio=0 یعنی رنگ اول، ratio=1 یعنی رنگ دوم)."""
+    a, b = QColor(color_a), QColor(color_b)
+    ratio = max(0.0, min(1.0, ratio))
+    return QColor(
+        int(a.red() + (b.red() - a.red()) * ratio),
+        int(a.green() + (b.green() - a.green()) * ratio),
+        int(a.blue() + (b.blue() - a.blue()) * ratio),
+    )
+
+
+def alpha(color: str, value: int) -> QColor:
+    c = QColor(color)
+    c.setAlpha(max(0, min(255, value)))
+    return c
+
+
+
+
+_RANGE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[٪%]?\s*[-–—]\s*(\d+(?:\.\d+)?)\s*[٪%]?\s*$")
+_LIMIT_RE = re.compile(r"^\s*(کمتر|بیشتر)\s*از\s*[٪%]?\s*(\d+(?:\.\d+)?)\s*[٪%]?\s*$")
+_SINGLE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[٪%]\s*$")
+
+
+def pretty_label(text: Any) -> str:
+    """نمایش خوانا‌تر برچسب‌های درصدی/بازه‌ای فارسی (فقط برای نمایش، نه فیلتر)."""
+    value = str(text or "").strip()
+    if not value:
+        return value
+    value = value.replace("ي", "ی").replace("ك", "ک").replace("٬", "")
+    normalized = value.translate(_LATIN_DIGITS_FOR_LABELS)
+    match = _RANGE_RE.match(normalized)
+    if match:
+        first, second = float(match.group(1)), float(match.group(2))
+        low, high = sorted((first, second))
+        return f"{fa(fmt_number(low))} تا {fa(fmt_number(high))} درصد"
+    match = _LIMIT_RE.match(normalized)
+    if match:
+        word = "کمتر از" if match.group(1) == "کمتر" else "بیشتر از"
+        return f"{word} {fa(fmt_number(float(match.group(2))))} درصد"
+    match = _SINGLE_RE.match(normalized)
+    if match:
+        return f"{fa(fmt_number(float(match.group(1))))} درصد"
+    return value
+
+
+def fmt_number(value: float) -> str:
+    """عدد اعشاری بدون صفرهای انتهایی (۶۴.۱۲ / ۱۰۰ / ۷.۵)."""
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+_LATIN_DIGITS_FOR_LABELS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 
 def build_stylesheet(c: Dict[str, str], base_size: int = 10) -> str:
-    """ساخت QSS برای کل برنامه بر اساس پالت انتخابی."""
+    family = font_family()
+    primary_gradient = (
+        f"qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {c['brand_2']}, stop:1 {c['brand']})"
+    )
     return f"""
-    * {{ font-family: '{pick_font_family()}'; }}
+    * {{ font-family: '{family}'; }}
     QWidget {{
-        background: {c['bg']};
-        color: {c['text']};
+        color: {c['ink']};
         font-size: {base_size}pt;
+        background: transparent;
     }}
     QMainWindow, QDialog {{ background: {c['bg']}; }}
     QToolTip {{
-        background: {c['surface']};
-        color: {c['text']};
-        border: 1px solid {c['border']};
-        padding: 6px 10px;
-        border-radius: 6px;
-    }}
-    QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
-    QScrollBar:vertical {{
-        background: transparent; width: 10px; margin: 2px;
-    }}
-    QScrollBar::handle:vertical {{
-        background: {c['border']}; min-height: 30px; border-radius: 5px;
-    }}
-    QScrollBar::handle:vertical:hover {{ background: {c['primary']}; }}
-    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
-    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-    QScrollBar::handle:horizontal {{ background: {c['border']}; min-width: 30px; border-radius: 5px; }}
-    QScrollBar::handle:horizontal:hover {{ background: {c['primary']}; }}
-
-    QFrame#Card {{
-        background: {c['surface']};
-        border: 1px solid {c['border']};
-        border-radius: 14px;
-    }}
-    QFrame#HeaderBar {{
-        background: {c['surface']};
-        border-bottom: 1px solid {c['border']};
-    }}
-    QFrame#Sidebar {{
-        background: {c['sidebar']};
+        background: {c['surface_inv']};
+        color: {c['surface']};
         border: none;
-    }}
-    QFrame#Banner {{
-        background: {c['warning_soft']};
-        border: 1px solid {c['warning']};
-        border-radius: 10px;
-    }}
-    QFrame#Banner QLabel {{ color: {c['warning']}; font-weight: 600; }}
-    QFrame#Banner QToolButton#BannerClose {{
-        color: {c['warning']}; background: transparent; border: none;
-        font-size: 15pt; font-weight: 700; padding: 0 6px;
-    }}
-    QFrame#Banner QToolButton#BannerClose:hover {{ color: {c['text']}; }}
-    QPushButton#BannerAction {{
-        background: {c['surface']}; color: {c['warning']};
-        border: 1px solid {c['warning']}; border-radius: 8px;
-        padding: 5px 12px; font-weight: 700;
-    }}
-    QPushButton#BannerAction:hover {{ background: {c['warning']}; color: #ffffff; }}
-    QLabel {{ background: transparent; }}
-    QLabel#Brand {{ color: {c['sidebar_text']}; font-weight: 800; font-size: 13pt; }}
-    QLabel#BrandSub {{ color: {c['sidebar_muted']}; font-size: 8.5pt; }}
-    QLabel#PageTitle {{ font-size: 15pt; font-weight: 800; color: {c['text']}; }}
-    QLabel#SectionTitle {{ font-size: 11.5pt; font-weight: 800; color: {c['text']}; }}
-    QLabel#Muted {{ color: {c['text_muted']}; }}
-    QLabel#CardTitle {{ color: {c['text_muted']}; font-size: 9pt; font-weight: 600; }}
-    QLabel#CardValue {{ color: {c['text']}; font-size: 19pt; font-weight: 800; }}
-    QLabel#Chip {{
-        background: {c['primary_soft']}; color: {c['primary_dark']};
-        border-radius: 9px; padding: 3px 9px; font-size: 8.5pt; font-weight: 700;
+        padding: 6px 10px;
+        border-radius: 8px;
+        font-size: {max(8, base_size - 1)}pt;
     }}
 
+    /* ---------- نوارهای پیمایش ---------- */
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollBar:vertical {{ background: transparent; width: 11px; margin: 4px 2px; }}
+    QScrollBar::handle:vertical {{
+        background: {c['border']}; min-height: 36px; border-radius: 4px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {c['brand']}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{
+        height: 0; width: 0; background: none; border: none;
+    }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px 4px; }}
+    QScrollBar::handle:horizontal {{
+        background: {c['border']}; min-width: 36px; border-radius: 4px;
+    }}
+    QScrollBar::handle:horizontal:hover {{ background: {c['brand']}; }}
+
+    /* ---------- برچسب‌ها ---------- */
+    QLabel {{ background: transparent; }}
+    QLabel#Eyebrow {{
+        color: {c['ink_3']}; font-size: {max(7.5, base_size - 2)}pt; font-weight: 700;
+        letter-spacing: 1px;
+    }}
+    QLabel#PageTitle {{ font-size: {base_size + 7}pt; font-weight: 800; color: {c['ink']}; }}
+    QLabel#PageSubtitle {{ color: {c['ink_3']}; font-size: {base_size}pt; }}
+    QLabel#SectionTitle {{ font-size: {base_size + 2}pt; font-weight: 800; color: {c['ink']}; }}
+    QLabel#CardTitle {{ color: {c['ink_3']}; font-size: {max(8, base_size - 1)}pt; font-weight: 600; }}
+    QLabel#CardValue {{ color: {c['ink']}; }}
+    QLabel#Muted {{ color: {c['ink_3']}; }}
+    QLabel#Subtle {{ color: {c['ink_2']}; }}
+    QLabel#Chip {{
+        background: {c['surface_3']}; color: {c['ink_2']};
+        border-radius: 10px; padding: 5px 12px; font-weight: 700;
+        font-size: {max(8, base_size - 1)}pt;
+    }}
+    QLabel#ChipBrand {{
+        background: {c['brand_soft']}; color: {c['brand_deep']};
+        border-radius: 10px; padding: 5px 12px; font-weight: 700;
+        font-size: {max(8, base_size - 1)}pt;
+    }}
+    QLabel#EmptyTitle {{ font-size: {base_size + 3}pt; font-weight: 800; color: {c['ink']}; }}
+    QLabel#FileName {{ font-weight: 700; color: {c['ink']}; }}
+
+    /* ---------- دکمه‌ها ---------- */
     QPushButton {{
         background: {c['surface']};
         border: 1px solid {c['border']};
-        border-radius: 9px;
-        padding: 7px 14px;
-        color: {c['text']};
-        font-weight: 600;
-    }}
-    QPushButton:hover {{ background: {c['surface_alt']}; border-color: {c['primary']}; }}
-    QPushButton:pressed {{ background: {c['surface_soft']}; }}
-    QPushButton:disabled {{ color: {c['text_muted']}; border-color: {c['border_soft']}; }}
-    QPushButton#Primary {{
-        background: {c['primary']}; color: #ffffff; border: 1px solid {c['primary']};
+        border-radius: {RADIUS['button']}px;
+        padding: 8px 16px;
+        color: {c['ink']};
         font-weight: 700;
+        font-size: {base_size}pt;
     }}
-    QPushButton#Primary:hover {{ background: {c['primary_dark']}; }}
-    QPushButton#Danger {{ color: {c['danger']}; border-color: {c['danger']}; }}
+    QPushButton:hover {{ background: {c['surface_2']}; border-color: {c['brand_2']}; color: {c['brand_deep']}; }}
+    QPushButton:pressed {{ background: {c['surface_3']}; }}
+    QPushButton:disabled {{ color: {c['ink_3']}; border-color: {c['border_soft']}; background: {c['surface_2']}; }}
+    QPushButton#Primary {{
+        background: {primary_gradient};
+        color: {c['on_brand']};
+        border: 1px solid transparent;
+        padding: 9px 18px;
+    }}
+    QPushButton#Primary:hover {{ background: {c['brand_deep']}; color: #FFFFFF; border-color: transparent; }}
+    QPushButton#Ghost {{
+        background: transparent; border: 1px solid transparent; color: {c['ink_2']};
+    }}
+    QPushButton#Ghost:hover {{ background: {c['surface_3']}; color: {c['brand_deep']}; border-color: transparent; }}
+    QPushButton#Danger {{ color: {c['danger']}; border-color: {alpha(c['danger'], 90).name(QColor.HexArgb)}; background: transparent; }}
     QPushButton#Danger:hover {{ background: {c['danger_soft']}; }}
-    QPushButton#NavButton {{
-        background: transparent; border: none; color: {c['sidebar_text']};
-        text-align: right; padding: 10px 14px; border-radius: 9px;
-        font-weight: 600; font-size: 10pt;
+    QPushButton#OnHero {{
+        background: rgba(255,255,255,0.16);
+        color: {c['hero_ink']};
+        border: 1px solid rgba(255,255,255,0.30);
+        padding: 9px 16px;
     }}
-    QPushButton#NavButton:hover {{ background: {c['sidebar_alt']}; }}
-    QPushButton#NavButton:checked {{
-        background: {c['sidebar_alt']}; color: #ffffff;
-        border-right: 3px solid {c['accent']}; border-radius: 6px;
+    QPushButton#OnHero:hover {{ background: rgba(255,255,255,0.28); color: #FFFFFF; }}
+    QPushButton#OnHeroSolid {{
+        background: #FFFFFF; color: {c['brand_deep']}; border: 1px solid #FFFFFF; padding: 9px 18px;
     }}
-    QPushButton#NavSection {{
-        background: transparent; border: none; color: {c['sidebar_muted']};
-        text-align: right; padding: 4px 14px; font-size: 8pt; font-weight: 700;
-        letter-spacing: 1px;
+    QPushButton#OnHeroSolid:hover {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
+    QPushButton#Chip {{
+        background: {c['surface']}; border: 1px solid {c['border']};
+        border-radius: 13px; padding: 6px 14px; font-weight: 600;
+        font-size: {max(8, base_size - 1)}pt; color: {c['ink_2']};
     }}
-    QPushButton#ToolButton {{ padding: 6px 10px; border-radius: 8px; }}
+    QPushButton#Chip:hover {{ border-color: {c['brand_2']}; color: {c['brand_deep']}; }}
+    QPushButton#Chip:checked {{
+        background: {c['brand_soft']}; border-color: {c['brand_2']};
+        color: {c['brand_deep']}; font-weight: 800;
+    }}
 
-    QLineEdit, QComboBox, QDateEdit, QPlainTextEdit, QTextEdit, QTextBrowser {{
+    /* ---------- ریل کنار (ناوبری) ---------- */
+    QPushButton#RailButton {{
+        background: transparent; border: none; color: {c['rail_muted']};
+        border-radius: 14px; padding: 8px 4px; font-weight: 600;
+        font-size: {max(7.5, base_size - 2)}pt;
+    }}
+    QPushButton#RailButton:hover {{ background: rgba(255,255,255,0.07); color: {c['rail_ink']}; }}
+    QPushButton#RailButton:checked {{
+        background: {c['rail_active']}; color: {c['rail_ink']};
+        font-weight: 800;
+    }}
+    QPushButton#RailUtility {{
+        background: transparent; border: none; border-radius: 12px; padding: 6px;
+    }}
+    QPushButton#RailUtility:hover {{ background: rgba(255,255,255,0.08); }}
+
+    /* ---------- ورودی‌ها ---------- */
+    QLineEdit, QDateEdit {{
         background: {c['surface']};
         border: 1px solid {c['border']};
-        border-radius: 9px;
-        padding: 6px 10px;
-        selection-background-color: {c['primary']};
-        selection-color: #ffffff;
+        border-radius: {RADIUS['button']}px;
+        padding: 8px 12px;
+        color: {c['ink']};
+        selection-background-color: {c['brand']};
+        selection-color: #FFFFFF;
     }}
-    QLineEdit:focus, QComboBox:focus, QDateEdit:focus,
-    QPlainTextEdit:focus, QTextEdit:focus {{
-        border: 1px solid {c['primary']};
-    }}
-    /* QSpinBox عمداً استایل نمی‌شود تا دکمه‌های بومی بال/پایین دیده شوند */
-    QSpinBox {{
-        padding: 4px 8px; font-size: {base_size}pt;
-        selection-background-color: {c['primary']}; selection-color: #ffffff;
-    }}
+    QLineEdit:focus, QDateEdit:focus {{ border: 1px solid {c['brand_2']}; }}
     QLineEdit#Search {{
-        border-radius: 18px; padding: 8px 16px; background: {c['surface_alt']};
+        background: {c['surface']};
+        border: 1px solid {c['border']};
+        border-radius: 16px;
+        padding: 8px 14px 8px 14px;
+        font-size: {base_size}pt;
     }}
-    QComboBox {{ padding: 6px 10px 6px 30px; min-height: 22px; }}
-    QSpinBox {{ padding: 6px 10px; }}
-    QCheckBox {{ spacing: 8px; }}
-    QGroupBox {{
+    QLineEdit#Search:focus {{ border: 1px solid {c['brand_2']}; background: {c['surface']}; }}
+    QPlainTextEdit, QTextEdit, QTextBrowser {{
+        background: {c['surface']};
+        border: 1px solid {c['border']};
+        border-radius: {RADIUS['inner']}px;
+        padding: 10px 12px;
+        color: {c['ink']};
+        selection-background-color: {c['brand']};
+        selection-color: #FFFFFF;
+    }}
+    QPlainTextEdit:focus, QTextEdit:focus {{ border: 1px solid {c['brand_2']}; }}
+    QComboBox {{
+        background: {c['surface']};
+        border: 1px solid {c['border']};
+        border-radius: {RADIUS['button']}px;
+        padding: 8px 12px 8px 32px;
+        color: {c['ink']};
+        min-height: 20px;
+    }}
+    QComboBox:hover {{ border-color: {c['brand_2']}; }}
+    QComboBox QAbstractItemView {{
         background: {c['surface']}; border: 1px solid {c['border']};
-        border-radius: 12px; margin-top: 16px; padding: 14px 12px 12px 12px;
-        font-weight: 700;
+        border-radius: 10px; padding: 4px;
+        selection-background-color: {c['brand_soft']};
+        selection-color: {c['brand_deep']};
+        outline: none;
+    }}
+    /* عددشمار سفارشی */
+    QPushButton#Stepper {{
+        background: {c['surface_3']}; border: none; border-radius: 8px;
+        padding: 0; color: {c['ink_2']}; font-weight: 800; font-size: 12pt;
+        min-width: 26px; min-height: 26px; max-width: 26px; max-height: 26px;
+    }}
+    QPushButton#Stepper:hover {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
+    QPushButton#Stepper:pressed {{ background: {c['brand_soft']}; }}
+    QPushButton#Stepper:disabled {{ color: {c['ink_3']}; background: {c['surface_2']}; }}
+    QCheckBox {{ spacing: 8px; color: {c['ink_2']}; }}
+    QGroupBox {{
+        background: transparent; border: 1px solid {c['border']};
+        border-radius: {RADIUS['card']}px; margin-top: 18px; padding: 18px 14px 14px 14px;
+        font-weight: 800; color: {c['ink']};
     }}
     QGroupBox::title {{
         subcontrol-origin: margin; subcontrol-position: top right;
-        margin-right: 14px; padding: 0 6px; color: {c['primary']};
+        margin-right: 16px; padding: 0 8px; color: {c['brand_deep']};
     }}
 
+    /* ---------- جدول ---------- */
     QTableView {{
-        background: {c['surface']};
+        background: transparent;
         alternate-background-color: {c['row_alt']};
-        border: 1px solid {c['border']};
-        border-radius: 12px;
-        gridline-color: {c['border_soft']};
+        border: none;
+        gridline-color: transparent;
         selection-background-color: {c['selection']};
-        selection-color: {c['text']};
+        selection-color: {c['ink']};
         outline: none;
     }}
-    QTableView::item {{ padding: 4px 8px; border: none; }}
+    QTableView::item {{ border: none; padding: 0; }}
+    QHeaderView {{ background: transparent; border: none; }}
     QHeaderView::section {{
-        background: {c['surface_alt']};
-        color: {c['text_muted']};
+        background: {c['surface_2']};
+        color: {c['ink_3']};
         border: none;
         border-bottom: 1px solid {c['border']};
-        border-left: 1px solid {c['border_soft']};
-        padding: 9px 8px;
+        padding: 10px 10px;
         font-weight: 700;
-        font-size: 9pt;
+        font-size: {max(8, base_size - 1)}pt;
     }}
-    QTableCornerButton::section {{ background: {c['surface_alt']}; border: none; }}
+    QHeaderView::section:hover {{ color: {c['brand_deep']}; background: {c['brand_tint']}; }}
+    QTableCornerButton::section {{ background: {c['surface_2']}; border: none; }}
 
-    QTabWidget::pane {{
-        border: 1px solid {c['border']}; border-radius: 12px; background: {c['surface']};
-        top: -1px;
-    }}
-    QTabBar::tab {{
-        background: transparent; color: {c['text_muted']};
-        padding: 8px 16px; margin-left: 2px; border-radius: 8px;
-        font-weight: 600;
-    }}
-    QTabBar::tab:selected {{ background: {c['primary_soft']}; color: {c['primary_dark']}; }}
-    QTabBar::tab:hover {{ color: {c['primary']}; }}
-
-    QListWidget {{
-        background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 10px;
-        outline: none;
-    }}
-    QListWidget::item {{ padding: 8px 10px; border-radius: 8px; }}
-    QListWidget::item:selected {{ background: {c['primary_soft']}; color: {c['text']}; }}
-    QListWidget::item:hover {{ background: {c['surface_alt']}; }}
-
-    QDockWidget {{ color: {c['text']}; titlebar-close-icon: none; }}
-    QDockWidget::title {{
-        background: {c['surface_alt']}; padding: 8px 12px; font-weight: 700;
-        border-bottom: 1px solid {c['border']};
-    }}
-    QStatusBar {{ background: {c['surface']}; border-top: 1px solid {c['border']}; }}
-    QStatusBar QLabel {{ color: {c['text_muted']}; padding: 0 8px; }}
-    QProgressBar {{
-        background: {c['surface_soft']}; border: none; border-radius: 5px;
-        height: 10px; text-align: center; color: transparent;
-    }}
-    QProgressBar::chunk {{ background: {c['primary']}; border-radius: 5px; }}
+    /* ---------- منوها ---------- */
     QMenuBar {{
-        background: {c['surface']}; color: {c['text']}; padding: 2px 8px;
-        border-bottom: 1px solid {c['border_soft']};
+        background: {c['surface']}; color: {c['ink_2']};
+        padding: 2px 10px; border-bottom: 1px solid {c['border_soft']};
     }}
-    QMenuBar::item {{ padding: 4px 10px; border-radius: 6px; }}
-    QMenuBar::item:selected {{ background: {c['primary_soft']}; color: {c['primary_dark']}; }}
+    QMenuBar::item {{ padding: 5px 12px; border-radius: 8px; }}
+    QMenuBar::item:selected {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
     QMenu {{
-        background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 8px; padding: 5px;
+        background: {c['surface']}; border: 1px solid {c['border']};
+        border-radius: 12px; padding: 6px;
     }}
-    QMenu::item {{ padding: 7px 24px 7px 16px; border-radius: 6px; }}
-    QMenu::item:selected {{ background: {c['primary_soft']}; }}
-    QSplitter::handle {{ background: {c['border_soft']}; }}
+    QMenu::item {{ padding: 8px 28px 8px 18px; border-radius: 8px; color: {c['ink']}; }}
+    QMenu::item:selected {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
+    QMenu::separator {{ height: 1px; background: {c['border_soft']}; margin: 5px 8px; }}
+
+    /* ---------- متفرقه ---------- */
+    QListWidget {{
+        background: transparent; border: none; outline: none;
+    }}
+    QListWidget::item {{ padding: 10px 8px; border-radius: 10px; color: {c['ink_2']}; }}
+    QListWidget::item:selected {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
+    QListWidget::item:hover {{ background: {c['surface_3']}; }}
+    QStatusBar {{ background: {c['surface']}; border-top: 1px solid {c['border_soft']}; }}
+    QStatusBar QLabel {{ color: {c['ink_3']}; padding: 0 10px; font-size: {max(8, base_size - 1)}pt; }}
+    QProgressBar {{
+        background: {c['border_soft']}; border: none; border-radius: 4px;
+        height: 8px; text-align: center; color: transparent;
+    }}
+    QProgressBar::chunk {{ background: {primary_gradient}; border-radius: 4px; }}
+    QToolButton {{
+        background: transparent; border: 1px solid {c['border']};
+        border-radius: 10px; padding: 6px 12px; color: {c['ink_2']}; font-weight: 600;
+    }}
+    QToolButton:hover {{ background: {c['surface_2']}; border-color: {c['brand_2']}; color: {c['brand_deep']}; }}
+    QToolButton::menu-indicator {{ image: none; width: 0; }}
+    QDialog {{ background: {c['bg']}; }}
     """
 
 
-def apply_theme(app: QApplication, theme: str, base_size: int) -> Dict[str, str]:
+def apply_theme(app: QApplication, theme: str, base_size: int = 10) -> Dict[str, str]:
     colors = THEMES.get(theme, THEMES["light"])
     app.setStyle(QStyleFactory.create("Fusion"))
     app.setLayoutDirection(Qt.RightToLeft)
-    style = build_stylesheet(colors, base_size)
-    app.setStyleSheet(style)
+    app.setFont(app_font(base_size))
+    app.setStyleSheet(build_stylesheet(colors, base_size))
 
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(colors["bg"]))
-    palette.setColor(QPalette.WindowText, QColor(colors["text"]))
+    palette.setColor(QPalette.WindowText, QColor(colors["ink"]))
     palette.setColor(QPalette.Base, QColor(colors["surface"]))
     palette.setColor(QPalette.AlternateBase, QColor(colors["row_alt"]))
-    palette.setColor(QPalette.Text, QColor(colors["text"]))
+    palette.setColor(QPalette.Text, QColor(colors["ink"]))
     palette.setColor(QPalette.Button, QColor(colors["surface"]))
-    palette.setColor(QPalette.ButtonText, QColor(colors["text"]))
-    palette.setColor(QPalette.Highlight, QColor(colors["primary"]))
-    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ToolTipBase, QColor(colors["surface"]))
-    palette.setColor(QPalette.ToolTipText, QColor(colors["text"]))
+    palette.setColor(QPalette.ButtonText, QColor(colors["ink"]))
+    palette.setColor(QPalette.Highlight, QColor(colors["brand"]))
+    palette.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ToolTipBase, QColor(colors["surface_inv"]))
+    palette.setColor(QPalette.ToolTipText, QColor(colors["surface"]))
+    palette.setColor(QPalette.PlaceholderText, QColor(colors["ink_3"]))
     app.setPalette(palette)
     return colors
 
 
-# ---------------------------------------------------------------------------
-# آیکون‌های برداری سبک (بدون فایل تصویری)
-# ---------------------------------------------------------------------------
-def draw_icon(painter: QPainter, kind: str, rect: QRectF, color: QColor) -> None:
-    """رسم آیکون‌های سادهٔ برداری؛ مستقل از فونت و فایل‌های تصویری."""
-    painter.save()
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    pen_width = max(1.4, rect.width() * 0.085)
-    pen = QPen(color, pen_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(Qt.NoBrush)
-    r = rect.adjusted(pen_width, pen_width, -pen_width, -pen_width)
-    cx, cy = r.center().x(), r.center().y()
-    w, h = r.width(), r.height()
 
-    if kind == "document":
+# ==========================================================================
+# ویجت‌های پایه و آیکون‌ها
+# ==========================================================================
+
+# ---------------------------------------------------------------------------
+# آیکون‌های برداری (سبک خطی، بدون فایل تصویری)
+# ---------------------------------------------------------------------------
+def _icon_paths(kind: str, painter: QPainter) -> None:
+    """رسم آیکون در شبکهٔ ۲۴×۲۴ (قلم و مقیاس قبلاً تنظیم شده است)."""
+    pen_round = QPen(painter.pen())
+    pen_round.setCapStyle(Qt.RoundCap)
+    pen_round.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen_round)
+
+    def rect(x, y, w, h, r=2.0):
+        painter.drawRoundedRect(QRectF(x, y, w, h), r, r)
+
+    def line(x1, y1, x2, y2):
+        painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    def poly(points, close=False):
         path = QPainterPath()
-        path.moveTo(r.left() + w * 0.18, r.top())
-        path.lineTo(r.left() + w * 0.66, r.top())
-        path.lineTo(r.right(), r.top() + h * 0.26)
-        path.lineTo(r.right(), r.bottom())
-        path.lineTo(r.left() + w * 0.18, r.bottom())
-        path.closeSubpath()
+        path.moveTo(*points[0])
+        for point in points[1:]:
+            path.lineTo(*point)
+        if close:
+            path.closeSubpath()
         painter.drawPath(path)
-        painter.drawLine(QPointF(r.left() + w * 0.34, r.top() + h * 0.45),
-                         QPointF(r.left() + w * 0.82, r.top() + h * 0.45))
-        painter.drawLine(QPointF(r.left() + w * 0.34, r.top() + h * 0.65),
-                         QPointF(r.left() + w * 0.82, r.top() + h * 0.65))
-    elif kind == "scissors":
-        painter.drawEllipse(QPointF(r.left() + w * 0.26, r.bottom() - h * 0.16), w * 0.15, h * 0.15)
-        painter.drawEllipse(QPointF(r.left() + w * 0.74, r.bottom() - h * 0.16), w * 0.15, h * 0.15)
-        painter.drawLine(QPointF(r.left() + w * 0.36, r.bottom() - h * 0.28),
-                         QPointF(r.right() - w * 0.1, r.top()))
-        painter.drawLine(QPointF(r.right() - w * 0.1, r.top()),
-                         QPointF(r.left() + w * 0.64, r.bottom() - h * 0.28))
-    elif kind == "shield":
+
+    if kind == "dashboard":
+        rect(3, 3, 7.4, 8.2, 2)
+        rect(13.6, 3, 7.4, 5.4, 2)
+        rect(13.6, 11.4, 7.4, 9.6, 2)
+        rect(3, 14.2, 7.4, 6.8, 2)
+    elif kind == "table":
+        rect(3, 4.2, 18, 15.6, 2.6)
+        line(3, 9.4, 21, 9.4)
+        line(3, 14.6, 21, 14.6)
+        line(9.2, 4.2, 9.2, 19.8)
+    elif kind == "report":
+        poly([(6, 2.8), (14, 2.8), (19, 7.8), (19, 21.2), (6, 21.2)], True)
+        poly([(14, 2.8), (14, 7.8), (19, 7.8)])
+        line(9, 12.4, 16, 12.4)
+        line(9, 16.4, 16, 16.4)
+    elif kind == "pdf":
+        poly([(6, 2.8), (14, 2.8), (19, 7.8), (19, 21.2), (6, 21.2)], True)
+        poly([(14, 2.8), (14, 7.8), (19, 7.8)])
+    elif kind == "settings":
+        painter.drawEllipse(QPointF(12, 12), 3.1, 3.1)
+        for index in range(8):
+            angle = index * math.pi / 4
+            line(12 + 5.6 * math.cos(angle), 12 + 5.6 * math.sin(angle),
+                 12 + 8.2 * math.cos(angle), 12 + 8.2 * math.sin(angle))
+        painter.drawEllipse(QPointF(12, 12), 7.4, 7.4)
+    elif kind == "help":
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
         path = QPainterPath()
-        path.moveTo(cx, r.top())
-        path.lineTo(r.right() - w * 0.08, r.top() + h * 0.16)
-        path.lineTo(r.right() - w * 0.14, r.top() + h * 0.62)
-        path.quadTo(cx, r.bottom(), r.left() + w * 0.14, r.top() + h * 0.62)
-        path.lineTo(r.left() + w * 0.08, r.top() + h * 0.16)
-        path.closeSubpath()
+        path.moveTo(9.4, 9.4)
+        path.quadTo(9.4, 6.8, 12, 6.8)
+        path.quadTo(14.8, 6.8, 14.8, 9.2)
+        path.quadTo(14.8, 11.4, 12, 12.2)
+        path.lineTo(12, 14.2)
         painter.drawPath(path)
-        painter.drawLine(QPointF(cx - w * 0.16, cy + h * 0.02), QPointF(cx - w * 0.03, cy + h * 0.16))
-        painter.drawLine(QPointF(cx - w * 0.03, cy + h * 0.16), QPointF(cx + w * 0.18, cy - h * 0.14))
-    elif kind == "cube":
-        top = QPainterPath()
-        top.moveTo(cx, r.top())
-        top.lineTo(r.right(), r.top() + h * 0.26)
-        top.lineTo(cx, r.top() + h * 0.52)
-        top.lineTo(r.left(), r.top() + h * 0.26)
-        top.closeSubpath()
-        painter.drawPath(top)
-        painter.drawLine(QPointF(r.left(), r.top() + h * 0.26), QPointF(r.left(), r.bottom() - h * 0.2))
-        painter.drawLine(QPointF(r.right(), r.top() + h * 0.26), QPointF(r.right(), r.bottom() - h * 0.2))
-        painter.drawLine(QPointF(r.left(), r.bottom() - h * 0.2), QPointF(cx, r.bottom()))
-        painter.drawLine(QPointF(r.right(), r.bottom() - h * 0.2), QPointF(cx, r.bottom()))
-        painter.drawLine(QPointF(cx, r.top() + h * 0.52), QPointF(cx, r.bottom()))
-    elif kind == "truck":
-        body = QRectF(r.left(), r.top() + h * 0.24, w * 0.58, h * 0.42)
-        painter.drawRect(body)
-        cab = QPainterPath()
-        cab.moveTo(body.right(), body.top() + h * 0.1)
-        cab.lineTo(r.right() - w * 0.06, body.top() + h * 0.1)
-        cab.lineTo(r.right(), body.bottom())
-        cab.lineTo(body.right(), body.bottom())
-        cab.closeSubpath()
-        painter.drawPath(cab)
-        painter.drawEllipse(QPointF(r.left() + w * 0.22, r.bottom() - h * 0.12), w * 0.11, h * 0.11)
-        painter.drawEllipse(QPointF(r.right() - w * 0.2, r.bottom() - h * 0.12), w * 0.11, h * 0.11)
+        painter.drawPoint(QPointF(12, 17.2))
+    elif kind == "search":
+        painter.drawEllipse(QPointF(11, 11), 6.2, 6.2)
+        line(15.6, 15.6, 20.4, 20.4)
+    elif kind == "refresh":
+        painter.drawArc(QRectF(3.8, 3.8, 16.4, 16.4), 40 * 16, 280 * 16)
+        poly([(20.2, 3.2), (20.2, 8.4), (15.0, 8.4)])
+    elif kind == "download":
+        line(12, 3.4, 12, 15.2)
+        poly([(7.6, 11.0), (12, 15.4), (16.4, 11.0)])
+        poly([(4.4, 15.6), (4.4, 19.4), (19.6, 19.4), (19.6, 15.6)])
+    elif kind == "upload":
+        line(12, 20.6, 12, 8.8)
+        poly([(7.6, 13.0), (12, 8.6), (16.4, 13.0)])
+        poly([(4.4, 4.4), (19.6, 4.4)])
+    elif kind == "sun":
+        painter.drawEllipse(QPointF(12, 12), 4.4, 4.4)
+        for index in range(8):
+            angle = index * math.pi / 4
+            line(12 + 7.0 * math.cos(angle), 12 + 7.0 * math.sin(angle),
+                 12 + 9.4 * math.cos(angle), 12 + 9.4 * math.sin(angle))
+    elif kind == "moon":
+        painter.drawArc(QRectF(4, 2.6, 16, 18.8), 60 * 16, 240 * 16)
+        painter.drawArc(QRectF(8.4, 1.4, 14.4, 17.6), 90 * 16, 180 * 16)
+    elif kind == "close":
+        line(6, 6, 18, 18)
+        line(18, 6, 6, 18)
+    elif kind in ("chevron-down", "chevron-up", "chevron-left", "chevron-right"):
+        if kind == "chevron-down":
+            poly([(6.5, 9.5), (12, 15), (17.5, 9.5)])
+        elif kind == "chevron-up":
+            poly([(6.5, 14.5), (12, 9), (17.5, 14.5)])
+        elif kind == "chevron-left":
+            poly([(14.5, 6.5), (9, 12), (14.5, 17.5)])
+        else:
+            poly([(9.5, 6.5), (15, 12), (9.5, 17.5)])
+    elif kind == "arrow-left":
+        line(20, 12, 4.6, 12)
+        poly([(10.4, 5.8), (4.2, 12), (10.4, 18.2)])
+    elif kind == "arrow-right":
+        line(4, 12, 19.4, 12)
+        poly([(13.6, 5.8), (19.8, 12), (13.6, 18.2)])
+    elif kind == "folder":
+        poly([(3.4, 6.8), (9.6, 6.8), (11.4, 9.0), (20.6, 9.0), (20.6, 19.4), (3.4, 19.4)], True)
+    elif kind == "filter":
+        poly([(3.6, 5.4), (20.4, 5.4), (13.8, 13.4), (13.8, 19.6), (10.2, 21.0), (10.2, 13.4)], True)
+    elif kind == "bookmark":
+        poly([(6.4, 3.4), (17.6, 3.4), (17.6, 20.8), (12, 16.4), (6.4, 20.8)], True)
+    elif kind == "note":
+        rect(4, 4.4, 16, 15.2, 3)
+        line(8, 9.4, 16, 9.4)
+        line(8, 13, 16, 13)
+        line(8, 16.4, 12.6, 16.4)
+    elif kind == "printer":
+        poly([(6.6, 8.4), (6.6, 3.4), (17.4, 3.4), (17.4, 8.4)])
+        rect(3.4, 8.4, 17.2, 8.4, 2.4)
+        rect(6.6, 14.2, 10.8, 6.4, 2)
+    elif kind == "external":
+        poly([(13.6, 3.6), (20.4, 3.6), (20.4, 10.4)])
+        line(20.4, 3.6, 11.4, 12.6)
+        poly([(17.2, 14.4), (17.2, 20.4), (3.6, 20.4), (3.6, 6.8), (9.6, 6.8)])
     elif kind == "check":
-        painter.drawEllipse(QPointF(cx, cy), w * 0.46, h * 0.46)
-        painter.drawLine(QPointF(cx - w * 0.24, cy + h * 0.02), QPointF(cx - w * 0.05, cy + h * 0.2))
-        painter.drawLine(QPointF(cx - w * 0.05, cy + h * 0.2), QPointF(cx + w * 0.26, cy - h * 0.18))
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        poly([(7.6, 12.2), (10.8, 15.4), (16.6, 8.8)])
+    elif kind == "check-plain":
+        poly([(4.6, 12.4), (9.6, 17.4), (19.4, 6.8)])
+    elif kind == "alert":
+        poly([(12, 3.2), (21.4, 20.4), (2.6, 20.4)], True)
+        line(12, 9.4, 12, 14.6)
+        painter.drawPoint(QPointF(12, 17.4))
+    elif kind == "info":
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        line(12, 11, 12, 16.6)
+        painter.drawPoint(QPointF(12, 7.8))
+    elif kind == "chart":
+        line(3.6, 3.2, 3.6, 20.4)
+        line(3.6, 20.4, 20.8, 20.4)
+        rect(7.2, 12.4, 3.4, 8, 1.4)
+        rect(12.4, 8.6, 3.4, 11.8, 1.4)
+        rect(17.6, 4.8, 3.4, 15.6, 1.4)
+    elif kind == "activity":
+        poly([(2.6, 13.4), (7.4, 13.4), (10.4, 5.6), (14.4, 19.2), (17.0, 13.4), (21.4, 13.4)])
+    elif kind == "cube":
+        poly([(12, 2.8), (20.6, 7.4), (20.6, 16.6), (12, 21.2), (3.4, 16.6), (3.4, 7.4)], True)
+        poly([(3.4, 7.4), (12, 12), (20.6, 7.4)])
+        line(12, 12, 12, 21.2)
+    elif kind == "shield":
+        poly([(12, 2.8), (20.4, 6.2), (20.0, 13.2), (12, 21.2), (4.0, 13.2), (3.6, 6.2)], True)
+        poly([(8.4, 11.8), (11.2, 14.6), (15.8, 9.4)])
+    elif kind == "scissors":
+        painter.drawEllipse(QPointF(7.0, 17.4), 2.6, 2.6)
+        painter.drawEllipse(QPointF(17.0, 17.4), 2.6, 2.6)
+        line(8.8, 15.6, 18.2, 3.4)
+        line(15.2, 15.6, 5.8, 3.4)
+    elif kind == "truck":
+        rect(2.6, 7.4, 11.4, 9.6, 1.6)
+        poly([(14, 10.4), (17.6, 10.4), (21.4, 14.2), (21.4, 17.0), (14, 17.0)], True)
+        painter.drawEllipse(QPointF(7.0, 18.6), 2.2, 2.2)
+        painter.drawEllipse(QPointF(18.2, 18.6), 2.2, 2.2)
     elif kind == "clock":
-        painter.drawEllipse(QPointF(cx, cy), w * 0.44, h * 0.44)
-        painter.drawLine(QPointF(cx, cy), QPointF(cx, cy - h * 0.24))
-        painter.drawLine(QPointF(cx, cy), QPointF(cx + w * 0.19, cy + h * 0.1))
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        line(12, 6.8, 12, 12.2)
+        line(12, 12.2, 16.0, 14.4)
     elif kind == "star":
         path = QPainterPath()
-        points = 5
-        outer, inner = w * 0.48, w * 0.2
-        for i in range(points * 2):
-            angle = -math.pi / 2 + i * math.pi / points
-            radius = outer if i % 2 == 0 else inner
-            point = QPointF(cx + radius * math.cos(angle), cy + radius * math.sin(angle))
-            if i == 0:
-                path.moveTo(point)
-            else:
-                path.lineTo(point)
-        path.closeSubpath()
-        painter.drawPath(path)
-    elif kind == "chart":
-        painter.drawLine(QPointF(r.left() + w * 0.08, r.top()), QPointF(r.left() + w * 0.08, r.bottom()))
-        painter.drawLine(QPointF(r.left() + w * 0.08, r.bottom()), QPointF(r.right(), r.bottom()))
-        painter.drawRect(QRectF(r.left() + w * 0.22, r.bottom() - h * 0.36, w * 0.16, h * 0.36))
-        painter.drawRect(QRectF(r.left() + w * 0.46, r.bottom() - h * 0.62, w * 0.16, h * 0.62))
-        painter.drawRect(QRectF(r.left() + w * 0.7, r.bottom() - h * 0.9, w * 0.16, h * 0.9))
-    elif kind == "bell":
-        path = QPainterPath()
-        path.moveTo(r.left() + w * 0.16, r.bottom() - h * 0.26)
-        path.quadTo(r.left() + w * 0.24, r.top() + h * 0.16, cx, r.top() + h * 0.1)
-        path.quadTo(r.right() - w * 0.24, r.top() + h * 0.16, r.right() - w * 0.16, r.bottom() - h * 0.26)
-        path.closeSubpath()
-        painter.drawPath(path)
-        painter.drawLine(QPointF(cx, r.bottom() - h * 0.06), QPointF(cx, r.bottom() - h * 0.18))
-    elif kind == "search":
-        painter.drawEllipse(QPointF(cx + w * 0.06, cy - h * 0.06), w * 0.32, h * 0.32)
-        painter.drawLine(QPointF(cx + w * 0.3, cy + h * 0.18), QPointF(r.right() - w * 0.02, r.bottom()))
-    elif kind == "refresh":
-        painter.drawArc(QRectF(r.left() + w * 0.1, r.top() + h * 0.1, w * 0.8, h * 0.8), 40 * 16, 280 * 16)
-        painter.drawLine(QPointF(r.right() - w * 0.24, r.top() + h * 0.06), QPointF(r.right() - w * 0.06, r.top() + h * 0.2))
-        painter.drawLine(QPointF(r.right() - w * 0.06, r.top() + h * 0.2), QPointF(r.right() - w * 0.22, r.top() + h * 0.3))
-    elif kind in ("sun", "moon"):
-        if kind == "sun":
-            painter.drawEllipse(QPointF(cx, cy), w * 0.22, h * 0.22)
-            for i in range(8):
-                angle = i * math.pi / 4
-                p1 = QPointF(cx + w * 0.33 * math.cos(angle), cy + h * 0.33 * math.sin(angle))
-                p2 = QPointF(cx + w * 0.46 * math.cos(angle), cy + h * 0.46 * math.sin(angle))
-                painter.drawLine(p1, p2)
-        else:
-            path = QPainterPath()
-            path.addEllipse(QRectF(r.left() + w * 0.12, r.top() + h * 0.08, w * 0.76, h * 0.84))
-            cut = QPainterPath()
-            cut.addEllipse(QRectF(r.left() + w * 0.34, r.top(), w * 0.76, h * 0.84))
-            painter.drawPath(path.subtracted(cut))
-    elif kind == "download":
-        painter.drawLine(QPointF(cx, r.top() + h * 0.06), QPointF(cx, r.bottom() - h * 0.4))
-        painter.drawLine(QPointF(cx - w * 0.2, r.bottom() - h * 0.56), QPointF(cx, r.bottom() - h * 0.36))
-        painter.drawLine(QPointF(cx + w * 0.2, r.bottom() - h * 0.56), QPointF(cx, r.bottom() - h * 0.36))
-        painter.drawLine(QPointF(r.left() + w * 0.12, r.bottom() - h * 0.14), QPointF(r.right() - w * 0.12, r.bottom() - h * 0.14))
-    elif kind == "gear":
-        painter.drawEllipse(QPointF(cx, cy), w * 0.22, h * 0.22)
-        painter.drawEllipse(QPointF(cx, cy), w * 0.38, h * 0.38)
-        for i in range(8):
-            angle = i * math.pi / 4
-            p1 = QPointF(cx + w * 0.38 * math.cos(angle), cy + h * 0.38 * math.sin(angle))
-            p2 = QPointF(cx + w * 0.48 * math.cos(angle), cy + h * 0.48 * math.sin(angle))
-            painter.drawLine(p1, p2)
-    elif kind == "help":
-        painter.drawEllipse(QPointF(cx, cy), w * 0.45, h * 0.45)
-        font = QFont()
-        font.setPixelSize(int(rect.height() * 0.55))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(r, Qt.AlignCenter, "?")
-    elif kind in ("table", "grid"):
-        painter.drawRoundedRect(r.adjusted(w * 0.04, h * 0.1, -w * 0.04, -h * 0.1), 2, 2)
-        painter.drawLine(QPointF(r.left() + w * 0.04, cy), QPointF(r.right() - w * 0.04, cy))
-        painter.drawLine(QPointF(cx - w * 0.1, r.top() + h * 0.1), QPointF(cx - w * 0.1, r.bottom() - h * 0.1))
-    elif kind in ("pdf", "file-pdf"):
-        painter.drawRoundedRect(QRectF(r.left() + w * 0.16, r.top(), w * 0.68, h), 3, 3)
-        font = QFont()
-        font.setPixelSize(max(6, int(rect.height() * 0.3)))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(QRectF(r.left() + w * 0.16, r.top(), w * 0.68, h), Qt.AlignCenter, "PDF")
-    elif kind == "bookmark":
-        path = QPainterPath()
-        path.moveTo(r.left() + w * 0.24, r.top())
-        path.lineTo(r.right() - w * 0.24, r.top())
-        path.lineTo(r.right() - w * 0.24, r.bottom())
-        path.lineTo(cx, r.bottom() - h * 0.24)
-        path.lineTo(r.left() + w * 0.24, r.bottom())
-        path.closeSubpath()
-        painter.drawPath(path)
-    elif kind == "note":
-        painter.drawRoundedRect(QRectF(r.left() + w * 0.08, r.top() + h * 0.14, w * 0.84, h * 0.72), 3, 3)
-        for frac in (0.34, 0.52, 0.7):
-            painter.drawLine(QPointF(r.left() + w * 0.24, r.top() + h * frac),
-                             QPointF(r.right() - w * 0.24, r.top() + h * frac))
-    elif kind == "folder":
-        path = QPainterPath()
-        path.moveTo(r.left() + w * 0.06, r.top() + h * 0.2)
-        path.lineTo(r.left() + w * 0.44, r.top() + h * 0.2)
-        path.lineTo(r.left() + w * 0.52, r.top() + h * 0.32)
-        path.lineTo(r.right() - w * 0.06, r.top() + h * 0.32)
-        path.lineTo(r.right() - w * 0.06, r.bottom() - h * 0.1)
-        path.lineTo(r.left() + w * 0.06, r.bottom() - h * 0.1)
+        for index in range(10):
+            angle = -math.pi / 2 + index * math.pi / 5
+            radius = 9.2 if index % 2 == 0 else 3.9
+            point = QPointF(12 + radius * math.cos(angle), 12 + radius * math.sin(angle))
+            path.moveTo(point) if index == 0 else path.lineTo(point)
         path.closeSubpath()
         painter.drawPath(path)
     elif kind == "users":
-        painter.drawEllipse(QPointF(cx - w * 0.14, r.top() + h * 0.3), w * 0.2, h * 0.18)
-        painter.drawArc(QRectF(r.left() + w * 0.04, r.top() + h * 0.5, w * 0.62, h * 0.5), 0, 180 * 16)
-        painter.drawEllipse(QPointF(cx + w * 0.32, r.top() + h * 0.34), w * 0.14, h * 0.13)
-    elif kind == "alert":
-        path = QPainterPath()
-        path.moveTo(cx, r.top() + h * 0.08)
-        path.lineTo(r.right(), r.bottom() - h * 0.06)
-        path.lineTo(r.left(), r.bottom() - h * 0.06)
-        path.closeSubpath()
-        painter.drawPath(path)
-        painter.drawLine(QPointF(cx, r.top() + h * 0.34), QPointF(cx, r.top() + h * 0.62))
-        painter.drawPoint(QPointF(cx, r.top() + h * 0.74))
-    elif kind == "close":
-        painter.drawLine(r.topLeft(), r.bottomRight())
-        painter.drawLine(r.topRight(), r.bottomLeft())
+        painter.drawEllipse(QPointF(9.0, 8.4), 3.4, 3.4)
+        painter.drawArc(QRectF(2.6, 12.6, 12.8, 11.2), 0, 180 * 16)
+        painter.drawEllipse(QPointF(17.6, 9.4), 2.6, 2.6)
+        painter.drawArc(QRectF(13.4, 13.4, 8.6, 8.6), 0, 180 * 16)
+    elif kind == "money":
+        rect(2.6, 6.4, 18.8, 11.2, 2.4)
+        painter.drawEllipse(QPointF(12, 12), 3.0, 3.0)
+        line(6.0, 9.4, 6.0, 9.4)
+        line(18.0, 14.6, 18.0, 14.6)
+    elif kind == "calendar":
+        rect(3.4, 5.2, 17.2, 15.6, 2.6)
+        line(3.4, 10.2, 20.6, 10.2)
+        line(8.2, 2.8, 8.2, 6.8)
+        line(15.8, 2.8, 15.8, 6.8)
     elif kind == "menu":
-        for frac in (0.2, 0.5, 0.8):
-            painter.drawLine(QPointF(r.left(), r.top() + h * frac), QPointF(r.right(), r.top() + h * frac))
-    elif kind == "lock":
-        painter.drawRoundedRect(QRectF(r.left() + w * 0.14, r.top() + h * 0.42, w * 0.72, h * 0.5), 4, 4)
-        painter.drawArc(QRectF(r.left() + w * 0.28, r.top() + h * 0.08, w * 0.44, h * 0.6), 0, 180 * 16)
-    elif kind == "filter":
-        path = QPainterPath()
-        path.moveTo(r.left() + w * 0.05, r.top() + h * 0.14)
-        path.lineTo(r.right() - w * 0.05, r.top() + h * 0.14)
-        path.lineTo(cx + w * 0.12, cy + h * 0.04)
-        path.lineTo(cx + w * 0.12, r.bottom() - h * 0.06)
-        path.lineTo(cx - w * 0.12, r.bottom() - h * 0.2)
-        path.lineTo(cx - w * 0.12, cy + h * 0.04)
-        path.closeSubpath()
-        painter.drawPath(path)
+        for y in (6.6, 12, 17.4):
+            line(4.2, y, 19.8, y)
+    elif kind == "dots":
+        painter.drawEllipse(QPointF(12, 5.4), 1.5, 1.5)
+        painter.drawEllipse(QPointF(12, 12), 1.5, 1.5)
+        painter.drawEllipse(QPointF(12, 18.6), 1.5, 1.5)
+    elif kind == "sparkle":
+        poly([(12, 2.8), (13.9, 9.6), (20.8, 11.6), (13.9, 13.6), (12, 20.6), (10.1, 13.6), (3.2, 11.6), (10.1, 9.6)], True)
+    elif kind == "layers":
+        poly([(12, 2.8), (21.2, 7.6), (12, 12.4), (2.8, 7.6)], True)
+        poly([(3.4, 12.2), (12, 16.4), (20.6, 12.2)])
+        poly([(3.4, 16.6), (12, 20.8), (20.6, 16.6)])
+    elif kind == "inbox":
+        poly([(3.2, 12.4), (6.2, 4.0), (17.8, 4.0), (20.8, 12.4), (20.8, 20.0), (3.2, 20.0)], True)
+        poly([(3.2, 12.4), (8.6, 12.4), (9.8, 15.2), (14.2, 15.2), (15.4, 12.4), (20.8, 12.4)])
+    elif kind == "pin":
+        painter.drawEllipse(QPointF(12, 9.4), 3.4, 3.4)
+        painter.drawArc(QRectF(5.4, 2.4, 13.2, 13.2), 200 * 16, 140 * 16)
+        line(12, 15.6, 12, 21.6)
     else:
-        painter.drawEllipse(QPointF(cx, cy), w * 0.4, h * 0.4)
-        painter.drawLine(QPointF(cx - w * 0.16, cy), QPointF(cx + w * 0.16, cy))
+        painter.drawEllipse(QPointF(12, 12), 8.4, 8.4)
+
+
+def draw_icon(painter: QPainter, kind: str, rect: QRectF, color: QColor,
+              width: float = 1.7, dashed: bool = False) -> None:
+    """رسم آیکون در کادر داده‌شده."""
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    scale = min(rect.width(), rect.height()) / 24.0
+    painter.translate(rect.x() + (rect.width() - 24 * scale) / 2,
+                      rect.y() + (rect.height() - 24 * scale) / 2)
+    painter.scale(scale, scale)
+    pen = QPen(color, max(0.9, width / max(scale, 0.001) * scale if scale else width))
+    pen.setWidthF(width)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    if dashed:
+        pen.setStyle(Qt.DashLine)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+    if kind == "pdf":
+        poly = QPainterPath()
+        poly.moveTo(6, 2.8)
+        poly.lineTo(14, 2.8)
+        poly.lineTo(19, 7.8)
+        poly.lineTo(19, 21.2)
+        poly.lineTo(6, 21.2)
+        poly.closeSubpath()
+        painter.drawPath(poly)
+        folder = QPainterPath()
+        folder.moveTo(14, 2.8)
+        folder.lineTo(14, 7.8)
+        folder.lineTo(19, 7.8)
+        painter.drawPath(folder)
+        label_font = QFont(font_family())
+        label_font.setPixelSize(7)
+        label_font.setBold(True)
+        painter.setFont(label_font)
+        painter.setPen(QPen(color))
+        painter.drawText(QRectF(5.4, 10.4, 14.2, 8.4), Qt.AlignCenter, "PDF")
+    else:
+        _icon_paths(kind, painter)
     painter.restore()
 
 
-class Combo(QComboBox):
-    """کمبوی بومی با فلش رسم‌شده.
-
-    Qt در حالت استایل‌شده و راست‌به‌چپ فلش پیش‌فرض را نشان نمی‌دهد و تصویر
-    data-URI را هم در QSS بارگذاری نمی‌کند؛ بنابراین فلش را خودمان می‌کشیم.
-    """
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.arrow_color = QColor("#66756f")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(34)
-
-    def set_arrow_color(self, color: str) -> None:
-        self.arrow_color = QColor(color)
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        # پس‌زمینه و متن را با استایل معمولی می‌کشیم، سپس فلش را خودمان اضافه می‌کنیم
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        # پوشاندن فلش ناقص بومی در سمت چپ
-        painter.setPen(Qt.NoPen)
-        surface = self.palette().color(QPalette.Base)
-        painter.setBrush(surface)
-        painter.drawRect(QRectF(1.5, 1.5, 25, self.height() - 3))
-        color = self.arrow_color
-        if not self.isEnabled():
-            color = QColor(color.red(), color.green(), color.blue(), 110)
-        pen = QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        cx = 15.0
-        cy = self.height() / 2.0
-        path = QPainterPath()
-        path.moveTo(cx - 4.5, cy - 2.0)
-        path.lineTo(cx, cy + 2.6)
-        path.lineTo(cx + 4.5, cy - 2.0)
-        painter.drawPath(path)
-
-
-class CheckBox(QCheckBox):
-    """چک‌باکس بومی با تنظیم رنگ‌های پوسته (رسم توسط خود Qt انجام می‌شود)."""
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        # رنگ‌ها از پالت برنامه گرفته می‌شوند؛ نیازی به رسم دستی نیست.
-        palette = self.palette()
-        palette.setColor(QPalette.Base, QColor(colors["surface"]))
-        palette.setColor(QPalette.Text, QColor(colors["text"]))
-        palette.setColor(QPalette.WindowText, QColor(colors["text"]))
-        palette.setColor(QPalette.Highlight, QColor(colors["primary"]))
-        self.setPalette(palette)
-        self.update()
-
-
-class SpinBox(QSpinBox):
-    """عدد‌شمار ساده؛ عمداً از QSS استایل نمی‌شود تا دکمه‌های بومی دیده شوند."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
-        self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.setMinimumHeight(32)
-
-
 class IconWidget(QWidget):
-    """نمایش یک آیکون برداری با رنگ دلخواه."""
+    """آیکون ساده با رنگ و اندازهٔ دلخواه."""
 
-    def __init__(self, kind: str, color: str = "#0d6b63", size: int = 20, parent=None) -> None:
+    def __init__(self, kind: str, color: str, size: int = 20, width: float = 1.7, parent=None) -> None:
         super().__init__(parent)
         self.kind = kind
         self.color = QColor(color)
-        self._size = size
+        self.stroke = width
         self.setFixedSize(size, size)
 
     def set_color(self, color: str) -> None:
         self.color = QColor(color)
         self.update()
 
+    def set_kind(self, kind: str) -> None:
+        self.kind = kind
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
-        draw_icon(painter, self.kind, QRectF(0, 0, self.width(), self.height()), self.color)
+        draw_icon(painter, self.kind, QRectF(0, 0, self.width(), self.height()),
+                  self.color, self.stroke)
 
 
-class IconBadge(QWidget):
-    """آیکون داخل یک مینیتور گرد رنگی."""
+class IconTile(QWidget):
+    """آیکون داخل یک کاشی رنگی گرد."""
 
-    def __init__(self, kind: str, color: str, background: str, size: int = 38, parent=None) -> None:
+    def __init__(self, kind: str, fg: str, bg: str, size: int = 44, radius: int = 14,
+                 width: float = 1.8, parent=None) -> None:
         super().__init__(parent)
         self.kind = kind
-        self.color = QColor(color)
-        self.background = QColor(background)
+        self.fg = QColor(fg)
+        self.bg = QColor(bg)
+        self.radius = radius
+        self.stroke = width
         self.setFixedSize(size, size)
+
+    def set_colors(self, fg: str, bg: str) -> None:
+        self.fg, self.bg = QColor(fg), QColor(bg)
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        gradient = QLinearGradient(body.topLeft(), body.bottomRight())
+        gradient.setColorAt(0.0, self.bg.lighter(104))
+        gradient.setColorAt(1.0, self.bg)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(self.background)
-        painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 11, 11)
-        margin = self.width() * 0.24
-        draw_icon(
-            painter, self.kind,
-            QRectF(margin, margin, self.width() - 2 * margin, self.height() - 2 * margin),
-            self.color,
-        )
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(body, self.radius, self.radius)
+        margin = body.width() * 0.24
+        draw_icon(painter, self.kind,
+                  body.adjusted(margin, margin, -margin, -margin), self.fg, self.stroke)
 
 
-class ClickableFrame(QFrame):
-    """قاب قابل کلیک با حالت هاور."""
+class Avatar(QWidget):
+    """دایرهٔ حرف اول نام شرکت با رنگ ثابت بر اساس نام."""
 
-    clicked = pyqtSignal()
+    PALETTES = [
+        ("#0E7A6A", "#18A492"),
+        ("#2A63A6", "#4C8BD1"),
+        ("#8A5A2B", "#C58A2E"),
+        ("#7A4780", "#A96BB2"),
+        ("#2F6E45", "#4E9C6A"),
+        ("#9B4A3F", "#C96B5B"),
+        ("#3E5C76", "#5D83A6"),
+        ("#6B5B2E", "#A08A46"),
+    ]
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, name: str, size: int = 34, parent=None) -> None:
         super().__init__(parent)
+        self.name = name or "?"
+        self.setFixedSize(size, size)
+        digest = sum(ord(ch) for ch in self.name) % len(self.PALETTES)
+        self.c1, self.c2 = self.PALETTES[digest]
+
+    def set_name(self, name: str) -> None:
+        """تغییر نام و بازمحاسبهٔ حرف اول و رنگ."""
+        self.name = name or "?"
+        digest = sum(ord(ch) for ch in self.name) % len(self.PALETTES)
+        self.c1, self.c2 = self.PALETTES[digest]
+        self.update()
+
+    def initials(self) -> str:
+        words = [w for w in self.name.replace("‌", " ").split() if w]
+        if not words:
+            return "؟"
+        if len(words) == 1:
+            return words[0][:2]
+        return (words[0][0] + words[1][0])
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0, QColor(self.c2))
+        gradient.setColorAt(1, QColor(self.c1))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(gradient)
+        painter.drawEllipse(rect)
+        font = app_font(max(7, int(self.height() * 0.30)), QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor("#FFFFFF")))
+        painter.drawText(rect, Qt.AlignCenter, self.initials())
+
+
+def chip_label(text: str, fg: str, bg: str, radius: int = 9, padding: str = "4px 10px",
+               size: int = 8, bold: bool = True) -> QLabel:
+    label = QLabel(text)
+    weight = 800 if bold else 600
+    label.setStyleSheet(
+        f"background: {bg}; color: {fg}; border-radius: {radius}px;"
+        f" padding: {padding}; font-size: {size}pt; font-weight: {weight};"
+    )
+    label.setAlignment(Qt.AlignCenter)
+    return label
+
+
+# ---------------------------------------------------------------------------
+# کارت با سایهٔ نرم
+# ---------------------------------------------------------------------------
+class Card(QFrame):
+    """قاب کارت با سایهٔ چندلایه (بدون نیاز به افکت‌های سنگین)."""
+
+    SHADOW = 12
+
+    def __init__(self, colors: Dict[str, str], radius: int = RADIUS["card"],
+                 padding: int = 16, variant: str = "surface",
+                 hoverable: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.radius = radius
+        self.padding = padding
+        self.variant = variant
+        self.hoverable = hoverable
         self._hover = False
-        self.setCursor(Qt.PointingHandCursor)
+        self._accent: Optional[QColor] = None
         self.setAttribute(Qt.WA_Hover, True)
+        self.body = QVBoxLayout(self)
+        inset = self.SHADOW
+        self.body.setContentsMargins(inset + padding, inset + padding,
+                                     inset + padding, inset + padding)
+        self.body.setSpacing(10)
+
+    # ---- تنظیمات ظاهری ----
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def set_accent(self, color: Optional[str]) -> None:
+        self._accent = QColor(color) if color else None
+        self.update()
 
     def enterEvent(self, event) -> None:  # noqa: N802
-        self._hover = True
-        self.update()
+        if self.hoverable:
+            self._hover = True
+            self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
-        self._hover = False
-        self.update()
+        if self.hoverable:
+            self._hover = False
+            self.update()
         super().leaveEvent(event)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
+    def body_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(self.SHADOW, self.SHADOW,
+                                            -self.SHADOW, -self.SHADOW)
 
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        c = self.colors
+        body = self.body_rect()
+        radius = self.radius
+
+        if self.variant != "flat":
+            shadow = QColor(c["shadow"])
+            strength = 20 if self.variant == "hero" else (14 if not self._hover else 22)
+            layers = 9
+            for index in range(layers, 0, -1):
+                ratio = index / layers
+                alpha_value = int(strength * (1.0 - ratio) ** 1.6) + 2
+                shadow.setAlpha(max(1, alpha_value))
+                painter.setPen(QPen(shadow, 1.6))
+                painter.setBrush(Qt.NoBrush)
+                grow = index * 1.15
+                painter.drawRoundedRect(
+                    body.adjusted(-grow, -grow * 0.55 + 2.6, grow, grow + 3.6),
+                    radius + grow * 0.7, radius + grow * 0.7,
+                )
+
+        if self.variant == "hero":
+            gradient = QLinearGradient(body.topLeft(), body.bottomRight())
+            gradient.setColorAt(0.0, QColor(c["hero_3"]))
+            gradient.setColorAt(0.45, QColor(c["hero_2"]))
+            gradient.setColorAt(1.0, QColor(c["hero_1"]))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(body, radius, radius)
+            # موج‌های تزئینی
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(body, radius, radius)
+            painter.setClipPath(clip)
+            painter.setBrush(QColor(255, 255, 255, 16))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(body.right() - body.width() * 0.10, body.top() + body.height() * 0.08),
+                                body.width() * 0.34, body.width() * 0.34)
+            painter.setBrush(QColor(255, 255, 255, 9))
+            painter.drawEllipse(QPointF(body.right() - body.width() * 0.02, body.bottom() + body.height() * 0.18),
+                                body.width() * 0.42, body.width() * 0.42)
+            painter.restore()
+        elif self.variant == "soft":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["surface_2"]))
+            painter.drawRoundedRect(body, radius, radius)
+            painter.setPen(QPen(QColor(c["border_soft"]), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+        elif self.variant == "flat":
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["surface"]))
+            painter.drawRoundedRect(body, radius, radius)
+        else:
+            gradient = QLinearGradient(body.topLeft(), body.bottomLeft())
+            gradient.setColorAt(0.0, QColor(c["surface"]))
+            gradient.setColorAt(1.0, mix(c["surface"], c["surface_3"], 0.35))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(body, radius, radius)
+            border = QColor(c["border"])
+            if self._hover:
+                border = QColor(c["brand_2"])
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+
+        if self._accent is not None:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._accent)
+            painter.drawRoundedRect(
+                QRectF(body.right() - 4, body.top() + radius * 0.7, 4,
+                       max(12.0, body.height() - radius * 1.4)), 2, 2,
+            )
+
+
+class SectionHeader(QWidget):
+    """سرتیتر یک بخش با عنوان، زیرنویس و اکشن سمت چپ."""
+
+    def __init__(self, title: str, subtitle: str = "", parent=None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 6, 4, 0)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setObjectName("SectionTitle")
+        layout.addWidget(title_label)
+        if subtitle:
+            sub = QLabel(subtitle)
+            sub.setObjectName("Muted")
+            layout.addWidget(sub)
+        layout.addStretch(1)
+        self.actions = QHBoxLayout()
+        self.actions.setSpacing(6)
+        layout.addLayout(self.actions)
+
+    def add_action(self, widget: QWidget) -> None:
+        self.actions.addWidget(widget)
+
+
+class EmptyState(QWidget):
+    """حالت خالی با تصویرسازی ساده و دکمهٔ اقدام."""
+
+    actionClicked = pyqtSignal()
+
+    def __init__(self, title: str, message: str, icon: str = "inbox",
+                 action_text: str = "", colors: Optional[Dict[str, str]] = None, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors or THEMES["light"]
+        self.icon_name = icon
+        self.action_text = action_text
+        self.title = title
+        self.message = message
+        self.setMinimumHeight(300)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(6)
+        layout.addStretch(1)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("EmptyTitle")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.message_label = QLabel(message)
+        self.message_label.setObjectName("Muted")
+        self.message_label.setAlignment(Qt.AlignCenter)
+        self.message_label.setWordWrap(True)
+        self.button = QPushButton(action_text)
+        self.button.setObjectName("Primary")
+        self.button.setCursor(Qt.PointingHandCursor)
+        self.button.clicked.connect(self.actionClicked.emit)
+        self.button.setVisible(bool(action_text))
+        layout.addStretch(2)
+        self.title_label.setVisible(False)
+        layout.addStretch(3)
+        layout.addWidget(self.message_label)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self.button)
+        row.addStretch(1)
+        layout.addSpacing(10)
+        layout.addLayout(row)
+        layout.addStretch(4)
+
+    def set_texts(self, title: str, message: str, action_text: str = "") -> None:
+        self.title = title
+        self.message = message
+        self.message_label.setText(message)
+        self.button.setText(action_text)
+        self.button.setVisible(bool(action_text))
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        c = self.colors
+        size = 96
+        center_x = self.width() / 2
+        top = self.height() * 0.30
+        circle = QRectF(center_x - size / 2, top - size / 2, size, size)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(alpha(c["brand"], 22))
+        painter.drawEllipse(circle)
+        painter.setBrush(alpha(c["brand"], 34))
+        painter.drawEllipse(circle.adjusted(14, 14, -14, -14))
+        draw_icon(painter, self.icon_name,
+                  circle.adjusted(28, 28, -28, -28), QColor(c["brand"]), 1.6)
+        painter.setFont(app_font(11, QFont.Bold))
+        painter.setPen(QPen(QColor(c["ink"])))
+        painter.drawText(QRectF(20, top + size / 2 + 10, self.width() - 40, 28),
+                         Qt.AlignHCenter, self.title)
+
+
+class Toast(QWidget):
+    """پیام شناور کوتاه در پایین پنجره."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setVisible(False)
+        self.text = ""
+        self.icon_name = "check"
+        self.colors = THEMES["light"]
+        self._opacity = 0.0
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._fade_out)
+        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
+
+    def show_message(self, text: str, icon: str = "check", colors: Optional[Dict[str, str]] = None,
+                     duration: int = 2200) -> None:
+        if colors:
+            self.colors = colors
+        self.text = text
+        self.icon_name = icon
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent:
+            x = (parent.width() - self.width()) // 2
+            y = parent.height() - self.height() - 36
+            self.move(x, y)
+        self.setWindowOpacity(1.0)
+        self.setVisible(True)
+        self.raise_()
+        self.update()
+        self._timer.start(duration)
+
+    def _fade_out(self) -> None:
+        self._anim.stop()
+        self._anim.setDuration(320)
+        self._anim.setStartValue(1.0)
+        self._anim.setEndValue(0.0)
+        self._anim.finished.connect(lambda: self.setVisible(False))
+        self._anim.start()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(app_font(9, QFont.DemiBold))
+        width = metrics.horizontalAdvance(self.text) + 74
+        return QSize(int(width), 44)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        c = self.colors
+        body = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(c["surface_inv"]))
+        painter.drawRoundedRect(body, 12, 12)
+        draw_icon(painter, self.icon_name, QRectF(body.right() - 34, body.center().y() - 9, 18, 18),
+                  QColor(c["brand_2"]), 1.5)
+        painter.setFont(app_font(9, QFont.DemiBold))
+        painter.setPen(QPen(QColor(c["surface"])))
+        painter.drawText(body.adjusted(14, 0, -44, 0), Qt.AlignRight | Qt.AlignVCenter, self.text)
+
+
+
+# ==========================================================================
+# نمودارهای بومی
+# ==========================================================================
 
 # ---------------------------------------------------------------------------
-# نمودارهای بومی (بدون Chart.js)
+# نمودارهای بومی (دونات، حلقهٔ پیشرفت، میله‌ای و راهنما)
 # ---------------------------------------------------------------------------
-def _fmt_percent(part: int, total: int) -> str:
-    if total <= 0:
-        return "۰٪"
-    return fa(f"{part / total * 100:.1f}%").replace(".0٪", "٪")
+class RingGauge(QWidget):
+    """حلقهٔ پیشرفت با انیمیشن، گرادیان و متن مرکزی."""
 
+    def __init__(self, colors: Dict[str, str], thickness: int = 14, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.thickness = thickness
+        self._value = 0.0
+        self._display = 0.0
+        self.caption = "پیشرفت کل"
+        self.hero_mode = False
+        self.setMinimumSize(170, 170)
+        self._anim = QPropertyAnimation(self, b"display", self)
+        self._anim.setDuration(1100)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
 
-class PieChartWidget(QWidget):
-    """نمودار دونات با تعامل ماوس و راهنمای داخلی."""
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def set_hero_mode(self, enabled: bool) -> None:
+        self.hero_mode = enabled
+        self.update()
+
+    def get_display(self) -> float:
+        return self._display
+
+    def set_display(self, value: float) -> None:
+        self._display = float(value)
+        self.update()
+
+    display = pyqtProperty(float, fget=get_display, fset=set_display)
+
+    def set_value(self, value: float, animate: bool = True) -> None:
+        self._value = max(0.0, min(100.0, float(value)))
+        self._anim.stop()
+        if not animate:
+            self.set_display(self._value)
+            return
+        self._anim.setStartValue(self._display)
+        self._anim.setEndValue(self._value)
+        self._anim.start()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        c = self.colors
+        side = min(self.width(), self.height()) - 8
+        box = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        thickness = max(8.0, side * 0.085)
+        arc_box = box.adjusted(thickness / 2 + 2, thickness / 2 + 2,
+                               -thickness / 2 - 2, -thickness / 2 - 2)
+
+        # حلقهٔ زمینه
+        track_color = QColor(255, 255, 255, 55) if self.hero_mode else alpha(c["border"], 150)
+        track_pen = QPen(track_color, thickness, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(track_pen)
+        painter.drawArc(arc_box, 210 * 16, -240 * 16)
+        value = max(0.0, min(100.0, self._display))
+        if value > 0:
+            span = -240.0 * value / 100.0
+            gradient = QConicalGradient(arc_box.center(), 210)
+            if self.hero_mode:
+                gradient.setColorAt(0.0, QColor("#EAFBF6"))
+                gradient.setColorAt(0.45, QColor("#A9E6D8"))
+                gradient.setColorAt(0.80, QColor("#5BDCC6"))
+                gradient.setColorAt(1.0, QColor("#F2C777"))
+            else:
+                gradient.setColorAt(0.0, QColor(c["brand_2"]))
+                gradient.setColorAt(0.45, QColor(c["brand"]))
+                gradient.setColorAt(0.75, QColor(c["brand_deep"]))
+                gradient.setColorAt(1.0, QColor(c["accent"]))
+            painter.setPen(QPen(QBrush(gradient), thickness, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(arc_box, 210 * 16, int(span * 16))
+            # نقطهٔ انتهای حلقه
+            angle = math.radians(210 + span)
+            radius = arc_box.width() / 2
+            end = QPointF(arc_box.center().x() + radius * math.cos(angle),
+                          arc_box.center().y() - radius * math.sin(angle))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["hero_1"] if self.hero_mode else c["surface"]))
+            painter.drawEllipse(end, thickness * 0.22, thickness * 0.22)
+            painter.setBrush(QColor("#FFFFFF" if self.hero_mode else c["brand"]))
+            painter.drawEllipse(end, thickness * 0.12, thickness * 0.12)
+
+        # متن مرکزی
+        inner = arc_box.width() / 2 - thickness / 2 - 4
+        font = app_font(max(20, int(inner * 0.42)), QFont.Black)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(c["hero_ink"] if self.hero_mode else c["ink"])))
+        percent_text = fa(f"{value:.1f}٪") if value > 0 else "—"
+        painter.drawText(
+            QRectF(arc_box.center().x() - inner, arc_box.center().y() - inner * 0.62,
+                   inner * 2, inner * 0.72),
+            Qt.AlignCenter, percent_text,
+        )
+        painter.setFont(app_font(max(8, int(inner * 0.11)), QFont.DemiBold))
+        painter.setPen(QPen(QColor(c["hero_muted"] if self.hero_mode else c["ink_3"])))
+        painter.drawText(
+            QRectF(arc_box.center().x() - inner, arc_box.center().y() + inner * 0.18,
+                   inner * 2, inner * 0.4),
+            Qt.AlignCenter, self.caption,
+        )
+
+class DonutChart(QWidget):
+    """نمودار دونات با برش‌های گرد، تعامل ماوس و متن مرکزی."""
 
     sliceClicked = pyqtSignal(str)
 
-    def __init__(self, colors: Sequence[str], parent=None) -> None:
+    def __init__(self, colors: Dict[str, str], palette: Sequence[str], parent=None) -> None:
         super().__init__(parent)
+        self.colors = colors
+        self.palette = [QColor(c) for c in palette]
         self.labels: List[str] = []
         self.values: List[int] = []
-        self.colors = [QColor(c) for c in colors]
-        self.hover_index = -1
-        self.center_caption = "قرارداد"
-        self.text_color = QColor("#1b2724")
-        self.muted_color = QColor("#66756f")
-        self.surface_color = QColor("#ffffff")
+        self.hover = -1
+        self.caption = "قرارداد"
+        self._dark = QColor(colors["surface"]).lightness() < 128
         self.setMouseTracking(True)
         self.setMinimumSize(150, 150)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._slices: List[Tuple[float, float, str]] = []  # (شروع، اندازه، برچسب)
+        self._slices: List[Tuple[float, float, str]] = []
 
-    def set_data(self, labels: Sequence[str], values: Sequence[int],
-                 colors: Optional[Sequence[str]] = None,
-                 center_caption: str = "قرارداد") -> None:
-        self.labels = list(labels)
-        self.values = [int(v) for v in values]
-        if colors:
-            self.colors = [QColor(c) for c in colors]
-        self.center_caption = center_caption
-        self.hover_index = -1
+    def set_theme(self, colors: Dict[str, str], palette: Optional[Sequence[str]] = None) -> None:
+        self.colors = colors
+        self._dark = QColor(colors["surface"]).lightness() < 128
+        if palette:
+            self.palette = [QColor(c) for c in palette]
         self.update()
 
-    def set_colors_for_theme(self, text: str, muted: str, surface: str) -> None:
-        self.text_color = QColor(text)
-        self.muted_color = QColor(muted)
-        self.surface_color = QColor(surface)
+    def set_data(self, labels: Sequence[str], values: Sequence[int],
+                 caption: str = "قرارداد", palette: Optional[Sequence[str]] = None) -> None:
+        self.labels = list(labels)
+        self.values = [int(v) for v in values]
+        if palette:
+            self.palette = [QColor(c) for c in palette]
+        self.caption = caption
+        self.hover = -1
         self.update()
 
     @property
@@ -1885,150 +2468,114 @@ class PieChartWidget(QWidget):
         return int(sum(self.values))
 
     def _color(self, index: int) -> QColor:
-        if not self.colors:
-            return QColor("#0d6b63")
-        color = QColor(self.colors[index % len(self.colors)])
-        # روشن‌تر کردن تدریجی برای تکرار رنگ‌ها
-        cycle = index // len(self.colors)
-        if cycle:
-            color = color.lighter(100 + 12 * cycle)
-        return color
+        if not self.palette:
+            return QColor(self.colors["brand"])
+        color = QColor(self.palette[index % len(self.palette)])
+        if self._dark:
+            color = color.lighter(124)
+        cycle = index // len(self.palette)
+        return color.lighter(112 + 8 * cycle) if cycle else color
 
-    def _compute_slices(self) -> List[Tuple[float, float, str]]:
-        total = self.total
-        if total <= 0 or not self.values:
-            return []
-        result: List[Tuple[float, float]] = []
-        start = 0.0
-        for value in self.values:
-            span = 360.0 * value / total
-            result.append((start, span))
-            start += span
-        return [(s, sp, lab) for (s, sp), lab in zip(result, self.labels)]
+    def _geometry(self) -> Tuple[QRectF, float]:
+        side = min(self.width(), self.height()) - 10
+        box = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
+        thickness = max(14.0, min(30.0, side * 0.16))
+        return box, thickness
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        side = min(self.width(), self.height())
-        margin = 16
-        box = QRectF(
-            (self.width() - side) / 2 + margin,
-            (self.height() - side) / 2 + margin,
-            side - 2 * margin,
-            side - 2 * margin,
-        )
-        outer = box.width() / 2
-        thickness = max(20.0, outer * 0.30)
-        inner = outer - thickness
-        center = box.center()
-
-        self._slices = self._compute_slices()
-        if not self._slices:
-            painter.setPen(QPen(self.muted_color))
-            painter.drawText(self.rect(), Qt.AlignCenter, "داده‌ای برای نمایش نیست")
+        c = self.colors
+        box, thickness = self._geometry()
+        arc_box = box.adjusted(thickness / 2, thickness / 2, -thickness / 2, -thickness / 2)
+        total = self.total
+        self._slices = []
+        if total <= 0:
+            painter.setPen(QPen(alpha(c["border"], 190), thickness * 0.7, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(arc_box, 0, 360 * 16)
+            painter.setPen(QPen(QColor(c["ink_3"])))
+            painter.setFont(app_font(9))
+            painter.drawText(box, Qt.AlignCenter, "داده‌ای نیست")
             return
 
-        total = self.total
+        gap = 1.1
+        start = 90.0
+        for value in self.values:
+            span = 360.0 * value / total
+            self._slices.append((start, span, ""))
+            start -= span
+
         for index, (start_deg, span_deg, _label) in enumerate(self._slices):
+            hovered = index == self.hover
             color = self._color(index)
-            hovered = index == self.hover_index
-            if hovered:
-                color = color.lighter(112)
-            painter.setPen(QPen(self.surface_color, 1.5))
-            painter.setBrush(QBrush(color))
-            adjust = 4 if hovered else 0
-            rect = QRectF(
-                center.x() - outer + adjust, center.y() - outer + adjust,
-                2 * (outer - adjust), 2 * (outer - adjust),
+            width = thickness + (4 if hovered else 0)
+            pen = QPen(color, width, Qt.SolidLine, Qt.RoundCap)
+            painter.setPen(pen)
+            effective = max(0.6, span_deg - gap * 2)
+            painter.drawArc(
+                arc_box.adjusted(-(width - thickness) / 2, -(width - thickness) / 2,
+                                 (width - thickness) / 2, (width - thickness) / 2),
+                int((start_deg - gap / 2) * 16), int(-effective * 16),
             )
-            painter.drawPie(rect, int(round((90 - start_deg) * 16)), int(round(-span_deg * 16)))
 
-        # حلقهٔ وسط
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(self.surface_color))
-        painter.drawEllipse(center, inner, inner)
-
-        # متن وسط
-        if self.hover_index >= 0:
-            value = self.values[self.hover_index]
-            caption = self.labels[self.hover_index]
+        # متن مرکزی
+        inner = arc_box.width() / 2 - thickness / 2 - 4
+        center = arc_box.center()
+        if 0 <= self.hover < len(self.values):
+            value = self.values[self.hover]
+            caption = pretty_label(self.labels[self.hover])
             big_text = fa_num(value)
-            small_text = f"{caption} • {_fmt_percent(value, total)}"
-            big_font = QFont(self.font())
-            big_font.setPointSizeF(max(13.0, inner * 0.16))
-            big_font.setBold(True)
-            painter.setFont(big_font)
-            painter.setPen(QPen(self.text_color))
-            painter.drawText(
-                QRectF(center.x() - inner, center.y() - inner * 0.55, inner * 2, inner * 0.6),
-                Qt.AlignCenter, big_text,
-            )
-            small_font = QFont(self.font())
-            small_font.setPointSizeF(max(7.5, inner * 0.075))
-            painter.setFont(small_font)
-            painter.setPen(QPen(self.muted_color))
-            metrics = QFontMetrics(small_font)
-            painter.drawText(
-                QRectF(center.x() - inner, center.y() + inner * 0.08, inner * 2, inner * 0.4),
-                Qt.AlignCenter,
-                metrics.elidedText(small_text, Qt.ElideRight, int(inner * 1.7)),
-            )
+            percent = fa(f"{value / total * 100:.0f}٪")
+            small_text = f"{caption} • {percent}"
+            muted = c["ink_3"]
         else:
-            big_font = QFont(self.font())
-            big_font.setPointSizeF(max(16.0, inner * 0.22))
-            big_font.setBold(True)
-            painter.setFont(big_font)
-            painter.setPen(QPen(self.text_color))
-            painter.drawText(
-                QRectF(center.x() - inner, center.y() - inner * 0.55, inner * 2, inner * 0.62),
-                Qt.AlignCenter, fa_num(total),
-            )
-            small_font = QFont(self.font())
-            small_font.setPointSizeF(max(7.5, inner * 0.08))
-            painter.setFont(small_font)
-            painter.setPen(QPen(self.muted_color))
-            painter.drawText(
-                QRectF(center.x() - inner, center.y() + inner * 0.1, inner * 2, inner * 0.4),
-                Qt.AlignCenter, self.center_caption,
-            )
+            big_text = fa_num(total)
+            small_text = self.caption
+            muted = c["ink_3"]
 
-    def _index_at(self, pos: QPointF) -> int:
+        font = app_font(max(13, int(inner * 0.30)), QFont.Black)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(c["ink"])))
+        painter.drawText(QRectF(center.x() - inner, center.y() - inner * 0.58, inner * 2, inner * 0.66),
+                         Qt.AlignCenter, big_text)
+        painter.setFont(app_font(max(7, int(inner * 0.13)), QFont.DemiBold))
+        painter.setPen(QPen(QColor(muted)))
+        metrics = QFontMetrics(painter.font())
+        painter.drawText(
+            QRectF(center.x() - inner, center.y() + inner * 0.12, inner * 2, inner * 0.42),
+            Qt.AlignCenter,
+            metrics.elidedText(small_text, Qt.ElideRight, int(inner * 1.9)),
+        )
+
+    def _index_at(self, point: QPointF) -> int:
         if not self._slices:
             return -1
-        side = min(self.width(), self.height())
-        margin = 16
-        box = QRectF(
-            (self.width() - side) / 2 + margin,
-            (self.height() - side) / 2 + margin,
-            side - 2 * margin,
-            side - 2 * margin,
-        )
+        box, thickness = self._geometry()
         center = box.center()
-        dx = pos.x() - center.x()
-        dy = pos.y() - center.y()
-        distance = math.hypot(dx, dy)
+        distance = math.hypot(point.x() - center.x(), point.y() - center.y())
         outer = box.width() / 2
-        inner = outer - max(20.0, outer * 0.30)
-        if distance > outer or distance < inner:
+        inner = outer - thickness - 6
+        if distance > outer + 2 or distance < inner:
             return -1
-        angle = (math.degrees(math.atan2(dy, dx)) + 90) % 360
+        angle = (math.degrees(math.atan2(-(point.y() - center.y()), point.x() - center.x()))) % 360
         for index, (start_deg, span_deg, _label) in enumerate(self._slices):
-            if start_deg <= angle < start_deg + span_deg:
+            beginning = (start_deg - span_deg) % 360
+            if beginning <= angle <= start_deg or (start_deg < beginning and (angle >= beginning or angle <= start_deg)):
                 return index
         return -1
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         index = self._index_at(event.pos())
-        if index != self.hover_index:
-            self.hover_index = index
+        if index != self.hover:
+            self.hover = index
             self.setCursor(Qt.PointingHandCursor if index >= 0 else Qt.ArrowCursor)
             self.update()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802
-        if self.hover_index != -1:
-            self.hover_index = -1
+        if self.hover != -1:
+            self.hover = -1
             self.update()
         super().leaveEvent(event)
 
@@ -2040,136 +2587,112 @@ class PieChartWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
-class ChartLegend(QWidget):
-    """راهنمای نمودار؛ هر ردیف قابل کلیک است.
-
-    برای خوانایی در عرض‌های کم، هر ردیف یک‌خطی رسم می‌شود: برچسب (راست)،
-    درصد و در صورت وجود فضا تعداد (چپ). تعداد و درصد با مختصات مشخص رسم
-    می‌شوند تا در متن راست‌به‌چپ جابه‌جا نشوند.
-    """
+class LegendList(QWidget):
+    """راهنمای نمودار به‌صورت ردیف‌های قابل کلیک."""
 
     itemClicked = pyqtSignal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
-        self.items: List[Tuple[str, int, int]] = []  # (برچسب، تعداد، درصد)
-        self.colors: List[QColor] = []
-        self.text_color = QColor("#1b2724")
-        self.muted_color = QColor("#66756f")
+        self.colors = colors
+        self.items: List[Tuple[str, int, int]] = []
+        self.palette: List[QColor] = []
         self.hover = -1
         self.max_rows = 12
+        self._dark = QColor(colors["surface"]).lightness() < 128
         self.setMouseTracking(True)
-        self.setMinimumWidth(120)
+        self.setMinimumWidth(110)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-    # ---------- داده و رنگ ----------
-    def set_data(self, labels: Sequence[str], values: Sequence[int], colors: Sequence[str]) -> None:
-        total = sum(int(v) for v in values)
-        self.items = [
-            (str(label), int(value), int(round(value / total * 100)) if total else 1)
-            for label, value in zip(labels, values)
-        ]
-        self.colors = [QColor(c) for c in colors]
-        self.hover = -1
+    def set_theme(self, colors: Dict[str, str], palette: Optional[Sequence[str]] = None) -> None:
+        self.colors = colors
+        self._dark = QColor(colors["surface"]).lightness() < 128
+        if palette:
+            self.palette = [QColor(c) for c in palette]
         self.update()
 
-    def set_colors_for_theme(self, text: str, muted: str) -> None:
-        self.text_color = QColor(text)
-        self.muted_color = QColor(muted)
+    def set_data(self, labels: Sequence[str], values: Sequence[int],
+                 palette: Sequence[str]) -> None:
+        total = sum(int(v) for v in values)
+        self.items = [(str(label), int(value), int(round(value / total * 100)) if total else 0)
+                      for label, value in zip(labels, values)]
+        self.palette = [QColor(c) for c in palette]
+        self.hover = -1
         self.update()
 
     def _color(self, index: int) -> QColor:
-        if not self.colors:
-            return QColor("#0d6b63")
-        color = QColor(self.colors[index % len(self.colors)])
-        cycle = index // len(self.colors)
-        return color.lighter(100 + 12 * cycle) if cycle else color
+        if not self.palette:
+            return QColor(self.colors["brand"])
+        color = QColor(self.palette[index % len(self.palette)])
+        if self._dark:
+            color = color.lighter(124)
+        cycle = index // len(self.palette)
+        return color.lighter(112 + 8 * cycle) if cycle else color
 
-    # ---------- چیدمان ----------
     def _row_height(self) -> int:
-        return 25
+        return 26
 
     def _rows(self) -> List[Tuple[str, int, int]]:
-        fits = max(1, int((self.height() - 8) // self._row_height()))
+        fits = max(1, int((self.height() - 6) // self._row_height()))
         limit = min(self.max_rows, fits)
         if limit < len(self.items):
-            limit = max(1, limit - 1)  # جای یک ردیف برای «و N مورد دیگر»
+            limit = max(1, limit - 1)
         return self.items[: max(1, limit)]
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        rows = max(1, len(self._rows()))
-        return QSize(150, 6 + rows * self._row_height())
+        return QSize(150, 8 + max(1, len(self._rows())) * self._row_height())
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(120, 40)
+        return QSize(110, 40)
 
-    # ---------- رسم ----------
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-        font = QFont(self.font())
-        font.setPointSizeF(max(8.0, min(9.5, font.pointSizeF() - 0.3)))
+        c = self.colors
+        font = app_font(8, QFont.DemiBold)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         rows = self._rows()
         row_height = self._row_height()
-        top = 4
         width = self.width()
-        show_count = width >= 168
-
+        top = 3
         percent_texts = [fa(f"{percent}٪") for _l, _v, percent in rows]
-        percent_width = max([metrics.horizontalAdvance(t) for t in percent_texts] or [0]) + 2
-        count_widths = [metrics.horizontalAdvance(bidi(fa_num(value))) for _l, value, _p in rows]
-        count_width = (max(count_widths) if count_widths else 0) + 6 if show_count else 0
-        dot_space = 13
-        gap = 7
+        percent_width = max([metrics.horizontalAdvance(t) for t in percent_texts] or [0]) + 4
 
         for index, (label, value, percent) in enumerate(rows):
             y = top + index * row_height
             if index == self.hover:
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(QColor(
-                    self.muted_color.red(), self.muted_color.green(),
-                    self.muted_color.blue(), 24,
-                )))
-                painter.drawRoundedRect(QRectF(0, y + 1, width, row_height - 2), 6, 6)
-
+                painter.setBrush(alpha(c["brand"], 16))
+                painter.drawRoundedRect(QRectF(0, y + 1, width, row_height - 3), 7, 7)
+            # نشانگر رنگی
+            marker = QRectF(width - 13, y + row_height / 2 - 4, 8, 8)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(self._color(index)))
-            painter.drawEllipse(QPointF(width - 5, y + row_height / 2), 4.5, 4.5)
-
-            label_left = percent_width + count_width + gap
-            label_width = max(16, int(width - label_left - dot_space - 4))
-            painter.setFont(font)
-            painter.setPen(QPen(self.text_color))
+            painter.setBrush(self._color(index))
+            painter.drawRoundedRect(marker, 2.5, 2.5)
+            painter.setPen(QPen(QColor(c["ink_2"])))
+            label_left = percent_width + 10
+            label_width = max(16, int(width - label_left - 20))
             painter.drawText(
                 QRectF(label_left, y, label_width, row_height),
                 Qt.AlignRight | Qt.AlignVCenter,
-                metrics.elidedText(label, Qt.ElideRight, label_width),
+                metrics.elidedText(pretty_label(label).replace(" درصد", "٪"),
+                                   Qt.ElideRight, label_width),
             )
-            painter.setPen(QPen(self.muted_color))
-            painter.drawText(
-                QRectF(0, y, percent_width, row_height),
-                Qt.AlignLeft | Qt.AlignVCenter, percent_texts[index],
-            )
-            if show_count:
-                painter.drawText(
-                    QRectF(percent_width + gap - 4, y, count_width, row_height),
-                    Qt.AlignLeft | Qt.AlignVCenter, bidi(fa_num(value)),
-                )
+            painter.setPen(QPen(QColor(c["ink_3"])))
+            painter.drawText(QRectF(0, y, percent_width, row_height),
+                             Qt.AlignLeft | Qt.AlignVCenter, percent_texts[index])
 
         if len(self.items) > len(rows):
-            painter.setPen(QPen(self.muted_color))
+            painter.setPen(QPen(QColor(c["ink_3"])))
             painter.drawText(
                 QRectF(0, top + len(rows) * row_height, width, row_height),
-                Qt.AlignCenter,
-                f"و {fa(len(self.items) - len(rows))} مورد دیگر",
+                Qt.AlignCenter, f"و {fa(len(self.items) - len(rows))} مورد دیگر",
             )
 
-    # ---------- تعامل ----------
     def _row_at(self, y: int) -> int:
-        row = (y - 4) // self._row_height()
+        row = (y - 3) // self._row_height()
         return int(row) if 0 <= row < len(self._rows()) else -1
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
@@ -2179,9 +2702,7 @@ class ChartLegend(QWidget):
             self.setCursor(Qt.PointingHandCursor if row >= 0 else Qt.ArrowCursor)
             if 0 <= row < len(self._rows()):
                 label, value, percent = self._rows()[row]
-                self.setToolTip(
-                    f"{label}\n{fa_num(value)} قرارداد ({fa(percent)}٪) — کلیک برای فیلتر"
-                )
+                self.setToolTip(f"{pretty_label(label)}\n{fa_num(value)} قرارداد ({fa(percent)}٪)")
             else:
                 self.setToolTip("")
             self.update()
@@ -2199,97 +2720,95 @@ class ChartLegend(QWidget):
         super().mouseReleaseEvent(event)
 
 
-class BarChartWidget(QWidget):
-    """نمودار میله‌ای افقی برای پرتکرارترین انواع قرارداد."""
+class BarChart(QWidget):
+    """نمودار میله‌ای افقی با میله‌های گرد و راهنمای مقدار."""
 
     barClicked = pyqtSignal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
+        self.colors = colors
         self.items: List[Dict[str, Any]] = []
-        self.text_color = QColor("#1b2724")
-        self.muted_color = QColor("#66756f")
-        self.bar_color = QColor("#0d6b63")
-        self.grid_color = QColor("#dfe8e5")
         self.hover = -1
         self.setMouseTracking(True)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(200)
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
 
     def set_data(self, items: Sequence[Dict[str, Any]]) -> None:
         self.items = list(items)
         self.hover = -1
         self.update()
 
-    def set_colors_for_theme(self, text: str, muted: str, bar: str, grid: str) -> None:
-        self.text_color = QColor(text)
-        self.muted_color = QColor(muted)
-        self.bar_color = QColor(bar)
-        self.grid_color = QColor(grid)
-        self.update()
+    def _row_height(self) -> int:
+        return int(max(24, min(40, (self.height() - 12) / max(1, len(self.items)))))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        font = QFont(self.font())
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        c = self.colors
+        font = app_font(8, QFont.DemiBold)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         if not self.items:
-            painter.setPen(QPen(self.muted_color))
+            painter.setPen(QPen(QColor(c["ink_3"])))
             painter.drawText(self.rect(), Qt.AlignCenter, "داده‌ای برای نمایش نیست")
             return
 
-        row_height = int(max(20, min(38, (self.height() - 10) / max(1, len(self.items)))))
+        row_height = self._row_height()
         max_count = max(1, max(int(item["count"]) for item in self.items))
-        sample_value = bidi(f"{fa_num(max_count)} • {fa(100)}٪")
-        value_width = metrics.horizontalAdvance(sample_value) + 14
-        label_width = max(90, min(int(self.width() * 0.40), self.width() - value_width - 80))
-        top = (self.height() - row_height * len(self.items)) / 2 + 4
-        track_right = self.width() - label_width - 8
-        track_left = value_width + 8
+        value_width = metrics.horizontalAdvance(bidi("۱۰۰ درصد")) + 14
+        label_width = int(max(90, min(max(120, self.width() * 0.30),
+                                      self.width() - value_width - 96)))
+        track_right = self.width() - label_width - 12
+        track_left = value_width + 12
         track_width = max(40, track_right - track_left)
+        top = (self.height() - row_height * len(self.items)) / 2 + 2
 
         for index, item in enumerate(self.items):
             y = top + index * row_height
-            bar_y = y + row_height * 0.28
-            bar_h = max(8, row_height * 0.42)
-            ratio = item["count"] / max_count
-            width = max(4, track_width * ratio)
+            bar_height = max(9, row_height * 0.36)
+            bar_y = y + (row_height - bar_height) / 2
+            ratio = item["count"] / (max_count * 1.04)
+            width = max(6.0, track_width * ratio)
             hovered = index == self.hover
+
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(self.grid_color.red(), self.grid_color.green(),
-                                           self.grid_color.blue(), 90)))
-            painter.drawRoundedRect(QRectF(track_right - track_width, bar_y, track_width, bar_h),
-                                    bar_h / 2, bar_h / 2)
-
-            color = QColor(self.bar_color)
-            if hovered:
-                color = color.lighter(112)
+            painter.setBrush(alpha(c["border"], 120))
+            painter.drawRoundedRect(QRectF(track_right - track_width, bar_y, track_width, bar_height),
+                                    bar_height / 2, bar_height / 2)
             gradient = QLinearGradient(track_right - width, 0, track_right, 0)
-            gradient.setColorAt(0, color.lighter(135))
-            gradient.setColorAt(1, color)
-            painter.setBrush(QBrush(gradient))
-            painter.drawRoundedRect(QRectF(track_right - width, bar_y, width, bar_h),
-                                    bar_h / 2, bar_h / 2)
+            if hovered:
+                gradient.setColorAt(0, QColor(c["brand_2"]))
+                gradient.setColorAt(1, QColor(c["brand_deep"]))
+            else:
+                gradient.setColorAt(0, QColor(c["brand_2"]))
+                gradient.setColorAt(1, QColor(c["brand"]))
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(QRectF(track_right - width, bar_y, width, bar_height),
+                                    bar_height / 2, bar_height / 2)
 
-            painter.setPen(QPen(self.text_color))
+            painter.setPen(QPen(QColor(c["ink_2"])))
             painter.drawText(
-                QRectF(track_right + 8, y, label_width, row_height),
+                QRectF(track_right + 10, y, label_width, row_height),
                 Qt.AlignRight | Qt.AlignVCenter,
-                metrics.elidedText(str(item["label"]), Qt.ElideMiddle, label_width),
+                metrics.elidedText(
+                    f"{item['label']} ({fa_num(item['count'])})", Qt.ElideMiddle, label_width,
+                ),
             )
-            painter.setPen(QPen(self.muted_color))
-            value_text = bidi(f"{fa_num(item['count'])} • {fa(item['percent'])}٪")
-            painter.drawText(
-                QRectF(0, y, value_width, row_height),
-                Qt.AlignLeft | Qt.AlignVCenter,
-                metrics.elidedText(value_text, Qt.ElideRight, int(value_width)),
-            )
+            value_text = bidi(f"{fa(item['percent'])}٪")
+            painter.setPen(QPen(QColor(c["ink_3"])))
+            painter.drawText(QRectF(0, y, value_width, row_height),
+                             Qt.AlignLeft | Qt.AlignVCenter, value_text)
 
     def _row_at(self, y: int) -> int:
         if not self.items:
             return -1
-        row_height = int(max(20, min(38, (self.height() - 10) / max(1, len(self.items)))))
-        top = (self.height() - row_height * len(self.items)) / 2 + 4
+        row_height = self._row_height()
+        top = (self.height() - row_height * len(self.items)) / 2 + 2
         row = int((y - top) // row_height)
         return row if 0 <= row < len(self.items) else -1
 
@@ -2313,231 +2832,102 @@ class BarChartWidget(QWidget):
         super().mouseReleaseEvent(event)
 
 
-class ProgressBarWidget(QWidget):
-    """نوار پیشرفت با انیمیشن و مقدار درصد."""
+class MiniBar(QWidget):
+    """نوار ظریف درصد در کارت‌های آماری."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, colors: Dict[str, str], color: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
+        self.colors = colors
+        self.color = QColor(color) if color else QColor(colors["brand"])
         self.value = 0.0
-        self.display = 0.0
-        self.track = QColor("#e3ebe8")
-        self.fill = QColor("#0d6b63")
-        self.text_color = QColor("#1b2724")
-        self.muted = QColor("#66756f")
-        self.setMinimumHeight(20)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
+        self.setFixedHeight(6)
+        self.setMinimumWidth(40)
 
-    def set_value(self, value: float, animate: bool = True) -> None:
-        self.value = max(0.0, min(100.0, float(value)))
-        if not animate:
-            self.display = self.value
-            self.update()
+    def set_theme(self, colors: Dict[str, str], color: Optional[str] = None) -> None:
+        self.colors = colors
+        if color:
+            self.color = QColor(color)
+        self.update()
+
+    def set_value(self, value: float) -> None:
+        self.value = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(self.rect())
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(alpha(self.colors["ink_3"], 40))
+        painter.drawRoundedRect(body, 3, 3)
+        if self.value > 0:
+            width = max(6.0, body.width() * self.value)
+            gradient = QLinearGradient(body.right() - width, 0, body.right(), 0)
+            gradient.setColorAt(0, self.color.lighter(125))
+            gradient.setColorAt(1, self.color)
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(QRectF(body.right() - width, body.top(), width, body.height()), 3, 3)
+
+
+class LineSpark(QWidget):
+    """خط کوچک روند برای کارت‌های شاخص (تزئینی اما مبتنی بر داده)."""
+
+    def __init__(self, colors: Dict[str, str], color: Optional[str] = None, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.color = QColor(color) if color else QColor(colors["brand_2"])
+        self.points: List[float] = []
+        self.setFixedHeight(30)
+        self.setMinimumWidth(60)
+
+    def set_theme(self, colors: Dict[str, str], color: Optional[str] = None) -> None:
+        self.colors = colors
+        if color:
+            self.color = QColor(color)
+        self.update()
+
+    def set_values(self, values: Sequence[float]) -> None:
+        self.points = [float(v) for v in values]
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if len(self.points) < 2:
             return
-        self._timer.stop()
-        self._timer.start(16)
-
-    def _tick(self) -> None:
-        delta = self.value - self.display
-        if abs(delta) < 0.4:
-            self.display = self.value
-            self._timer.stop()
-        else:
-            self.display += delta * 0.18
-        self.update()
-
-    def set_colors_for_theme(self, track: str, fill: str, text: str, muted: str) -> None:
-        self.track = QColor(track)
-        self.fill = QColor(fill)
-        self.text_color = QColor(text)
-        self.muted = QColor(muted)
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        height = 10
-        track = QRectF(0, (self.height() - height) / 2, self.width(), height)
+        body = QRectF(self.rect()).adjusted(1, 2, -1, -2)
+        low, high = min(self.points), max(self.points)
+        span = high - low if high > low else 1.0
+        step = body.width() / (len(self.points) - 1)
+        path = QPainterPath()
+        coords = []
+        for index, value in enumerate(self.points):
+            x = body.right() - index * step
+            y = body.bottom() - (value - low) / span * body.height()
+            coords.append(QPointF(x, y))
+        path.moveTo(coords[0])
+        for point in coords[1:]:
+            path.lineTo(point)
+        fill = QPainterPath(path)
+        fill.lineTo(QPointF(coords[-1].x(), body.bottom()))
+        fill.lineTo(QPointF(coords[0].x(), body.bottom()))
+        fill.closeSubpath()
+        gradient = QLinearGradient(0, body.top(), 0, body.bottom())
+        gradient.setColorAt(0, alpha(self.color.name(), 70))
+        gradient.setColorAt(1, alpha(self.color.name(), 0))
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(self.track))
-        painter.drawRoundedRect(track, height / 2, height / 2)
-        if self.display > 0:
-            width = max(height, track.width() * self.display / 100.0)
-            gradient = QLinearGradient(track.right() - width, 0, track.right(), 0)
-            gradient.setColorAt(0, self.fill.lighter(128))
-            gradient.setColorAt(1, self.fill)
-            painter.setBrush(QBrush(gradient))
-            painter.drawRoundedRect(
-                QRectF(track.right() - width, track.top(), width, height),
-                height / 2, height / 2,
-            )
-        painter.setPen(QPen(self.muted))
-        font = QFont(self.font())
-        font.setPointSizeF(max(7.5, font.pointSizeF() - 1))
-        painter.setFont(font)
-        painter.drawText(track, Qt.AlignCenter, fa(f"{self.value:.0f}%") if self.value else "")
+        painter.setBrush(gradient)
+        painter.drawPath(fill)
+        painter.setBrush(Qt.NoBrush)
+        pen = QPen(self.color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
 
-# ---------------------------------------------------------------------------
-# کارت‌های آماری و کارت نمودار
-# ---------------------------------------------------------------------------
-class StatCard(ClickableFrame):
-    """کارت یک شاخص آماری؛ کلیک روی آن جدول را فیلتر می‌کند."""
 
-    def __init__(self, title: str, icon: str, color: str, soft: str,
-                 filter_key: Optional[str] = None, subtitle: str = "", parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("Card")
-        self.filter_key = filter_key
-        self.default_sub = subtitle
-        self._accent = QColor(color)
-        self._soft = QColor(soft)
-        self._hover = False
-        self.setMinimumHeight(92)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(11)
-
-        self.badge = IconBadge(icon, color, soft, 40)
-        layout.addWidget(self.badge, 0, Qt.AlignTop)
-
-        texts = QVBoxLayout()
-        texts.setSpacing(1)
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("CardTitle")
-        self.title_label.setWordWrap(True)
-        self.value_label = QLabel("—")
-        self.value_label.setObjectName("CardValue")
-        self.sub_label = QLabel(subtitle)
-        self.sub_label.setObjectName("Muted")
-        font = self.sub_label.font()
-        font.setPointSizeF(max(7.5, font.pointSizeF() - 1.5))
-        self.sub_label.setFont(font)
-        texts.addWidget(self.title_label)
-        texts.addWidget(self.value_label)
-        texts.addWidget(self.sub_label)
-        texts.addStretch(1)
-        layout.addLayout(texts, 1)
-
-    def set_value(self, value: Any, sub: str = "") -> None:
-        text = fa_num(value) if isinstance(value, (int, float)) else fa(value)
-        self.value_label.setText(bidi(text))
-        caption = sub or self.default_sub
-        self.sub_label.setText(bidi(caption))
-        self.sub_label.setVisible(bool(caption))
-
-    def set_accent(self, color: str, soft: str) -> None:
-        self._accent = QColor(color)
-        self._soft = QColor(soft)
-        self.badge.color = QColor(color)
-        self.badge.background = QColor(soft)
-        self.badge.update()
-        self.update()
-
-    def enterEvent(self, event) -> None:  # noqa: N802
-        self._hover = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:  # noqa: N802
-        self._hover = False
-        self.update()
-        super().leaveEvent(event)
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(QPen(self._soft if not self._hover else self._accent, 1))
-        painter.setBrush(QBrush(self._soft if self._hover else QColor(
-            self.palette().color(QPalette.Base))))
-        painter.drawRoundedRect(rect, 14, 14)
-        # نوار رنگی سمت راست
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(self._accent))
-        painter.drawRoundedRect(QRectF(rect.right() - 3, rect.top() + 14, 3.5,
-                                       max(10.0, rect.height() - 28)), 2, 2)
-
-
-class ChartCard(QFrame):
-    """قاب نمودار: عنوان، نمودار و راهنما."""
-
-    def __init__(self, title: str, subtitle: str, chart: QWidget, legend: QWidget,
-                 parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("Card")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 12)
-        layout.setSpacing(6)
-
-        header = QHBoxLayout()
-        header.setSpacing(8)
-        title_label = QLabel(title)
-        title_label.setObjectName("SectionTitle")
-        title_label.setMinimumWidth(40)
-        title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        header.addWidget(title_label, 1)
-        header.addStretch(1)
-        self.subtitle_label = QLabel(subtitle)
-        self.subtitle_label.setObjectName("Chip")
-        header.addWidget(self.subtitle_label, 0)
-        layout.addLayout(header)
-
-        body = QHBoxLayout()
-        body.setSpacing(12)
-        chart.setMaximumWidth(205)
-        chart.setMinimumWidth(150)
-        legend.setMinimumWidth(150)
-        body.addWidget(chart, 0, Qt.AlignCenter)
-        body.addWidget(legend, 1)
-        layout.addLayout(body, 1)
-        self.chart = chart
-        self.legend = legend
-
-
-class AlertBanner(QFrame):
-    """نوار هشدار بالای صفحه."""
-
-    actionClicked = pyqtSignal()
-    closeClicked = pyqtSignal()
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("Banner")
-        self.setVisible(False)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-        self.icon = IconWidget("alert", "#b45309", 18)
-        layout.addWidget(self.icon)
-        self.label = QLabel("")
-        self.label.setWordWrap(True)
-        layout.addWidget(self.label, 1)
-        self.action_button = QPushButton("مشاهده")
-        self.action_button.setObjectName("BannerAction")
-        self.action_button.clicked.connect(self.actionClicked.emit)
-        layout.addWidget(self.action_button)
-        self.close_button = QToolButton()
-        self.close_button.setObjectName("BannerClose")
-        self.close_button.setText("×")
-        self.close_button.setToolTip("بستن هشدار")
-        self.close_button.clicked.connect(self._hide)
-        layout.addWidget(self.close_button)
-
-    def _hide(self) -> None:
-        self.setVisible(False)
-        self.closeClicked.emit()
-
-    def show_message(self, text: str, action_text: str = "") -> None:
-        self.label.setText(text)
-        self.action_button.setVisible(bool(action_text))
-        self.action_button.setText(action_text)
-        self.setVisible(True)
-
-
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# مدل و نمای جدول قراردادها
+# ==========================================================================
 # مدل جدول قراردادها
 # ---------------------------------------------------------------------------
 @dataclass
@@ -2594,18 +2984,18 @@ class ContractTableModel(QAbstractTableModel):
     """مدل جدول با فیلتر، جستجو و مرتب‌سازی داخلی."""
 
     COLUMNS: List[ColumnSpec] = [
-        ColumnSpec("ردیف", 60, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
-        ColumnSpec("نام شرکت", 210, lambda r, i: r.col2),
-        ColumnSpec("شماره قرارداد", 140, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
-        ColumnSpec("موضوع قرارداد", 300, lambda r, i: r.col4),
-        ColumnSpec("نوع قرارداد", 150, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
-        ColumnSpec("موارد باز", 112, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
-        ColumnSpec("کسورات اسناد اختتام", 320, lambda r, i: r.deductions),
+        ColumnSpec("ردیف", 46, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
+        ColumnSpec("نام شرکت", 144, lambda r, i: r.col2),
+        ColumnSpec("شماره قرارداد", 122, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
+        ColumnSpec("موضوع قرارداد", 180, lambda r, i: r.col4),
+        ColumnSpec("نوع قرارداد", 126, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
+        ColumnSpec("موارد باز", 78, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
+        ColumnSpec("کسورات اسناد اختتام", 150, lambda r, i: r.deductions),
         ColumnSpec("پیشرفت کارکرد", 120, lambda r, i: r.progress_status, int(Qt.AlignCenter), "chip:progress"),
-        ColumnSpec("الحاقیه", 155, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
-        ColumnSpec("وضعیت پکیج", 125, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
-        ColumnSpec("فایل", 80, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
-        ColumnSpec("نشان", 60, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
+        ColumnSpec("الحاقیه", 116, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
+        ColumnSpec("وضعیت پکیج", 96, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
+        ColumnSpec("فایل", 48, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
+        ColumnSpec("نشان", 38, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
     ]
 
     def __init__(self, notes: NotesStore, parent=None) -> None:
@@ -2660,6 +3050,11 @@ class ContractTableModel(QAbstractTableModel):
     def visible_count(self) -> int:
         return len(self._rows)
 
+    @property
+    def filtered_total(self) -> int:
+        """سازگاری با کد قدیمی: تعداد ردیف‌های نمای فعلی."""
+        return len(self._rows)
+
     # ---- فیلتر و جستجو ----
     def _matches_search(self, record: ContractRecord, query: str) -> bool:
         if not query:
@@ -2683,20 +3078,28 @@ class ContractTableModel(QAbstractTableModel):
             return record.key in self._bookmarks
         if key == "expired":
             return record.is_expired
+        if key == "pdf":
+            return bool(record.pdf_file)
+        if key == "needs_follow":
+            return bool(record.open_flags) or record.is_expired or record.has_deductions
         if key in FLAG_LABELS:
             return bool(record.flags.get(key))
         if ":" in key:
             field, _, value = key.partition(":")
             if field == "type":
                 return record.f_value == value
+
             if field == "status":
                 return record.as_status == value
+            def same(raw: str) -> bool:
+                return bool(raw) and (raw == value or pretty_label(raw) == value)
+
             if field == "progress":
-                return record.progress_status == value
+                return same(record.progress_status)
             if field == "completion":
-                return record.completion_status == value
+                return same(record.completion_status)
             if field == "annex":
-                return record.annex_status == value
+                return same(record.annex_status)
             if field == "bookmarked":
                 return record.key == value
         return True
@@ -2913,6 +3316,10 @@ class ContractDelegate(QStyledItemDelegate):
             fg_hex, bg_hex = style_map.get(text, ("", ""))
             if fg_hex:
                 fg, bg = QColor(fg_hex), QColor(bg_hex)
+                if QColor(colors["surface"]).lightness() < 128:
+                    fg = QColor(fg_hex).lighter(150)
+                    bg = QColor(fg_hex)
+                    bg.setAlpha(46)
             else:
                 fg, bg = QColor(colors["primary_dark"]), QColor(colors["primary_soft"])
             self._draw_chip(painter, rect, text, fg, bg, font)
@@ -2935,7 +3342,8 @@ class ContractDelegate(QStyledItemDelegate):
         painter.setFont(chip_font)
         metrics = QFontMetrics(chip_font)
         max_width = max(20, rect.width() - 14)
-        label = metrics.elidedText(text, Qt.ElideRight, max_width - 18)
+        label = metrics.elidedText(pretty_label(text).replace(" درصد", "٪"),
+                                   Qt.ElideRight, max_width - 18)
         width = min(max_width, metrics.horizontalAdvance(label) + 18)
         chip = QRectF(
             rect.center().x() - width / 2,
@@ -2949,6 +3357,13 @@ class ContractDelegate(QStyledItemDelegate):
         painter.drawText(chip, Qt.AlignCenter, label)
 
 
+
+# ==========================================================================
+# بارگذاری داده و خروجی اکسل
+# ==========================================================================
+# ---------------------------------------------------------------------------
+# ابزارهای داده و خروجی (بارگذاری، خروجی اکسل و گزارش)
+# ---------------------------------------------------------------------------
 class ExcelLoader(QThread):
     """بارگذاری اکسل در رشتهٔ جداگانه تا رابط کاربری قفل نشود."""
 
@@ -2977,950 +3392,11 @@ class ExcelLoader(QThread):
 # ---------------------------------------------------------------------------
 # چیدمان جریانی (برای کارت‌های واکنش‌گرا)
 # ---------------------------------------------------------------------------
-class FlowLayout(QLayout):
-    """چیدمان کارت‌ها که با تغییر عرض پنجره می‌شکند."""
-
-    def __init__(self, parent=None, margin: int = 0, spacing: int = 10) -> None:
-        super().__init__(parent)
-        self._items: List[Any] = []
-        self._spacing = spacing
-        self.setContentsMargins(margin, margin, margin, margin)
-
-    def addItem(self, item) -> None:  # noqa: N802
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, index: int):  # noqa: N802
-        return self._items[index] if 0 <= index < len(self._items) else None
-
-    def takeAt(self, index: int):  # noqa: N802
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self):  # noqa: N802
-        return Qt.Orientations(Qt.Orientation(0))
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return self._do_layout(QRectF(0, 0, width, 0), True)
-
-    def setGeometry(self, rect) -> None:  # noqa: N802
-        super().setGeometry(rect)
-        self._do_layout(QRectF(rect), False)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:  # noqa: N802
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
-
-    def _do_layout(self, rect: QRectF, test_only: bool) -> int:
-        margins = self.contentsMargins()
-        effective = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
-        x, y = effective.x(), effective.y()
-        line_height = 0
-        for item in self._items:
-            widget = item.widget()
-            if widget is None or widget.isHidden():
-                continue
-            item_size = item.sizeHint()
-            if x + item_size.width() > effective.right() + 1 and line_height > 0:
-                x = effective.x()
-                y = y + line_height + self._spacing
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRectF(x, y, item_size.width(), item_size.height()).toRect())
-            x = x + item_size.width() + self._spacing
-            line_height = max(line_height, item_size.height())
-        return int(y + line_height - rect.y() + margins.bottom())
-
-
-def make_section_title(text: str, subtitle: str = "") -> QWidget:
-    widget = QWidget()
-    layout = QHBoxLayout(widget)
-    layout.setContentsMargins(2, 6, 2, 0)
-    layout.setSpacing(8)
-    label = QLabel(text)
-    label.setObjectName("SectionTitle")
-    layout.addWidget(label)
-    if subtitle:
-        sub = QLabel(subtitle)
-        sub.setObjectName("Muted")
-        layout.addWidget(sub)
-    layout.addStretch(1)
-    return widget
 
 
 # ---------------------------------------------------------------------------
-# صفحهٔ داشبورد
+# خروجی‌های اکسل
 # ---------------------------------------------------------------------------
-CARD_SPECS: List[Tuple[str, str, str, Optional[str], str]] = [
-    # (عنوان، آیکون، کلید رنگ، کلید فیلتر، زیرنویس)
-    ("تعداد قرارداد", "document", "primary", "all", "کل قراردادهای ثبت‌شده"),
-    ("کسورات اسناد اختتام", "scissors", "warning", "deductions", "دارای کسورات"),
-    ("مفاصاحساب بیمه", "shield", "danger", "mofasa", "نیازمند پیگیری"),
-    ("تسویهٔ مالی نهایی", "cube", "info", "financial", "نیازمند تسویه"),
-    ("بالانس متریال", "chart", "primary", "balance", "نیازمند بالانس"),
-    ("تحویل موقت", "clock", "warning", "temporary", "نیازمند تحویل"),
-    ("تحویل قطعی", "truck", "info", "delivery", "نیازمند تحویل قطعی"),
-    ("صورت‌وضعیت ماقبل قطعی", "document", "primary", "prefinal", "نیازمند صورت‌وضعیت"),
-    ("صورت‌وضعیت قطعی", "check", "primary", "statement", "نیازمند صورت‌وضعیت"),
-    ("اقرارنامه", "note", "warning", "affidavit", "نیازمند اقرارنامه"),
-]
-
-COLOR_SOFT = {
-    "primary": ("primary", "primary_soft"),
-    "danger": ("danger", "danger_soft"),
-    "warning": ("warning", "warning_soft"),
-    "info": ("info", "info_soft"),
-    "success": ("success", "success_soft"),
-}
-
-
-class PreviewTableModel(ContractTableModel):
-    """مدل جدول کوچک داشبورد (محدود به چند ردیف)."""
-
-    def __init__(self, notes: NotesStore, limit: int = 12, parent=None) -> None:
-        super().__init__(notes, parent)
-        self.limit = limit
-        self.filtered_total = 0
-
-    def _apply(self) -> None:
-        super()._apply()
-        self.filtered_total = len(self._rows)
-        self._rows = self._rows[: self.limit]
-
-
-class StatCardsGrid(QWidget):
-    """شبکهٔ واکنش‌گرای کارت‌های آماری (تعداد ستون‌ها با عرض پنجره تغییر می‌کند)."""
-
-    def __init__(self, spacing: int = 10, parent=None) -> None:
-        super().__init__(parent)
-        self.grid = QGridLayout(self)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(spacing)
-        self.cards: List[QWidget] = []
-        self.columns = 0
-
-    def add_card(self, card: QWidget) -> None:
-        self.cards.append(card)
-
-    def relayout(self, columns: int) -> None:
-        columns = max(1, min(6, int(columns)))
-        if columns == self.columns:
-            return
-        self.columns = columns
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(self)
-        for index, card in enumerate(self.cards):
-            self.grid.addWidget(card, index // columns, index % columns)
-        for column in range(columns):
-            self.grid.setColumnStretch(column, 1)
-        for column in range(columns, 6):
-            self.grid.setColumnStretch(column, 0)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        columns = max(1, self.columns)
-        rows = (len(self.cards) + columns - 1) // columns
-        height = rows * 92 + max(0, rows - 1) * 10
-        return QSize(400, height)
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(200, 92)
-
-
-class ResponsiveRow(QWidget):
-    """ردیفی از کارت‌ها که در عرض کم، به‌صورت خودکار زیر هم می‌چیند."""
-
-    def __init__(self, min_card_width: int = 260, max_columns: int = 3,
-                 spacing: int = 14, parent=None) -> None:
-        super().__init__(parent)
-        self.grid = QGridLayout(self)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(spacing)
-        self.cards: List[QWidget] = []
-        self.min_card_width = min_card_width
-        self.max_columns = max_columns
-        self.columns = 0
-
-    def add_card(self, widget: QWidget) -> None:
-        self.cards.append(widget)
-        widget.setMinimumWidth(self.min_card_width)
-
-    def relayout(self, available: int) -> None:
-        if available <= 0:
-            return
-        columns = max(1, min(self.max_columns, available // self.min_card_width))
-        columns = min(columns, max(1, len(self.cards)))
-        if columns == self.columns:
-            return
-        self.columns = columns
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(self)
-        for index, card in enumerate(self.cards):
-            self.grid.addWidget(card, index // columns, index % columns)
-        for column in range(max(self.max_columns, 1)):
-            self.grid.setColumnStretch(column, 1 if column < columns else 0)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        columns = max(1, self.columns)
-        rows = (len(self.cards) + columns - 1) // columns
-        return QSize(self.min_card_width * columns, rows * 300)
-
-
-class DashboardPage(QWidget):
-    """صفحهٔ اصلی: شاخص‌ها، نمودارها و پیش‌نمایش جدول."""
-
-    cardClicked = pyqtSignal(str)
-    sliceClicked = pyqtSignal(str, str)
-    showContracts = pyqtSignal()
-    refreshRequested = pyqtSignal()
-    pickRequested = pyqtSignal()
-    recordActivated = pyqtSignal(object)
-
-    def __init__(self, notes: NotesStore, parent=None) -> None:
-        super().__init__(parent)
-        self.notes = notes
-        self._colors = THEMES["light"]
-        self._build_ui()
-
-    # ---------- ساخت رابط ----------
-    def _build_ui(self) -> None:
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        outer.addWidget(self.scroll)
-
-        container = QWidget()
-        self.container = container
-        self.layout_main = QVBoxLayout(container)
-        self.layout_main.setContentsMargins(22, 16, 22, 22)
-        self.layout_main.setSpacing(14)
-        self.scroll.setWidget(container)
-
-        # عنوان صفحه
-        title_row = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(0)
-        self.title_label = QLabel("داشبورد قراردادها")
-        self.title_label.setObjectName("PageTitle")
-        self.subtitle_label = QLabel("پروژهٔ مهر خلیج فارس — گروه مهندسی واحد هزینه و درآمد")
-        self.subtitle_label.setObjectName("Muted")
-        self.subtitle_label.setWordWrap(True)
-        title_box.addWidget(self.title_label)
-        title_box.addWidget(self.subtitle_label)
-        title_row.addLayout(title_box)
-        title_row.addStretch(1)
-        self.source_chip = QLabel("در حال بارگذاری…")
-        self.source_chip.setObjectName("Chip")
-        title_row.addWidget(self.source_chip, 0, Qt.AlignTop)
-        self.layout_main.addLayout(title_row)
-
-        # نوار هشدار
-        self.banner = AlertBanner()
-        self.banner.actionClicked.connect(self._banner_action)
-        self._banner_target = "pick"
-        self.layout_main.addWidget(self.banner)
-
-        # کارت پیشرفت
-        hero = QFrame()
-        hero.setObjectName("Card")
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(20, 16, 20, 16)
-        hero_layout.setSpacing(18)
-        hero_text = QVBoxLayout()
-        hero_text.setSpacing(2)
-        hero_title = QLabel("پیشرفت کل اختتام")
-        hero_title.setObjectName("CardTitle")
-        self.progress_value = QLabel("—")
-        self.progress_value.setObjectName("CardValue")
-        self.progress_value.setStyleSheet("font-size: 30pt;")
-        self.progress_hint = QLabel("بر اساس ستون درصد پیشرفت شیت colorcode")
-        self.progress_hint.setObjectName("Muted")
-        hero_text.addWidget(hero_title)
-        hero_text.addWidget(self.progress_value)
-        hero_text.addWidget(self.progress_hint)
-        hero_layout.addLayout(hero_text, 2)
-
-        hero_progress = QVBoxLayout()
-        hero_progress.setSpacing(6)
-        self.progress_bar = ProgressBarWidget()
-        self.progress_bar.setMinimumHeight(26)
-        hero_progress.addWidget(self.progress_bar)
-        info_row = QHBoxLayout()
-        self.source_info = QLabel("—")
-        self.source_info.setObjectName("Muted")
-        self.source_info.setWordWrap(True)
-        info_row.addWidget(self.source_info, 1)
-        refresh_btn = QPushButton("به‌روزرسانی داده‌ها")
-        refresh_btn.setObjectName("Primary")
-        refresh_btn.clicked.connect(self.refreshRequested.emit)
-        info_row.addWidget(refresh_btn, 0)
-        hero_progress.addLayout(info_row)
-        hero_layout.addLayout(hero_progress, 3)
-        self.layout_main.addWidget(hero)
-
-        # کارت‌های آماری
-        self.cards: Dict[str, StatCard] = {}
-        self.cards_holder = StatCardsGrid(10)
-        self.layout_main.addWidget(self.cards_holder)
-        for title, icon, color_key, filter_key, subtitle in CARD_SPECS:
-            fg_key, bg_key = COLOR_SOFT[color_key]
-            card = StatCard(title, icon, self._colors[fg_key], self._colors[bg_key],
-                            filter_key, subtitle)
-            card.clicked.connect(lambda key=filter_key: self.cardClicked.emit(key or "all"))
-            self.cards[filter_key or "all"] = card
-            self.cards_holder.add_card(card)
-        self.cards_holder.relayout(5)
-
-        # دو کارت برجسته: پکیج آزادسازی و الحاقیه
-        prominent = ResponsiveRow(min_card_width=300, max_columns=2, spacing=14)
-        self.status_pie = PieChartWidget(CHART_COLORS["status"], )
-        self.status_legend = ChartLegend()
-        self.status_card = ChartCard("وضعیت پکیج آزادسازی", "—", self.status_pie, self.status_legend)
-        self.status_card.setFixedHeight(332)
-        self.status_pie.sliceClicked.connect(lambda label: self.sliceClicked.emit("status", label))
-        self.status_legend.itemClicked.connect(lambda label: self.sliceClicked.emit("status", label))
-        prominent.add_card(self.status_card)
-
-        self.annex_pie = PieChartWidget(CHART_COLORS["annex"])
-        self.annex_legend = ChartLegend()
-        self.annex_card = ChartCard("الحاقیه قراردادها", "—", self.annex_pie, self.annex_legend)
-        self.annex_card.setFixedHeight(332)
-        self.annex_pie.sliceClicked.connect(lambda label: self.sliceClicked.emit("annex", label))
-        self.annex_legend.itemClicked.connect(lambda label: self.sliceClicked.emit("annex", label))
-        prominent.add_card(self.annex_card)
-        self.prominent_row = prominent
-        self.layout_main.addWidget(prominent)
-
-        # سه نمودار اصلی
-        charts_row = ResponsiveRow(min_card_width=250, max_columns=3, spacing=14)
-        self.type_pie = PieChartWidget(CHART_COLORS["type"])
-        self.type_legend = ChartLegend()
-        self.type_card = ChartCard("نوع قرارداد", "—", self.type_pie, self.type_legend)
-        self.type_card.setFixedHeight(332)
-        self.type_pie.sliceClicked.connect(lambda label: self.sliceClicked.emit("type", label))
-        self.type_legend.itemClicked.connect(lambda label: self.sliceClicked.emit("type", label))
-        charts_row.add_card(self.type_card)
-
-        self.progress_pie = PieChartWidget(CHART_COLORS["progress"])
-        self.progress_legend = ChartLegend()
-        self.progress_chart_card = ChartCard("پیشرفت کارکرد", "—", self.progress_pie, self.progress_legend)
-        self.progress_chart_card.setFixedHeight(332)
-        self.progress_pie.sliceClicked.connect(lambda label: self.sliceClicked.emit("progress", label))
-        self.progress_legend.itemClicked.connect(lambda label: self.sliceClicked.emit("progress", label))
-        charts_row.add_card(self.progress_chart_card)
-
-        self.completion_pie = PieChartWidget(CHART_COLORS["completion"])
-        self.completion_legend = ChartLegend()
-        self.completion_card = ChartCard("پیشرفت اختتام", "—", self.completion_pie, self.completion_legend)
-        self.completion_card.setFixedHeight(332)
-        self.completion_pie.sliceClicked.connect(lambda label: self.sliceClicked.emit("completion", label))
-        self.completion_legend.itemClicked.connect(lambda label: self.sliceClicked.emit("completion", label))
-        charts_row.add_card(self.completion_card)
-        self.charts_row = charts_row
-        self.layout_main.addWidget(charts_row)
-
-        # نمودار میله‌ای ۱۰ نوع پرتکرار
-        self.bar_card = QFrame()
-        self.bar_card.setObjectName("Card")
-        bar_layout = QVBoxLayout(self.bar_card)
-        bar_layout.setContentsMargins(16, 14, 16, 14)
-        bar_layout.setSpacing(6)
-        bar_header = QHBoxLayout()
-        bar_title = QLabel("۱۰ نوع قرارداد پرتکرار")
-        bar_title.setObjectName("SectionTitle")
-        bar_header.addWidget(bar_title)
-        bar_header.addStretch(1)
-        bar_hint = QLabel("کلیک روی هر میله جدول را فیلتر می‌کند")
-        bar_hint.setObjectName("Muted")
-        bar_header.addWidget(bar_hint)
-        bar_layout.addLayout(bar_header)
-        self.bar_chart = BarChartWidget()
-        self.bar_chart.setMinimumHeight(300)
-        self.bar_chart.setMaximumHeight(340)
-        self.bar_chart.barClicked.connect(lambda label: self.sliceClicked.emit("type", label))
-        bar_layout.addWidget(self.bar_chart)
-        self.layout_main.addWidget(self.bar_card)
-
-        # پیش‌نمایش جدول
-        preview_card = QFrame()
-        preview_card.setObjectName("Card")
-        preview_layout = QVBoxLayout(preview_card)
-        preview_layout.setContentsMargins(16, 14, 16, 14)
-        preview_layout.setSpacing(8)
-        header = QHBoxLayout()
-        header_title = QLabel("قراردادهای نیازمند توجه")
-        header_title.setObjectName("SectionTitle")
-        header.addWidget(header_title)
-        header.addStretch(1)
-        self.preview_count = QLabel("—")
-        self.preview_count.setObjectName("Chip")
-        header.addWidget(self.preview_count)
-        open_all = QPushButton("مشاهدهٔ جدول کامل")
-        open_all.clicked.connect(self.showContracts.emit)
-        header.addWidget(open_all)
-        preview_layout.addLayout(header)
-        self.preview_model = PreviewTableModel(notes=self.notes, limit=12)
-        self.preview_table = QTableView()
-        self.preview_table.setModel(self.preview_model)
-        self.preview_table.verticalHeader().setVisible(False)
-        self.preview_table.setAlternatingRowColors(True)
-        self.preview_table.setShowGrid(False)
-        self.preview_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.preview_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.preview_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.preview_table.horizontalHeader().setStretchLastSection(True)
-        self.preview_table.verticalHeader().setDefaultSectionSize(34)
-        self.preview_table.setMinimumHeight(12 * 34 + 38)
-        self.preview_delegate = ContractDelegate()
-        self.preview_table.setItemDelegate(self.preview_delegate)
-        self._configure_preview_columns()
-        preview_layout.addWidget(self.preview_table)
-        self.layout_main.addWidget(preview_card)
-
-        self.layout_main.addStretch(1)
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._update_card_widths()
-
-    def _update_card_widths(self) -> None:
-        if not hasattr(self, "cards_holder"):
-            return
-        viewport = self.scroll.viewport()
-        available = viewport.width() - 44  # حاشیهٔ چپ/راست صفحه
-        if available < 200:
-            return
-        columns = max(2, min(5, available // 232))
-        self.cards_holder.relayout(columns)
-        if hasattr(self, "prominent_row"):
-            self.prominent_row.relayout(available)
-        if hasattr(self, "charts_row"):
-            self.charts_row.relayout(available)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        QTimer.singleShot(0, self._update_card_widths)
-
-    def _configure_preview_columns(self) -> None:
-        hidden = {4, 6, 7, 8, 10, 11}  # فقط ستون‌های کلیدی در پیش‌نمایش
-        for column in range(len(ContractTableModel.COLUMNS)):
-            self.preview_table.setColumnHidden(column, column in hidden)
-        widths = {0: 54, 1: 220, 2: 130, 3: 330, 5: 100, 9: 130}
-        for column, width in widths.items():
-            self.preview_table.setColumnWidth(column, width)
-        self.preview_table.setMouseTracking(True)
-        self.preview_table.doubleClicked.connect(self._preview_double_clicked)
-
-    def _preview_double_clicked(self, index) -> None:
-        record = self.preview_model.record_at(index.row())
-        if record:
-            self.recordActivated.emit(record)
-
-    # ---------- به‌روزرسانی ----------
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self._colors = colors
-        for title, icon, color_key, filter_key, subtitle in CARD_SPECS:
-            fg_key, bg_key = COLOR_SOFT[color_key]
-            card = self.cards.get(filter_key or "all")
-            if card:
-                card.set_accent(colors[fg_key], colors[bg_key])
-        for chart in (self.status_pie, self.annex_pie, self.type_pie,
-                      self.progress_pie, self.completion_pie):
-            chart.set_colors_for_theme(colors["text"], colors["text_muted"], colors["surface"])
-        for legend in (self.status_legend, self.annex_legend, self.type_legend,
-                       self.progress_legend, self.completion_legend):
-            legend.set_colors_for_theme(colors["text"], colors["text_muted"])
-        self.bar_chart.set_colors_for_theme(
-            colors["text"], colors["text_muted"], colors["primary"], colors["chart_grid"]
-        )
-        self.progress_bar.set_colors_for_theme(
-            colors["surface_soft"], colors["primary"], colors["text"], colors["text_muted"]
-        )
-        self.preview_delegate.set_theme_colors(colors)
-        self.preview_model.set_theme_colors(colors)
-
-    def update_data(self, data: DashboardData) -> None:
-        self.progress_value.setText(f"{data.progress_percent_text}٪"
-                                    if data.progress_percent_text != "—" else "—")
-        self.progress_bar.set_value(data.progress_percent)
-        self.source_info.setText(
-            f"منبع داده: {os.path.basename(data.excel_path) if data.excel_path else 'انتخاب نشده'}"
-            f"   •   شیت: {data.sheet_name}"
-            f"   •   آخرین تغییر فایل: {data.source_mtime_text}"
-            f"   •   حجم: {human_size(data.source_size)}"
-        )
-        self.source_chip.setText(
-            f"بارگذاری: {data.loaded_at_text}" if data.records else "داده‌ای بارگذاری نشده"
-        )
-        counts = data.flag_counts
-        self.cards["all"].set_value(
-            data.total_contracts,
-            f"{fa(data.flag_counts['temporary'])} تحویل موقت در جریان",
-        )
-        self.cards["deductions"].set_value(
-            data.contracts_with_deductions,
-            f"از {fa(data.total_contracts)} قرارداد",
-        )
-        for key, _label, _column in FLAG_DEFS:
-            card = self.cards.get(key)
-            if card:
-                card.set_value(counts.get(key, 0))
-
-        self.status_card.subtitle_label.setText(
-            f"{fa(data.dist('status').total)} قرارداد"
-        )
-        self.status_pie.set_data(data.dist('status').labels, data.dist('status').values,
-                                 CHART_COLORS["status"], "قرارداد")
-        self.status_legend.set_data(data.dist('status').labels, data.dist('status').values,
-                                    CHART_COLORS["status"])
-        self.annex_card.subtitle_label.setText(f"{fa(data.dist('annex').total)} قرارداد")
-        self.annex_pie.set_data(data.dist("annex").labels, data.dist("annex").values,
-                                CHART_COLORS["annex"], "قرارداد")
-        self.annex_legend.set_data(data.dist("annex").labels, data.dist("annex").values,
-                                   CHART_COLORS["annex"])
-        self.type_card.subtitle_label.setText(f"{fa(data.dist('type').total)} قرارداد")
-        self.type_pie.set_data(data.dist("type").labels, data.dist("type").values,
-                               CHART_COLORS["type"], "قرارداد")
-        self.type_legend.set_data(data.dist("type").labels, data.dist("type").values,
-                                  CHART_COLORS["type"])
-        self.progress_chart_card.subtitle_label.setText(f"{fa(data.dist('progress').total)} قرارداد")
-        self.progress_pie.set_data(data.dist("progress").labels, data.dist("progress").values,
-                                   CHART_COLORS["progress"], "قرارداد")
-        self.progress_legend.set_data(data.dist("progress").labels, data.dist("progress").values,
-                                      CHART_COLORS["progress"])
-        self.completion_card.subtitle_label.setText(f"{fa(data.dist('completion').total)} قرارداد")
-        self.completion_pie.set_data(data.dist("completion").labels, data.dist("completion").values,
-                                     CHART_COLORS["completion"], "قرارداد")
-        self.completion_legend.set_data(data.dist("completion").labels,
-                                        data.dist("completion").values,
-                                        CHART_COLORS["completion"])
-        self.bar_chart.set_data(data.top_types)
-        self.preview_model.set_records(data.records)
-
-        self._update_banner(data)
-        self._refresh_preview()
-
-    def _update_banner(self, data: DashboardData) -> None:
-        if data.warnings:
-            self._banner_target = "pick"
-            self.banner.show_message(" • ".join(data.warnings), "انتخاب فایل اکسل")
-            return
-        if not data.records:
-            self._banner_target = "pick"
-            self.banner.show_message("داده‌ای بارگذاری نشده است. فایل اکسل را انتخاب کنید.",
-                                     "انتخاب فایل")
-            return
-        if data.expired_count:
-            self._banner_target = "expired"
-            self.banner.show_message(
-                f"{fa(data.expired_count)} قرارداد در وضعیت «منقضی شده» است.",
-                "نمایش این قراردادها",
-            )
-            return
-        if not data.pdf_folder or not os.path.isdir(data.pdf_folder):
-            self._banner_target = "settings"
-            self.banner.show_message(
-                "پوشهٔ PDF تنظیم نشده است؛ ستون فایل قرارداد خالی می‌ماند.", "تنظیم پوشه"
-            )
-            return
-        self.banner.setVisible(False)
-
-    def _banner_action(self) -> None:
-        if self._banner_target == "expired":
-            self.cardClicked.emit("expired")
-        elif self._banner_target == "settings":
-            self.refreshRequested.emit()
-        else:
-            self.pickRequested.emit()
-
-    def _refresh_preview(self) -> None:
-        self.preview_count.setText(bidi(
-            f"{fa(self.preview_model.filtered_total)} از "
-            f"{fa(self.preview_model.source_count())} قرارداد"
-        ))
-
-    def apply_filter(self, search: str, filter_key: str, bookmarks_only: bool) -> None:
-        self.preview_model.apply_view(search, filter_key, bookmarks_only)
-        self._refresh_preview()
-
-    def refresh_bookmarks(self) -> None:
-        self.preview_model.refresh_bookmarks()
-
-
-
-# ---------------------------------------------------------------------------
-# صفحهٔ جدول قراردادها
-# ---------------------------------------------------------------------------
-class ContractsPage(QWidget):
-    """جدول کامل با فیلتر، جستجو، مرتب‌سازی و خروجی."""
-
-    recordActivated = pyqtSignal(object)
-    exportRequested = pyqtSignal()
-    bookmarkToggled = pyqtSignal(str)
-    pdfRequested = pyqtSignal(str)
-    copyRequested = pyqtSignal(str)
-    filterChanged = pyqtSignal(str)
-    searchChanged = pyqtSignal(str)
-
-    def __init__(self, notes: NotesStore, parent=None) -> None:
-        super().__init__(parent)
-        self.notes = notes
-        self._colors = THEMES["light"]
-        self._build_ui()
-
-    def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 16, 22, 18)
-        layout.setSpacing(12)
-
-        title_row = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(0)
-        title = QLabel("جدول قراردادها")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("جستجو، فیلتر و خروجی اکسل از داده‌های همان شیت colorcode")
-        subtitle.setObjectName("Muted")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        title_row.addLayout(title_box)
-        title_row.addStretch(1)
-        self.count_chip = QLabel("—")
-        self.count_chip.setObjectName("Chip")
-        title_row.addWidget(self.count_chip, 0, Qt.AlignTop)
-        layout.addLayout(title_row)
-
-        toolbar = QFrame()
-        toolbar.setObjectName("Card")
-        toolbar_outer = QVBoxLayout(toolbar)
-        toolbar_outer.setContentsMargins(12, 10, 12, 10)
-        toolbar_outer.setSpacing(8)
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.setSpacing(8)
-        toolbar_outer.addLayout(toolbar_layout)
-
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("Search")
-        self.search_edit.setPlaceholderText("جستجو در شمارهٔ قرارداد، پیمانکار، موضوع و کسورات…")
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMinimumWidth(240)
-        self.search_edit.textChanged.connect(self.searchChanged.emit)
-        toolbar_layout.addWidget(self.search_edit, 2)
-
-        self.filter_combo = Combo()
-        self.filter_combo.setMinimumWidth(230)
-        for key, label in FILTER_CHOICES:
-            self.filter_combo.addItem(label, key)
-        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
-        toolbar_layout.addWidget(self.filter_combo, 1)
-
-        self.bookmark_check = CheckBox("فقط نشان‌شده‌ها")
-        self.bookmark_check.toggled.connect(lambda _: self.filterChanged.emit(self.current_filter()))
-        toolbar_layout.addWidget(self.bookmark_check)
-
-        toolbar_layout.addStretch(1)
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.setSpacing(8)
-        toolbar_outer.addLayout(toolbar_layout)
-
-        self.columns_button = QToolButton()
-        self.columns_button.setObjectName("ToolButton")
-        self.columns_button.setText("ستون‌ها")
-        self.columns_button.setPopupMode(QToolButton.InstantPopup)
-        self.columns_menu = QMenu(self.columns_button)
-        self.column_actions: List[QAction] = []
-        for index, spec in enumerate(ContractTableModel.COLUMNS):
-            action = QAction(spec.title, self.columns_menu)
-            action.setCheckable(True)
-            action.setChecked(True)
-            action.toggled.connect(lambda checked, col=index: self._set_column_visible(col, checked))
-            self.columns_menu.addAction(action)
-            self.column_actions.append(action)
-        self.columns_button.setMenu(self.columns_menu)
-        toolbar_layout.addWidget(self.columns_button)
-
-        clear_btn = QPushButton("پاک کردن فیلترها")
-        clear_btn.clicked.connect(self.clear_filters)
-        toolbar_layout.addWidget(clear_btn)
-        toolbar_layout.addStretch(1)
-
-        export_btn = QPushButton("خروجی اکسل")
-        export_btn.setObjectName("Primary")
-        export_btn.clicked.connect(self.exportRequested.emit)
-        toolbar_layout.addWidget(export_btn)
-        layout.addWidget(toolbar)
-
-        self.table = QTableView()
-        self.model = ContractTableModel(self.notes)
-        self.table.setModel(self.model)
-        self.delegate = ContractDelegate()
-        self.table.setItemDelegate(self.delegate)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
-        self.table.setMouseTracking(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setSortingEnabled(False)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(36)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(False)
-        header.setHighlightSections(False)
-        header.setSortIndicatorShown(True)
-        header.sectionClicked.connect(self._on_header_clicked)
-        for index, spec in enumerate(ContractTableModel.COLUMNS):
-            self.table.setColumnWidth(index, spec.width)
-        self.table.doubleClicked.connect(self._on_double_click)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._show_context_menu)
-        self.table.selectionModel().selectionChanged.connect(self._update_count)
-        layout.addWidget(self.table, 1)
-
-        footer = QHBoxLayout()
-        self.footer_label = QLabel("—")
-        self.footer_label.setObjectName("Muted")
-        footer.addWidget(self.footer_label)
-        footer.addStretch(1)
-        hint = QLabel("دو کلیک روی هر ردیف: جزئیات و یادداشت   •   Ctrl+E: خروجی اکسل")
-        hint.setObjectName("Muted")
-        footer.addWidget(hint)
-        layout.addLayout(footer)
-
-    # ---- رخدادها ----
-    def _on_filter_changed(self, _index: int) -> None:
-        self.filterChanged.emit(self.current_filter())
-
-    def _on_header_clicked(self, section: int) -> None:
-        header = self.table.horizontalHeader()
-        if header.sortIndicatorSection() == section:
-            order = (Qt.DescendingOrder if header.sortIndicatorOrder() == Qt.AscendingOrder
-                     else Qt.AscendingOrder)
-        else:
-            order = Qt.AscendingOrder
-        header.setSortIndicator(section, order)
-        self.model.set_sort(section, order)
-        self._update_count()
-
-    def _on_double_click(self, index: QModelIndex) -> None:
-        record = self.model.record_at(index.row())
-        if record:
-            self.recordActivated.emit(record)
-
-    def _show_context_menu(self, pos) -> None:
-        index = self.table.indexAt(pos)
-        if not index.isValid():
-            return
-        record = self.model.record_at(index.row())
-        if not record:
-            return
-        menu = QMenu(self)
-        detail_action = menu.addAction("جزئیات و یادداشت قرارداد")
-        bookmark_action = menu.addAction(
-            "حذف نشان" if self.notes.is_bookmarked(record.key) else "نشان‌گذاری قرارداد"
-        )
-        menu.addSeparator()
-        pdf_action = menu.addAction("باز کردن فایل PDF")
-        pdf_action.setEnabled(bool(record.pdf_file))
-        folder_action = menu.addAction("نمایش در پوشهٔ PDF")
-        folder_action.setEnabled(bool(record.pdf_file))
-        menu.addSeparator()
-        copy_number = menu.addAction("کپی شمارهٔ قرارداد")
-        copy_subject = menu.addAction("کپی موضوع قرارداد")
-        chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
-        if chosen is None:
-            return
-        if chosen == detail_action:
-            self.recordActivated.emit(record)
-        elif chosen == bookmark_action:
-            self.bookmarkToggled.emit(record.key)
-        elif chosen in (pdf_action, folder_action):
-            self.pdfRequested.emit(record.pdf_file)
-        elif chosen == copy_number:
-            self.copyRequested.emit(record.col3)
-        elif chosen == copy_subject:
-            self.copyRequested.emit(record.col4)
-
-    # ---- وضعیت ----
-    def current_filter(self) -> str:
-        data = self.filter_combo.currentData()
-        return data if data else "all"
-
-    def current_search(self) -> str:
-        return self.search_edit.text()
-
-    def set_filter(self, key: str, label: Optional[str] = None) -> None:
-        index = self.filter_combo.findData(key)
-        if index < 0 and label:
-            self.filter_combo.addItem(label, key)
-            index = self.filter_combo.count() - 1
-        elif index < 0 and key:
-            self.filter_combo.addItem(key, key)
-            index = self.filter_combo.count() - 1
-        if index >= 0:
-            self.filter_combo.setCurrentIndex(index)
-
-    def clear_filters(self) -> None:
-        self.blockSignals(True)
-        self.search_edit.clear()
-        while self.filter_combo.count() > len(FILTER_CHOICES):
-            self.filter_combo.removeItem(self.filter_combo.count() - 1)
-        self.filter_combo.setCurrentIndex(0)
-        self.bookmark_check.setChecked(False)
-        self.blockSignals(False)
-        self.filterChanged.emit("all")
-
-    def _set_column_visible(self, column: int, visible: bool) -> None:
-        self.table.setColumnHidden(column, not visible)
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self._colors = colors
-        self.delegate.set_theme_colors(colors)
-        self.model.set_theme_colors(colors)
-
-    def _update_count(self) -> None:
-        visible = self.model.visible_count()
-        total = self.model.source_count()
-        selected = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
-        self.count_chip.setText(bidi(f"{fa(visible)} از {fa(total)}"))
-        footer = f"نمایش {fa(visible)} قرارداد از مجموع {fa(total)}"
-        if visible != total:
-            footer += " (فیلتر فعال است)"
-        if selected:
-            footer += f"   •   انتخاب‌شده: {fa(selected)}"
-        self.footer_label.setText(footer)
-
-    def refresh_counts(self) -> None:
-        self._update_count()
-
-    def selected_records(self) -> List[ContractRecord]:
-        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
-        records = []
-        for row in rows:
-            record = self.model.record_at(row)
-            if record:
-                records.append(record)
-        return records
-
-
-# ---------------------------------------------------------------------------
-# خروجی اکسل
-# ---------------------------------------------------------------------------
-class ExportDialog(QDialog):
-    """انتخاب ستون‌ها و دامنهٔ خروجی اکسل."""
-
-    def __init__(self, column_titles: Sequence[str], visible_count: int,
-                 selected_count: int, total_count: int, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("خروجی اکسل")
-        self.setMinimumWidth(520)
-        self.setMinimumHeight(560)
-        self.setLayoutDirection(Qt.RightToLeft)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-
-        title = QLabel("خروجی سفارشی اکسل")
-        title.setObjectName("SectionTitle")
-        layout.addWidget(title)
-        subtitle = QLabel("ستون‌ها و دامنهٔ داده‌ها را انتخاب کنید.")
-        subtitle.setObjectName("Muted")
-        layout.addWidget(subtitle)
-
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
-        form.setFormAlignment(Qt.AlignRight | Qt.AlignTop)
-        self.scope_combo = Combo()
-        self.scope_combo.addItem(f"ردیف‌های فیلترشده ({fa(visible_count)} مورد)", "visible")
-        if selected_count:
-            self.scope_combo.addItem(f"ردیف‌های انتخاب‌شده ({fa(selected_count)} مورد)", "selected")
-        self.scope_combo.addItem(f"همهٔ قراردادها ({fa(total_count)} مورد)", "all")
-        form.addRow("دامنه:", self.scope_combo)
-        layout.addLayout(form)
-
-        columns_label = QLabel("ستون‌ها:")
-        columns_label.setObjectName("Muted")
-        layout.addWidget(columns_label)
-
-        columns_frame = QFrame()
-        columns_frame.setObjectName("Card")
-        grid = QGridLayout(columns_frame)
-        grid.setContentsMargins(12, 10, 12, 10)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(6)
-        self.checks: List[CheckBox] = []
-        for index, name in enumerate(column_titles):
-            check = CheckBox(name)
-            check.setChecked(True)
-            self.checks.append(check)
-            check.set_theme_colors(THEMES["light"] if self.palette().color(QPalette.Window).lightness() > 128 else THEMES["dark"])
-            grid.addWidget(check, index // 3, index % 3)
-        for column in range(3):
-            grid.setColumnStretch(column, 1)
-        grid.setRowStretch(grid.rowCount(), 1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(columns_frame)
-        scroll.setMinimumHeight(260)
-        scroll.setMaximumHeight(320)
-        layout.addWidget(scroll, 1)
-
-        buttons_row = QHBoxLayout()
-        select_all = QPushButton("انتخاب همه")
-        select_all.clicked.connect(lambda: [c.setChecked(True) for c in self.checks])
-        select_none = QPushButton("پاک کردن")
-        select_none.clicked.connect(lambda: [c.setChecked(False) for c in self.checks])
-        buttons_row.addWidget(select_all)
-        buttons_row.addWidget(select_none)
-        buttons_row.addStretch(1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("ذخیرهٔ فایل")
-        buttons.button(QDialogButtonBox.Ok).setObjectName("Primary")
-        buttons.button(QDialogButtonBox.Cancel).setText("انصراف")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        buttons_row.addWidget(buttons)
-        layout.addLayout(buttons_row)
-
-    def selected_columns(self) -> List[int]:
-        return [index for index, check in enumerate(self.checks) if check.isChecked()]
-
-    def scope(self) -> str:
-        return str(self.scope_combo.currentData())
-
-    def accept(self) -> None:
-        if not self.selected_columns():
-            QMessageBox.warning(self, "خروجی اکسل", "حداقل یک ستون انتخاب کنید.")
-            return
-        super().accept()
-
-
 def record_export_row(record: ContractRecord) -> List[Any]:
     """مقادیر خام یک قرارداد برای خروجی اکسل."""
     return [
@@ -4128,1712 +3604,63 @@ def write_management_report(path: str, data: DashboardData) -> None:
     workbook.save(path)
 
 
-# ---------------------------------------------------------------------------
-# ابزارهای رابط کاربری
-# ---------------------------------------------------------------------------
-def make_icon(kind: str, color: str, size: int = 18) -> QIcon:
-    """ساخت QIcon از آیکون برداری برای دکمه‌ها."""
-    scale = 2
-    pixmap = QPixmap(size * scale, size * scale)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    draw_icon(painter, kind, QRectF(0, 0, size * scale, size * scale), QColor(color))
-    painter.end()
-    pixmap.setDevicePixelRatio(scale)
-    return QIcon(pixmap)
+
+# ==========================================================================
 
 
 def make_app_icon() -> QIcon:
-    """آیکون برنامه (بدون فایل خارجی)."""
+    """آیکون برنامه بدون نیاز به فایل خارجی."""
     size = 128
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing, True)
     gradient = QLinearGradient(0, 0, size, size)
-    gradient.setColorAt(0, QColor("#12897d"))
-    gradient.setColorAt(1, QColor("#0a504a"))
+    gradient.setColorAt(0, QColor("#18A492"))
+    gradient.setColorAt(1, QColor("#0A5A4F"))
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(gradient))
-    painter.drawRoundedRect(QRectF(4, 4, size - 8, size - 8), 28, 28)
-    draw_icon(painter, "chart", QRectF(28, 30, 72, 64), QColor("#ffffff"))
+    painter.drawRoundedRect(QRectF(4, 4, size - 8, size - 8), 30, 30)
+    draw_icon(painter, "layers", QRectF(30, 32, 68, 64), QColor("#FFFFFF"), 2.0)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor("#F2C777"))
+    painter.drawEllipse(QPointF(96, 32), 7, 7)
     painter.end()
     return QIcon(pixmap)
 
 
 def configure_rtl_browser(browser: QTextBrowser) -> None:
-    """راست‌به‌چپ کردن متن HTML در QTextBrowser (Qt خودش dir را نمی‌شناسد)."""
+    """راست‌به‌چپ کردن متن HTML در QTextBrowser."""
     browser.setLayoutDirection(Qt.RightToLeft)
     document = browser.document()
     option = document.defaultTextOption()
     option.setTextDirection(Qt.RightToLeft)
     option.setAlignment(Qt.AlignRight)
     document.setDefaultTextOption(option)
-    browser.setStyleSheet(browser.styleSheet())
-
-
-def clear_layout(layout) -> None:
-    """حذف همهٔ ویجت‌های یک چیدمان."""
-    if layout is None:
-        return
-    while layout.count():
-        item = layout.takeAt(0)
-        widget = item.widget()
-        if widget is not None:
-            widget.setParent(None)
-            widget.deleteLater()
-        elif item.layout() is not None:
-            clear_layout(item.layout())
 
 
 def label_value_pair(title: str, value: str, colors: Dict[str, str]) -> QWidget:
+    """یک جفت «عنوان/مقدار» برای پنل جزئیات."""
     widget = QWidget()
     layout = QVBoxLayout(widget)
-    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setContentsMargins(0, 2, 0, 2)
     layout.setSpacing(1)
-    title_label = QLabel(title)
-    title_label.setObjectName("Muted")
-    font = title_label.font()
-    font.setPointSizeF(max(7.5, font.pointSizeF() - 1))
-    title_label.setFont(font)
-    value_label = QLabel(value or "—")
-    value_label.setWordWrap(True)
-    value_label.setStyleSheet(f"color: {colors['text']}; font-weight: 600;")
-    layout.addWidget(title_label)
-    layout.addWidget(value_label)
+    caption = QLabel(title)
+    caption.setStyleSheet(f"color: {colors['ink_3']}; font-size: 7.5pt; font-weight: 700;")
+    content = QLabel(value or "—")
+    content.setWordWrap(True)
+    content.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    content.setStyleSheet("font-weight: 700; font-size: 9pt;")
+    layout.addWidget(caption)
+    layout.addWidget(content)
     return widget
 
 
 # ---------------------------------------------------------------------------
-# پنل جزئیات و یادداشت قرارداد
+# ریل ناوبری
 # ---------------------------------------------------------------------------
-class ContractDetailDock(QDockWidget):
-    """پنل کنار پنجره برای جزئیات، یادداشت و پیگیری هر قرارداد."""
 
-    bookmarkToggled = pyqtSignal(str)
-    pdfRequested = pyqtSignal(str)
-    revealRequested = pyqtSignal(str)
-    notesChanged = pyqtSignal(str)
 
-    def __init__(self, notes: NotesStore, colors: Dict[str, str], last_author: str = "",
-                 parent=None) -> None:
-        super().__init__("جزئیات قرارداد", parent)
-        self.notes = notes
-        self.colors = colors
-        self.record: Optional[ContractRecord] = None
-        self.setObjectName("DetailDock")
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.setMinimumWidth(330)
-
-        container = QWidget()
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setWidget(container)
-        self.setWidget(self.scroll)
-
-        self.body = QVBoxLayout(container)
-        self.body.setContentsMargins(14, 12, 14, 14)
-        self.body.setSpacing(10)
-
-        self.title_label = QLabel("قراردادی انتخاب نشده")
-        self.title_label.setObjectName("SectionTitle")
-        self.title_label.setWordWrap(True)
-        self.subtitle_label = QLabel("برای مشاهدهٔ جزئیات، روی یک ردیف جدول دو کلیک کنید.")
-        self.subtitle_label.setObjectName("Muted")
-        self.subtitle_label.setWordWrap(True)
-        self.body.addWidget(self.title_label)
-        self.body.addWidget(self.subtitle_label)
-
-        actions = QHBoxLayout()
-        self.bookmark_button = QPushButton("نشان‌گذاری")
-        self.bookmark_button.setCheckable(True)
-        self.bookmark_button.clicked.connect(self._on_bookmark_clicked)
-        actions.addWidget(self.bookmark_button)
-        self.pdf_button = QPushButton("باز کردن PDF")
-        self.pdf_button.clicked.connect(self._on_pdf_clicked)
-        actions.addWidget(self.pdf_button)
-        self.folder_button = QPushButton("پوشه")
-        self.folder_button.clicked.connect(self._on_folder_clicked)
-        actions.addWidget(self.folder_button)
-        self.body.addLayout(actions)
-
-        self.flags_container = QWidget()
-        self.flags_layout = FlowLayout(self.flags_container, 0, 6)
-        self.body.addWidget(self.flags_container)
-
-        self.fields_container = QWidget()
-        self.fields_layout = QGridLayout(self.fields_container)
-        self.fields_layout.setContentsMargins(0, 0, 0, 0)
-        self.fields_layout.setHorizontalSpacing(12)
-        self.fields_layout.setVerticalSpacing(10)
-        self.body.addWidget(self.fields_container)
-
-        self.deductions_title = QLabel("کسورات اسناد اختتام")
-        self.deductions_title.setObjectName("SectionTitle")
-        self.deductions_label = QLabel("—")
-        self.deductions_label.setWordWrap(True)
-        self.deductions_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.body.addWidget(self.deductions_title)
-        self.body.addWidget(self.deductions_label)
-
-        note_title_row = QHBoxLayout()
-        note_title = QLabel("یادداشت و پیگیری")
-        note_title.setObjectName("SectionTitle")
-        note_title_row.addWidget(note_title)
-        note_title_row.addStretch(1)
-        self.note_count_label = QLabel("")
-        self.note_count_label.setObjectName("Chip")
-        note_title_row.addWidget(self.note_count_label)
-        self.body.addLayout(note_title_row)
-
-        self.author_edit = QLineEdit(last_author)
-        self.author_edit.setPlaceholderText("نام شما (ثبت‌کنندهٔ یادداشت)")
-        self.body.addWidget(self.author_edit)
-        self.note_edit = QPlainTextEdit()
-        self.note_edit.setPlaceholderText("یادداشت، نتیجهٔ تماس یا اقدام بعدی این قرارداد…")
-        self.note_edit.setFixedHeight(90)
-        self.body.addWidget(self.note_edit)
-        follow_row = QHBoxLayout()
-        self.follow_edit = QLineEdit()
-        self.follow_edit.setPlaceholderText("تاریخ پیگیری بعدی (مثلاً ۱۴۰۳/۰۶/۱۵)")
-        follow_row.addWidget(self.follow_edit, 1)
-        today_btn = QPushButton("امروز")
-        today_btn.setObjectName("ToolButton")
-        today_btn.clicked.connect(lambda: self.follow_edit.setText(today_jalali(with_time=False)))
-        follow_row.addWidget(today_btn)
-        self.body.addLayout(follow_row)
-
-        note_actions = QHBoxLayout()
-        save_btn = QPushButton("ذخیرهٔ یادداشت")
-        save_btn.setObjectName("Primary")
-        save_btn.clicked.connect(self._save_note)
-        note_actions.addWidget(save_btn)
-        delete_btn = QPushButton("پاک کردن یادداشت‌ها")
-        delete_btn.setObjectName("Danger")
-        delete_btn.clicked.connect(self._delete_notes)
-        note_actions.addWidget(delete_btn)
-        self.body.addLayout(note_actions)
-
-        self.notes_list = QListWidget()
-        self.notes_list.setMinimumHeight(110)
-        self.body.addWidget(self.notes_list)
-        self.body.addStretch(1)
-        self.setEnabled(False)
-
-    # ---- رخدادها ----
-    def _on_bookmark_clicked(self) -> None:
-        if self.record:
-            self.bookmarkToggled.emit(self.record.key)
-
-    def _on_pdf_clicked(self) -> None:
-        if self.record and self.record.pdf_file:
-            self.pdfRequested.emit(self.record.pdf_file)
-
-    def _on_folder_clicked(self) -> None:
-        if self.record and self.record.pdf_file:
-            self.revealRequested.emit(self.record.pdf_file)
-
-    def _save_note(self) -> None:
-        if not self.record:
-            return
-        text = self.note_edit.toPlainText().strip()
-        if not text:
-            QMessageBox.information(self, "یادداشت", "متن یادداشت خالی است.")
-            return
-        author = self.author_edit.text().strip() or "کاربر"
-        self.notes.add_note(self.record.key, author, text, self.follow_edit.text())
-        self.note_edit.clear()
-        self.follow_edit.clear()
-        self.refresh_notes()
-        self.notesChanged.emit(self.record.key)
-
-    def _delete_notes(self) -> None:
-        if not self.record:
-            return
-        if not self.notes.notes_for(self.record.key):
-            return
-        answer = QMessageBox.question(
-            self, "حذف یادداشت‌ها",
-            "همهٔ یادداشت‌های این قرارداد حذف شود؟",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if answer == QMessageBox.Yes:
-            self.notes.delete_notes(self.record.key)
-            self.refresh_notes()
-            self.notesChanged.emit(self.record.key)
-
-    # ---- نمایش ----
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self.colors = colors
-        if self.record:
-            self.set_record(self.record)
-
-    def refresh_notes(self) -> None:
-        self.notes_list.clear()
-        if not self.record:
-            self.note_count_label.setText("")
-            return
-        items = self.notes.notes_for(self.record.key)
-        self.note_count_label.setText(bidi(f"{fa(len(items))} یادداشت") if items else "بدون یادداشت")
-        for note in reversed(items):
-            created = note.get("created", "")
-            try:
-                stamp = jalali_datetime(datetime.fromisoformat(created))
-            except Exception:
-                stamp = created
-            followup = note.get("followup", "")
-            text = f"{stamp} — {note.get('author') or 'کاربر'}"
-            if followup:
-                text += f"   •   پیگیری: {followup}"
-            item = QListWidgetItem(f"{text}\n{note.get('text', '')}")
-            item.setToolTip(note.get("text", ""))
-            self.notes_list.addItem(item)
-        if not items:
-            self.notes_list.addItem(QListWidgetItem("هنوز یادداشتی ثبت نشده است."))
-
-    def set_record(self, record: Optional[ContractRecord], pdf_exists: Optional[bool] = None) -> None:
-        self.record = record
-        if record is None:
-            self.setEnabled(False)
-            self.title_label.setText("قراردادی انتخاب نشده")
-            self.subtitle_label.setText("برای مشاهدهٔ جزئیات، روی یک ردیف جدول دو کلیک کنید.")
-            clear_layout(self.fields_layout)
-            clear_layout(self.flags_layout)
-            self.deductions_label.setText("—")
-            self.notes_list.clear()
-            self.note_count_label.setText("")
-            return
-
-        self.setEnabled(True)
-        self.title_label.setText(record.col2 or "بدون نام شرکت")
-        self.subtitle_label.setText(
-            f"قرارداد شمارهٔ {record.col3 or '—'}   •   موضوع: {record.col4 or '—'}"
-        )
-        bookmarked = self.notes.is_bookmarked(record.key)
-        self.bookmark_button.setChecked(bookmarked)
-        self.bookmark_button.setText("حذف نشان" if bookmarked else "نشان‌گذاری")
-        self.pdf_button.setEnabled(bool(record.pdf_file))
-        self.folder_button.setEnabled(bool(record.pdf_file))
-        if record.pdf_file:
-            self.pdf_button.setText("باز کردن PDF")
-        else:
-            self.pdf_button.setText("PDF نیست")
-
-        clear_layout(self.flags_layout)
-        chip_items = [
-            (f"{FLAG_LABELS[key]}", True) for key in FLAG_LABELS if record.flags.get(key)
-        ]
-        if not chip_items:
-            chip_items = [("همهٔ موارد بسته است", False)]
-        for label, active in chip_items:
-            chip = QLabel(label)
-            if active:
-                chip.setStyleSheet(
-                    f"background: {self.colors['warning_soft']}; color: {self.colors['warning']};"
-                    f"border-radius: 9px; padding: 3px 9px; font-size: 8.5pt; font-weight: 700;"
-                )
-            else:
-                chip.setStyleSheet(
-                    f"background: {self.colors['success_soft']}; color: {self.colors['success']};"
-                    f"border-radius: 9px; padding: 3px 9px; font-size: 8.5pt; font-weight: 700;"
-                )
-            self.flags_layout.addWidget(chip)
-
-        clear_layout(self.fields_layout)
-        fields = [
-            ("وضعیت پکیج آزادسازی", record.as_status or "—"),
-            ("پیشرفت کارکرد (ستون ۵۳)", record.progress_status or "—"),
-            ("درصد پیشرفت اختتام (ستون ۵۴)", record.completion_status or "—"),
-            ("الحاقیه / زمان باقی‌مانده", record.annex_status or "—"),
-            ("نوع قرارداد", record.f_value or "—"),
-            ("مقدار پیشرفت جدول (ستون ۱۰)", record.progress_table or "—"),
-            ("درصد اختتام جدول (ستون ۳۶)", record.completion_table or "—"),
-            ("شمارهٔ ردیف در اکسل", fa(record.excel_row)),
-        ]
-        if record.aw or record.ax or record.ay:
-            fields.append(("ستون‌های AW / AX / AY", " / ".join(x for x in (record.aw, record.ax, record.ay) if x)))
-        for index, (title, value) in enumerate(fields):
-            widget = label_value_pair(title, value, self.colors)
-            self.fields_layout.addWidget(widget, index // 2, index % 2)
-
-        self.deductions_label.setText(record.deductions or "کسوراتی برای این قرارداد ثبت نشده است.")
-        self.refresh_notes()
-
-
-# ---------------------------------------------------------------------------
-# صفحهٔ گزارش مدیریتی
-# ---------------------------------------------------------------------------
-class ReportsPage(QWidget):
-    """پیش‌نمایش گزارش مدیریتی + خروجی اکسل و چاپ."""
-
-    exportExcelRequested = pyqtSignal()
-    printRequested = pyqtSignal()
-    refreshRequested = pyqtSignal()
-
-    def __init__(self, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(parent)
-        self.colors = colors
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 16, 22, 18)
-        layout.setSpacing(12)
-
-        title_row = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(0)
-        title = QLabel("گزارش مدیریتی")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("خلاصهٔ شاخص‌ها، قراردادهای نیازمند پیگیری و توزیع وضعیت‌ها")
-        subtitle.setObjectName("Muted")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        title_row.addLayout(title_box)
-        title_row.addStretch(1)
-
-        refresh_btn = QPushButton("بازخوانی")
-        refresh_btn.clicked.connect(self.refreshRequested.emit)
-        title_row.addWidget(refresh_btn, 0, Qt.AlignTop)
-        print_btn = QPushButton("چاپ / ذخیرهٔ PDF")
-        print_btn.clicked.connect(self.printRequested.emit)
-        title_row.addWidget(print_btn, 0, Qt.AlignTop)
-        export_btn = QPushButton("خروجی اکسل گزارش")
-        export_btn.setObjectName("Primary")
-        export_btn.clicked.connect(self.exportExcelRequested.emit)
-        title_row.addWidget(export_btn, 0, Qt.AlignTop)
-        layout.addLayout(title_row)
-
-        self.browser = QTextBrowser()
-        self.browser.setOpenExternalLinks(False)
-        self.browser.setFrameShape(QFrame.NoFrame)
-        configure_rtl_browser(self.browser)
-        self.browser.setStyleSheet(
-            f"background: {colors['surface']}; border: 1px solid {colors['border']};"
-            f"border-radius: 12px; padding: 18px;"
-        )
-        layout.addWidget(self.browser, 1)
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self.colors = colors
-        self.browser.setStyleSheet(
-            f"background: {colors['surface']}; border: 1px solid {colors['border']};"
-            f"border-radius: 12px; padding: 18px;"
-        )
-
-    @staticmethod
-    def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]],
-               colors: Dict[str, str], widths: Optional[Sequence[str]] = None) -> str:
-        head_cells = "".join(
-            f'<th bgcolor="{colors["primary_soft"]}" style="padding:7px; color:{colors["primary_dark"]};">'
-            f'{html_module.escape(str(h))}</th>'
-            for h in headers
-        )
-        body = ""
-        for row in rows:
-            cells = "".join(
-                f'<td style="padding:6px 8px; border-bottom:1px solid {colors["border_soft"]};">'
-                f'{html_module.escape(str(value))}</td>'
-                for value in row
-            )
-            body += f"<tr>{cells}</tr>"
-        colgroup = ""
-        if widths:
-            colgroup = "<colgroup>" + "".join(f'<col width="{w}">' for w in widths) + "</colgroup>"
-        return (
-            f'<table width="100%" cellspacing="0" cellpadding="0" border="0" '
-            f'style="border-collapse:collapse; margin-bottom:14px;">{colgroup}'
-            f"<tr>{head_cells}</tr>{body}</table>"
-        )
-
-    def update_data(self, data: DashboardData) -> None:
-        colors = self.colors
-        counts = data.flag_counts
-        overview = [
-            ("تعداد کل قرارداد", fa_num(data.total_contracts)),
-            ("قراردادهای دارای کسورات اسناد اختتام", fa_num(data.contracts_with_deductions)),
-            ("نیازمند مفاصاحساب بیمه", fa_num(counts["mofasa"])),
-            ("نیازمند تسویهٔ مالی نهایی", fa_num(counts["financial"])),
-            ("نیازمند بالانس متریال", fa_num(counts["balance"])),
-            ("نیازمند تحویل موقت", fa_num(counts["temporary"])),
-            ("نیازمند تحویل قطعی", fa_num(counts["delivery"])),
-            ("نیازمند صورت‌وضعیت ماقبل قطعی", fa_num(counts["prefinal"])),
-            ("نیازمند صورت‌وضعیت قطعی", fa_num(counts["statement"])),
-            ("نیازمند اقرارنامه", fa_num(counts["affidavit"])),
-            ("پکیج‌های آزادسازی انجام‌شده", fa_num(data.package_done)),
-            ("قراردادهای منقضی‌شده", fa_num(data.expired_count)),
-        ]
-        follow_rows = []
-        for record in data.records:
-            flags = record.open_flags
-            if not flags and not record.is_expired:
-                continue
-            follow_rows.append([
-                record.col2 or "—",
-                record.col3 or "—",
-                _truncate(record.col4 or "—", 60),
-                "بله" if record.is_expired else "—",
-                fa(len(flags)),
-                "، ".join(flags) or "—",
-            ])
-        shown = follow_rows[:60]
-        dist_rows = []
-        for name in ("status", "annex", "progress", "completion", "type"):
-            distribution = data.dist('status') if name == "status" else data.dist(name)
-            labels = "، ".join(
-                f"{label} ({fa(value)})" for label, value in distribution.as_list()
-            ) or "—"
-            dist_rows.append([CHART_TITLES.get(name, name), labels])
-
-        html_parts = [
-            "<div dir='rtl' style='font-family: Tahoma; color: %s;'>" % colors["text"],
-            f"<h2 style='color:{colors['primary']}; margin:0 0 4px 0;'>"
-            f"گزارش مدیریتی — پروژهٔ مهر خلیج فارس (کندو)</h2>",
-            f"<div style='color:{colors['text_muted']}; margin-bottom:14px;'>"
-            f"تاریخ تهیه: {today_jalali()} &nbsp;•&nbsp; منبع داده: "
-            f"{html_module.escape(os.path.basename(data.excel_path) or '—')} &nbsp;•&nbsp; "
-            f"آخرین تغییر فایل: {data.source_mtime_text}</div>",
-            f"<div style='font-size:22px; font-weight:bold; color:{colors['primary']}; margin:10px 0;'>"
-            f"پیشرفت کل اختتام: {data.progress_percent_text}٪</div>",
-            "<h3 style='color:%s;'>شاخص‌های کلی</h3>" % colors["primary"],
-            self._table(["شاخص", "مقدار"], overview, colors, ["70%", "30%"]),
-            "<h3 style='color:%s;'>قراردادهای نیازمند پیگیری</h3>" % colors["primary"],
-            self._table(
-                ["نام شرکت", "شمارهٔ قرارداد", "موضوع", "منقضی", "موارد باز", "شرح موارد"],
-                shown, colors, ["20%", "13%", "27%", "8%", "8%", "24%"],
-            ),
-            (f"<div style='color:{colors['text_muted']};'>مجموع قراردادهای نیازمند پیگیری: "
-             f"{fa_num(len(follow_rows))}"
-             + (f" — فقط {fa(len(shown))} مورد اول نمایش داده شده است." if len(follow_rows) > len(shown) else "")
-             + "</div><br>"),
-            "<h3 style='color:%s;'>توزیع‌ها</h3>" % colors["primary"],
-            self._table(["نمودار", "توزیع (تعداد)"], dist_rows, colors, ["25%", "75%"]),
-            "</div>",
-        ]
-        self.browser.setHtml("".join(html_parts))
-        configure_rtl_browser(self.browser)
-
-    def html(self) -> str:
-        return self.browser.toHtml()
-
-
-# ---------------------------------------------------------------------------
-# صفحهٔ کتابخانهٔ PDF
-# ---------------------------------------------------------------------------
-class PdfLibraryPage(QWidget):
-    """فهرست فایل‌های PDF پوشهٔ قراردادها با جستجو و باز کردن."""
-
-    openRequested = pyqtSignal(str)
-    folderRequested = pyqtSignal()
-
-    def __init__(self, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(parent)
-        self.colors = colors
-        self.folder = ""
-        self._files: List[str] = []
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 16, 22, 18)
-        layout.setSpacing(12)
-
-        title_row = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(0)
-        title = QLabel("کتابخانهٔ PDF قراردادها")
-        title.setObjectName("PageTitle")
-        self.subtitle = QLabel("پوشهٔ PDF تنظیم نشده است.")
-        self.subtitle.setObjectName("Muted")
-        self.subtitle.setWordWrap(True)
-        title_box.addWidget(title)
-        title_box.addWidget(self.subtitle)
-        title_row.addLayout(title_box)
-        title_row.addStretch(1)
-        self.count_chip = QLabel("—")
-        self.count_chip.setObjectName("Chip")
-        title_row.addWidget(self.count_chip, 0, Qt.AlignTop)
-        layout.addLayout(title_row)
-
-        toolbar = QHBoxLayout()
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("Search")
-        self.search_edit.setPlaceholderText("جستجوی نام فایل…")
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(self._apply_filter)
-        toolbar.addWidget(self.search_edit, 1)
-        refresh_btn = QPushButton("بازخوانی فهرست")
-        refresh_btn.clicked.connect(self.refresh_list)
-        toolbar.addWidget(refresh_btn)
-        folder_btn = QPushButton("انتخاب پوشه")
-        folder_btn.clicked.connect(self.folderRequested.emit)
-        toolbar.addWidget(folder_btn)
-        layout.addLayout(toolbar)
-
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(self._open_item)
-        layout.addWidget(self.list_widget, 1)
-
-        footer = QHBoxLayout()
-        self.footer_label = QLabel("—")
-        self.footer_label.setObjectName("Muted")
-        footer.addWidget(self.footer_label, 1)
-        open_btn = QPushButton("باز کردن فایل انتخاب‌شده")
-        open_btn.setObjectName("Primary")
-        open_btn.clicked.connect(self._open_selected)
-        footer.addWidget(open_btn)
-        layout.addLayout(footer)
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self.colors = colors
-
-    def set_folder(self, folder: str) -> None:
-        self.folder = folder or ""
-        self.subtitle.setText(self.folder or "پوشهٔ PDF تنظیم نشده است.")
-        self.refresh_list()
-
-    def refresh_list(self) -> None:
-        self._files = []
-        if self.folder and os.path.isdir(self.folder):
-            try:
-                with os.scandir(self.folder) as entries:
-                    for entry in entries:
-                        try:
-                            if entry.is_file() and entry.name.lower().endswith(".pdf"):
-                                self._files.append(entry.name)
-                        except OSError:
-                            continue
-            except Exception as exc:
-                self.footer_label.setText(f"خطا در خواندن پوشه: {exc}")
-        self._files.sort(key=normalize_per)
-        self._apply_filter()
-        self.count_chip.setText(bidi(f"{fa(len(self._files))} فایل"))
-
-    def _apply_filter(self) -> None:
-        query = normalize_per(self.search_edit.text())
-        self.list_widget.clear()
-        shown = 0
-        for name in self._files:
-            if query and query not in normalize_per(name):
-                continue
-            shown += 1
-            if shown > 5000:
-                break
-            item = QListWidgetItem(name)
-            item.setData(Qt.UserRole, name)
-            item.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
-            self.list_widget.addItem(item)
-        if not shown:
-            message = ("پوشه‌ای انتخاب نشده است." if not self.folder
-                       else "فایل PDF‌ای در این پوشه پیدا نشد.")
-            self.list_widget.addItem(QListWidgetItem(message))
-        self.footer_label.setText(
-            f"{fa(shown)} فایل نمایش داده می‌شود" + (f" از {fa(len(self._files))}" if query else "")
-        )
-
-    def _open_selected(self) -> None:
-        item = self.list_widget.currentItem()
-        if item:
-            self._open_item(item)
-
-    def _open_item(self, item: QListWidgetItem) -> None:
-        name = item.data(Qt.UserRole)
-        if name:
-            self.openRequested.emit(str(name))
-
-
-# ---------------------------------------------------------------------------
-# صفحهٔ تنظیمات
-# ---------------------------------------------------------------------------
-class SettingsPage(QWidget):
-    """تنظیم مسیر اکسل/PDF، پوسته و بازخوانی خودکار."""
-
-    saveRequested = pyqtSignal(dict)
-    reloadRequested = pyqtSignal()
-    openDataFolderRequested = pyqtSignal()
-    browseDataFolderRequested = pyqtSignal()
-
-    def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(parent)
-        self.config = config
-        self.colors = colors
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 16, 22, 22)
-        layout.setSpacing(14)
-
-        title = QLabel("تنظیمات برنامه")
-        title.setObjectName("PageTitle")
-        subtitle = QLabel("مسیر منبع داده و رفتار برنامه؛ این تنظیمات در فایل JSON کنار برنامه ذخیره می‌شود.")
-        subtitle.setObjectName("Muted")
-        subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        scroll.setWidget(content)
-        form_holder = QVBoxLayout(content)
-        form_holder.setContentsMargins(0, 0, 0, 0)
-        form_holder.setSpacing(14)
-
-        source_group = QGroupBox("منبع داده")
-        source_layout = QGridLayout(source_group)
-        source_layout.setHorizontalSpacing(8)
-        source_layout.setVerticalSpacing(10)
-
-        source_layout.addWidget(QLabel("فایل اکسل:"), 0, 0)
-        self.excel_edit = QLineEdit(str(config.get("excel_path") or ""))
-        self.excel_edit.setPlaceholderText("مسیر فایل F.O.C(Mehr).xlsx")
-        source_layout.addWidget(self.excel_edit, 0, 1)
-        browse_excel = QPushButton("انتخاب…")
-        browse_excel.clicked.connect(self._browse_excel)
-        source_layout.addWidget(browse_excel, 0, 2)
-        network_btn = QPushButton("مسیر شبکهٔ قبلی")
-        network_btn.setToolTip(ORIGINAL_EXCEL_PATH)
-        network_btn.clicked.connect(lambda: self.excel_edit.setText(ORIGINAL_EXCEL_PATH))
-        source_layout.addWidget(network_btn, 0, 3)
-
-        source_layout.addWidget(QLabel("نام شیت:"), 1, 0)
-        self.sheet_edit = QLineEdit(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
-        source_layout.addWidget(self.sheet_edit, 1, 1)
-
-        source_layout.addWidget(QLabel("پوشهٔ PDF:"), 2, 0)
-        self.pdf_edit = QLineEdit(str(config.get("pdf_folder") or ""))
-        self.pdf_edit.setPlaceholderText("پوشه‌ای که فایل‌های PDF قراردادها در آن است")
-        source_layout.addWidget(self.pdf_edit, 2, 1)
-        browse_pdf = QPushButton("انتخاب…")
-        browse_pdf.clicked.connect(self._browse_pdf)
-        source_layout.addWidget(browse_pdf, 2, 2)
-        pdf_network = QPushButton("مسیر شبکهٔ قبلی")
-        pdf_network.setToolTip(ORIGINAL_PDF_FOLDER)
-        pdf_network.clicked.connect(lambda: self.pdf_edit.setText(ORIGINAL_PDF_FOLDER))
-        source_layout.addWidget(pdf_network, 2, 3)
-        source_layout.setColumnStretch(1, 1)
-        form_holder.addWidget(source_group)
-
-        display_group = QGroupBox("نمایش")
-        display_layout = QFormLayout(display_group)
-        self.theme_combo = Combo()
-        self.theme_combo.addItem("روشن", "light")
-        self.theme_combo.addItem("تیره", "dark")
-        current_theme = str(config.get("theme") or "light")
-        index = self.theme_combo.findData(current_theme)
-        self.theme_combo.setCurrentIndex(max(0, index))
-        display_layout.addRow("پوسته:", self.theme_combo)
-
-        self.font_spin = SpinBox()
-        self.font_spin.setRange(8, 16)
-        self.font_spin.setSuffix(" pt")
-        self.font_spin.setValue(int(config.get("font_size") or 10))
-        display_layout.addRow("اندازهٔ قلم:", self.font_spin)
-
-        self.auto_spin = SpinBox()
-        self.auto_spin.setRange(0, 120)
-        self.auto_spin.setSuffix(" دقیقه")
-        self.auto_spin.setSpecialValueText("غیرفعال")
-        self.auto_spin.setValue(int(config.get("auto_refresh_minutes") or 5))
-        display_layout.addRow("بازخوانی خودکار:", self.auto_spin)
-        form_holder.addWidget(display_group)
-
-        storage_group = QGroupBox("فایل‌های برنامه")
-        storage_layout = QVBoxLayout(storage_group)
-        self.config_path_label = QLabel(f"تنظیمات: {config.path}")
-        self.config_path_label.setObjectName("Muted")
-        self.config_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.notes_path_label = QLabel(f"یادداشت‌ها: {data_dir() / NotesStore.FILENAME}")
-        self.notes_path_label.setObjectName("Muted")
-        self.notes_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        storage_layout.addWidget(self.config_path_label)
-        storage_layout.addWidget(self.notes_path_label)
-        open_folder = QPushButton("باز کردن پوشهٔ برنامه")
-        open_folder.clicked.connect(self.openDataFolderRequested.emit)
-        storage_layout.addWidget(open_folder, 0, Qt.AlignRight)
-        form_holder.addWidget(storage_group)
-
-        buttons = QHBoxLayout()
-        save_btn = QPushButton("ذخیره و اعمال")
-        save_btn.setObjectName("Primary")
-        save_btn.clicked.connect(self._emit_save)
-        buttons.addWidget(save_btn)
-        reload_btn = QPushButton("بارگذاری مجدد داده‌ها")
-        reload_btn.clicked.connect(self.reloadRequested.emit)
-        buttons.addWidget(reload_btn)
-        buttons.addStretch(1)
-        form_holder.addLayout(buttons)
-        form_holder.addStretch(1)
-        layout.addWidget(scroll, 1)
-
-    def _browse_excel(self) -> None:
-        start = self.excel_edit.text() or str(app_dir())
-        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
-        if path:
-            self.excel_edit.setText(path)
-            if not self.pdf_edit.text().strip():
-                guess = Path(path).parent / "PDF-MEHR"
-                if guess.is_dir():
-                    self.pdf_edit.setText(str(guess))
-
-    def _browse_pdf(self) -> None:
-        start = self.pdf_edit.text() or str(app_dir())
-        folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
-        if folder:
-            self.pdf_edit.setText(folder)
-
-    def _emit_save(self) -> None:
-        self.saveRequested.emit({
-            "excel_path": self.excel_edit.text().strip(),
-            "sheet_name": self.sheet_edit.text().strip() or SHEET_NAME_DEFAULT,
-            "pdf_folder": self.pdf_edit.text().strip(),
-            "theme": self.theme_combo.currentData(),
-            "font_size": self.font_spin.value(),
-            "auto_refresh_minutes": self.auto_spin.value(),
-        })
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self.colors = colors
-
-    def load_values(self, config: AppConfig) -> None:
-        self.excel_edit.setText(str(config.get("excel_path") or ""))
-        self.sheet_edit.setText(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
-        self.pdf_edit.setText(str(config.get("pdf_folder") or ""))
-        theme_index = self.theme_combo.findData(str(config.get("theme") or "light"))
-        self.theme_combo.setCurrentIndex(max(0, theme_index))
-        self.font_spin.setValue(int(config.get("font_size") or 10))
-        self.auto_spin.setValue(int(config.get("auto_refresh_minutes") or 0))
-
-
-# ---------------------------------------------------------------------------
-# صفحهٔ راهنما
-# ---------------------------------------------------------------------------
-class HelpPage(QWidget):
-    """راهنمای برنامه و نگاشت امکانات نسخهٔ وب به نسخهٔ دسکتاپ."""
-
-    def __init__(self, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(parent)
-        self.colors = colors
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 16, 22, 18)
-        title = QLabel("راهنما و توضیحات")
-        title.setObjectName("PageTitle")
-        layout.addWidget(title)
-        self.browser = QTextBrowser()
-        self.browser.setFrameShape(QFrame.NoFrame)
-        configure_rtl_browser(self.browser)
-        layout.addWidget(self.browser, 1)
-        self.browser.setHtml(self._html())
-
-    def _html(self) -> str:
-        c = self.colors
-        return f"""
-        <div align="right" dir="rtl" style="font-family: Tahoma; color: {c['text']}; line-height: 170%;">
-        <h2 style="color:{c['primary']};">داشبورد قراردادهای مهر خلیج فارس — نسخهٔ دسکتاپ</h2>
-        <p>این برنامه نسخهٔ مستقل و تک‌فایلی داشبورد Flask است. دیگر نه سرور Flask لازم است،
-        نه مرورگر و نه فایل <code>dashboard.html</code>. داده‌ها مستقیماً از فایل اکسل
-        (شیت <code>colorcode</code>) خوانده می‌شوند و همان شماره‌ستون‌های نسخهٔ وب استفاده می‌شوند؛
-        بنابراین محاسبات دقیقاً مانند قبل است.</p>
-
-        <h3 style="color:{c['primary']};">شروع سریع</h3>
-        <ol>
-          <li>از صفحهٔ «تنظیمات» فایل اکسل را انتخاب کنید (یا فایل را کنار همین اسکریپت بگذارید).</li>
-          <li>پوشهٔ PDF را انتخاب کنید تا ستون «فایل» در جدول فعال شود.</li>
-          <li>دکمهٔ «به‌روزرسانی داده‌ها» یا <b>Ctrl+R</b> را بزنید.</li>
-        </ol>
-
-        <h3 style="color:{c['primary']};">نقشهٔ امکانات نسخهٔ وب ← دسکتاپ</h3>
-        <table width="100%" cellspacing="0" cellpadding="6" border="1" style="border-color:{c['border']};">
-        <tr bgcolor="{c['primary_soft']}"><th>نسخهٔ وب (Flask)</th><th>در این برنامه</th></tr>
-        <tr><td>صفحهٔ اصلی با کارت‌های آماری</td><td>صفحهٔ «داشبورد» با کارت‌های قابل کلیک</td></tr>
-        <tr><td>فیلتر با کلیک روی کارت‌ها</td><td>کلیک روی کارت یا «موارد باز» → جدول فیلتر می‌شود</td></tr>
-        <tr><td>نمودارهای Chart.js</td><td>نمودارهای بومی Qt با کلیک و راهنمای تعاملی</td></tr>
-        <tr><td>جدول قراردادها</td><td>صفحهٔ «جدول قراردادها» با جستجو، مرتب‌سازی و انتخاب چندگانه</td></tr>
-        <tr><td>پنجرهٔ جزئیات/یادداشت سمت راست</td><td>پنل «جزئیات قرارداد» (راست پنجره)</td></tr>
-        <tr><td>خروجی اکسل مرورگر (XLSX)</td><td>خروجی اکسل با انتخاب ستون‌ها و دامنهٔ داده</td></tr>
-        <tr><td>/export/management_report</td><td>صفحهٔ «گزارش مدیریتی» → خروجی اکسل سه‌شیتی</td></tr>
-        <tr><td>لینک فایل PDF + رمز</td><td>ستون «فایل» و پنل جزئیات؛ باز شدن با برنامهٔ پیش‌فرض</td></tr>
-        <tr><td>/api/ollama-chat</td><td>حذف شده (نیازمند سرور محلی Ollama)؛ بقیهٔ امکانات مستقل کار می‌کنند</td></tr>
-        <tr><td>ورود با رمز ۱۵۲۴ و کاربران شبکه</td><td>حذف شده؛ برنامه تک‌کاربرهٔ دسکتاپ است</td></tr>
-        </table>
-
-        <h3 style="color:{c['primary']};">میان‌برها</h3>
-        <table cellspacing="0" cellpadding="5">
-        <tr><td><kbd>Ctrl+R</kbd></td><td>بازخوانی اکسل</td></tr>
-        <tr><td><kbd>Ctrl+F</kbd></td><td>جستجو</td></tr>
-        <tr><td><kbd>Ctrl+E</kbd></td><td>خروجی اکسل جدول</td></tr>
-        <tr><td><kbd>Ctrl+D</kbd></td><td>تغییر پوستهٔ روشن/تیره</td></tr>
-        <tr><td><kbd>F1</kbd></td><td>راهنما</td></tr>
-        <tr><td><kbd>Esc</kbd></td><td>بستن پنل جزئیات</td></tr>
-        </table>
-
-        <h3 style="color:{c['primary']};">فایل‌های ذخیره‌شده</h3>
-        <p>تنظیمات در <code>mehr_qt_config.json</code> و یادداشت‌ها/نشان‌ها در
-        <code>mehr_notes.json</code> در همان پوشهٔ برنامه (یا در صورت نداشتن دسترسی، پوشهٔ کاربر) ذخیره می‌شوند.</p>
-
-        <h3 style="color:{c['primary']};">نصب پیش‌نیازها</h3>
-        <pre style="background:{c['surface_soft']}; padding:10px; border-radius:8px;">pip install PyQt5 openpyxl</pre>
-        <p style="color:{c['text_muted']};">نسخهٔ {APP_VERSION} — ساخته‌شده بر پایهٔ منطق mehr_optimized.py و dashboard.html</p>
-        </div>
-        """
-
-    def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        self.colors = colors
-        self.browser.setHtml(self._html())
-        configure_rtl_browser(self.browser)
-
-
-# ---------------------------------------------------------------------------
-# پنجرهٔ اصلی
-# ---------------------------------------------------------------------------
-NAV_ITEMS = [
-    ("نمایش", [
-        ("dashboard", "داشبورد", "chart"),
-        ("contracts", "جدول قراردادها", "table"),
-    ]),
-    ("گزارش‌ها", [
-        ("reports", "گزارش مدیریتی", "document"),
-        ("pdfs", "کتابخانهٔ PDF", "pdf"),
-    ]),
-    ("سیستم", [
-        ("settings", "تنظیمات", "gear"),
-        ("help", "راهنما", "help"),
-    ]),
-]
-
-PAGE_TITLES = {
-    "dashboard": "داشبورد",
-    "contracts": "جدول قراردادها",
-    "reports": "گزارش مدیریتی",
-    "pdfs": "کتابخانهٔ PDF",
-    "settings": "تنظیمات",
-    "help": "راهنما",
-}
-
-FIELD_LABELS = {
-    "type": "نوع قرارداد",
-    "status": "وضعیت پکیج",
-    "progress": "پیشرفت کارکرد",
-    "completion": "پیشرفت اختتام",
-    "annex": "الحاقیه",
-}
-
-
-class MainWindow(QMainWindow):
-    def __init__(self, config: AppConfig, notes: NotesStore) -> None:
-        super().__init__()
-        self.config = config
-        self.notes = notes
-        self.colors = THEMES.get(str(config.get("theme") or "light"), THEMES["light"])
-        self.data: DashboardData = empty_dashboard()
-        self.loader: Optional[ExcelLoader] = None
-        self._last_error = ""
-        self._current_page = "dashboard"
-        self.nav_buttons: Dict[str, QPushButton] = {}
-
-        self.setWindowTitle(f"{APP_NAME} — {APP_SHORT}")
-        self.setWindowIcon(make_app_icon())
-        self.setMinimumSize(1100, 700)
-        self.resize(1440, 900)
-        self.setAcceptDrops(True)
-
-        self._build_ui()
-        self._create_actions()
-        self._restore_geometry()
-        self.apply_theme(str(config.get("theme") or "light"), int(config.get("font_size") or 10),
-                         persist=False)
-        self._setup_auto_timer()
-        QTimer.singleShot(250, self.initial_load)
-
-    # ------------------------------------------------------------------
-    # ساخت رابط
-    # ------------------------------------------------------------------
-    def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # ---- نوار بالایی ----
-        header = QFrame()
-        header.setObjectName("HeaderBar")
-        header.setFixedHeight(66)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 8, 18, 8)
-        header_layout.setSpacing(10)
-
-        self.page_title_label = QLabel(PAGE_TITLES["dashboard"])
-        self.page_title_label.setStyleSheet("font-size: 12pt; font-weight: 800;")
-        header_layout.addWidget(self.page_title_label)
-
-        self.search_edit = QLineEdit()
-        self.search_edit.setObjectName("Search")
-        self.search_edit.setPlaceholderText("جستجو در قراردادها: شماره، نام شرکت، موضوع…")
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setMaximumWidth(430)
-        self.search_edit.setMinimumWidth(240)
-        self.search_action = self.search_edit.addAction(
-            make_icon("search", self.colors["text_muted"], 16), QLineEdit.LeadingPosition
-        )
-        self.search_edit.textChanged.connect(self._on_search_text_changed)
-        header_layout.addStretch(1)
-        header_layout.addWidget(self.search_edit, 2)
-        header_layout.addStretch(1)
-
-        self.refresh_button = QPushButton("به‌روزرسانی")
-        self.refresh_button.setObjectName("Primary")
-        self.refresh_button.setToolTip("بازخوانی فایل اکسل (Ctrl+R)")
-        self.refresh_button.clicked.connect(lambda: self.load_data())
-        header_layout.addWidget(self.refresh_button)
-
-        self.export_button = QPushButton("خروجی اکسل")
-        self.export_button.setToolTip("خروجی اکسل از جدول (Ctrl+E)")
-        self.export_button.clicked.connect(self.export_table)
-        header_layout.addWidget(self.export_button)
-
-        self.theme_button = QPushButton()
-        self.theme_button.setObjectName("ToolButton")
-        self.theme_button.setToolTip("تغییر پوستهٔ روشن/تیره (Ctrl+D)")
-        self.theme_button.clicked.connect(self.toggle_theme)
-        header_layout.addWidget(self.theme_button)
-        root.addWidget(header)
-
-        # ---- بدنه: سایدبار + صفحه‌ها ----
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(236)
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(10, 14, 10, 12)
-        sidebar_layout.setSpacing(2)
-
-        brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(6, 0, 6, 6)
-        brand_row.setSpacing(9)
-        logo = QLabel()
-        logo.setPixmap(make_app_icon().pixmap(40, 40))
-        logo.setFixedSize(42, 42)
-        brand_row.addWidget(logo)
-        brand_text = QVBoxLayout()
-        brand_text.setSpacing(0)
-        brand_title = QLabel(APP_SHORT)
-        brand_title.setObjectName("Brand")
-        brand_sub = QLabel("مهر خلیج فارس")
-        brand_sub.setObjectName("BrandSub")
-        brand_text.addWidget(brand_title)
-        brand_text.addWidget(brand_sub)
-        brand_row.addLayout(brand_text)
-        brand_row.addStretch(1)
-        sidebar_layout.addLayout(brand_row)
-
-        self.nav_group = QButtonGroup(self)
-        self.nav_group.setExclusive(True)
-        for section, items in NAV_ITEMS:
-            section_label = QLabel(section)
-            section_label.setStyleSheet(
-                f"color: {self.colors['sidebar_muted']}; font-size: 8pt; font-weight: 700;"
-                f"padding: 10px 10px 3px 10px;"
-            )
-            sidebar_layout.addWidget(section_label)
-            for key, label, icon in items:
-                button = QPushButton(f"  {label}")
-                button.setObjectName("NavButton")
-                button.setCheckable(True)
-                button.setIcon(make_icon(icon, self.colors["sidebar_text"], 18))
-                button.setIconSize(QSize(18, 18))
-                button.setMinimumHeight(38)
-                button.setCursor(Qt.PointingHandCursor)
-                button.clicked.connect(lambda _checked=False, page=key: self.show_page(page))
-                self.nav_group.addButton(button)
-                self.nav_buttons[key] = button
-                sidebar_layout.addWidget(button)
-        sidebar_layout.addStretch(1)
-
-        self.sidebar_status = QLabel("در حال راه‌اندازی…")
-        self.sidebar_status.setWordWrap(True)
-        self.sidebar_status.setStyleSheet(
-            f"color: {self.colors['sidebar_muted']}; font-size: 8pt; padding: 8px 8px 4px 8px;"
-        )
-        sidebar_layout.addWidget(self.sidebar_status)
-        version_label = QLabel(f"نسخهٔ {fa(APP_VERSION)}")
-        version_label.setStyleSheet(
-            f"color: {self.colors['sidebar_muted']}; font-size: 7.5pt; padding: 0 8px 4px 8px;"
-        )
-        sidebar_layout.addWidget(version_label)
-        body.addWidget(sidebar)
-
-        self.stack = QStackedWidget()
-        body.addWidget(self.stack, 1)
-        root.addLayout(body, 1)
-
-        # ---- صفحه‌ها ----
-        self.dashboard = DashboardPage(self.notes)
-        self.contracts = ContractsPage(self.notes)
-        self.reports = ReportsPage(self.colors)
-        self.pdfs = PdfLibraryPage(self.colors)
-        self.settings = SettingsPage(self.config, self.colors)
-        self.help = HelpPage(self.colors)
-        self.pages = {
-            "dashboard": self.dashboard,
-            "contracts": self.contracts,
-            "reports": self.reports,
-            "pdfs": self.pdfs,
-            "settings": self.settings,
-            "help": self.help,
-        }
-        for page in self.pages.values():
-            self.stack.addWidget(page)
-
-        # ---- پنل جزئیات ----
-        self.detail = ContractDetailDock(self.notes, self.colors,
-                                         str(self.config.get("last_author") or ""), self)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.detail)
-        self.detail.hide()
-        self.detail.bookmarkToggled.connect(self.toggle_bookmark)
-        self.detail.pdfRequested.connect(self.open_pdf)
-        self.detail.revealRequested.connect(self.reveal_pdf)
-        self.detail.notesChanged.connect(self._on_notes_changed)
-
-        # ---- نوار وضعیت ----
-        status = self.statusBar()
-        self.status_source = QLabel("منبع: —")
-        self.status_counts = QLabel("—")
-        self.status_loaded = QLabel("—")
-        self.loading_bar = QProgressBar()
-        self.loading_bar.setRange(0, 0)
-        self.loading_bar.setFixedWidth(110)
-        self.loading_bar.setTextVisible(False)
-        self.loading_bar.hide()
-        status.addWidget(self.status_source, 1)
-        status.addPermanentWidget(self.status_counts)
-        status.addPermanentWidget(self.status_loaded)
-        status.addPermanentWidget(self.loading_bar)
-
-        # ---- اتصال رخدادها ----
-        self.dashboard.cardClicked.connect(self.on_card_clicked)
-        self.dashboard.sliceClicked.connect(self.on_slice_clicked)
-        self.dashboard.showContracts.connect(lambda: self.show_page("contracts"))
-        self.dashboard.refreshRequested.connect(self._on_refresh_requested)
-        self.dashboard.pickRequested.connect(self.pick_excel_file)
-        self.dashboard.recordActivated.connect(self.show_record_detail)
-        self.contracts.recordActivated.connect(self.show_record_detail)
-        self.contracts.searchChanged.connect(self._on_page_search)
-        self.contracts.filterChanged.connect(self._on_filter_changed)
-        self.contracts.exportRequested.connect(self.export_table)
-        self.contracts.bookmarkToggled.connect(self.toggle_bookmark)
-        self.contracts.pdfRequested.connect(self.open_pdf)
-        self.contracts.copyRequested.connect(self.copy_text)
-        self.reports.exportExcelRequested.connect(self.export_management)
-        self.reports.printRequested.connect(self.print_report)
-        self.reports.refreshRequested.connect(self._refresh_reports)
-        self.pdfs.openRequested.connect(self.open_pdf)
-        self.pdfs.folderRequested.connect(lambda: self.show_page("settings"))
-        self.settings.saveRequested.connect(self.save_settings)
-        self.settings.reloadRequested.connect(lambda: self.load_data(force_settings=True))
-        self.settings.openDataFolderRequested.connect(
-            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
-        )
-        self._set_page("dashboard")
-
-    def _create_actions(self) -> None:
-        file_menu = self.menuBar().addMenu("فایل")
-        open_action = QAction("انتخاب فایل اکسل…", self)
-        open_action.triggered.connect(self.pick_excel_file)
-        file_menu.addAction(open_action)
-        reload_action = QAction("بازخوانی داده‌ها", self)
-        reload_action.setShortcut(QKeySequence("Ctrl+R"))
-        reload_action.triggered.connect(lambda: self.load_data())
-        file_menu.addAction(reload_action)
-        file_menu.addSeparator()
-        export_action = QAction("خروجی اکسل جدول…", self)
-        export_action.setShortcut(QKeySequence("Ctrl+E"))
-        export_action.triggered.connect(self.export_table)
-        file_menu.addAction(export_action)
-        report_action = QAction("خروجی اکسل گزارش مدیریتی…", self)
-        report_action.triggered.connect(self.export_management)
-        file_menu.addAction(report_action)
-        file_menu.addSeparator()
-        quit_action = QAction("خروج", self)
-        quit_action.setShortcut(QKeySequence.Quit)
-        quit_action.triggered.connect(self.close)
-        file_menu.addAction(quit_action)
-
-        view_menu = self.menuBar().addMenu("نمایش")
-        search_action = QAction("جستجو", self)
-        search_action.setShortcut(QKeySequence.Find)
-        search_action.triggered.connect(self.focus_search)
-        view_menu.addAction(search_action)
-        theme_action = QAction("تغییر پوسته", self)
-        theme_action.setShortcut(QKeySequence("Ctrl+D"))
-        theme_action.triggered.connect(self.toggle_theme)
-        view_menu.addAction(theme_action)
-        details_action = QAction("پنل جزئیات قرارداد", self)
-        details_action.setShortcut(QKeySequence("Ctrl+I"))
-        details_action.triggered.connect(self._toggle_detail_dock)
-        view_menu.addAction(details_action)
-        view_menu.addSeparator()
-        for key in ("dashboard", "contracts", "reports", "pdfs", "settings", "help"):
-            action = QAction(PAGE_TITLES[key], self)
-            action.triggered.connect(lambda _checked=False, page=key: self.show_page(page))
-            view_menu.addAction(action)
-
-        help_menu = self.menuBar().addMenu("راهنما")
-        help_action = QAction("راهنمای برنامه", self)
-        help_action.setShortcut(QKeySequence.HelpContents)
-        help_action.triggered.connect(lambda: self.show_page("help"))
-        help_menu.addAction(help_action)
-        about_action = QAction("دربارهٔ برنامه", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-
-        escape_shortcut = QShortcut(QKeySequence("Esc"), self)
-        escape_shortcut.activated.connect(self._on_escape)
-
-    # ------------------------------------------------------------------
-    # ناوبری
-    # ------------------------------------------------------------------
-    def _set_page(self, key: str) -> None:
-        self._current_page = key
-        button = self.nav_buttons.get(key)
-        if button:
-            button.setChecked(True)
-        self.page_title_label.setText(PAGE_TITLES.get(key, ""))
-        self.stack.setCurrentWidget(self.pages[key])
-
-    def show_page(self, key: str) -> None:
-        if key not in self.pages:
-            return
-        self._set_page(key)
-        if key == "reports":
-            self._refresh_reports()
-        elif key == "pdfs":
-            self.pdfs.set_folder(self.data.pdf_folder)
-        elif key == "settings":
-            self.settings.load_values(self.config)
-
-    def _refresh_reports(self) -> None:
-        self.reports.update_data(self.data)
-
-    def focus_search(self) -> None:
-        self.search_edit.setFocus()
-        self.search_edit.selectAll()
-
-    def _on_escape(self) -> None:
-        if self.detail.isVisible():
-            self.detail.hide()
-        elif self._current_page != "dashboard":
-            self.show_page("dashboard")
-
-    def _toggle_detail_dock(self) -> None:
-        if self.detail.isVisible():
-            self.detail.hide()
-            return
-        records = self.contracts.model.visible_records()
-        if records:
-            self.show_record_detail(records[0])
-        else:
-            self.detail.show()
-
-    # ------------------------------------------------------------------
-    # داده‌ها
-    # ------------------------------------------------------------------
-    def initial_load(self) -> None:
-        path = str(self.config.get("excel_path") or "").strip()
-        if not path:
-            path = find_default_excel(self.config)
-            if path:
-                self.config.set("excel_path", path)
-                pdf_folder = default_pdf_folder(path, self.config)
-                if pdf_folder and not self.config.get("pdf_folder"):
-                    self.config.set("pdf_folder", pdf_folder, save=False)
-                self.config.save()
-        if not path:
-            self.dashboard.update_data(empty_dashboard("فایل اکسل انتخاب نشده است."))
-            self.settings.load_values(self.config)
-            self.status_source.setText("منبع: —")
-            self.status_counts.setText("داده‌ای بارگذاری نشده")
-            self.sidebar_status.setText("برای شروع، فایل اکسل را از تنظیمات انتخاب کنید.")
-            return
-        self.load_data(silent=False)
-
-    def load_data(self, silent: bool = False, force_settings: bool = False) -> None:
-        if self._loader_running():
-            return
-        if force_settings:
-            self._persist_settings_fields()
-        path = str(self.config.get("excel_path") or "").strip()
-        if not path:
-            self.pick_excel_file()
-            return
-        sheet = str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
-        pdf_folder = str(self.config.get("pdf_folder") or "")
-        self._set_loading(True)
-        self.refresh_button.setEnabled(False)
-        self.statusBar().showMessage("در حال خواندن فایل اکسل…", 0)
-        self.loader = ExcelLoader(path, sheet, pdf_folder, self)
-        self.loader.loaded.connect(lambda data: self._on_data_loaded(data, silent))
-        self.loader.failed.connect(lambda message: self._on_load_failed(message, silent))
-        self.loader.finished.connect(self._on_loader_finished)
-        self.loader.finished.connect(self.loader.deleteLater)
-        self.loader.start()
-
-    def _persist_settings_fields(self) -> None:
-        self.config.set("excel_path", self.settings.excel_edit.text().strip(), save=False)
-        self.config.set("sheet_name", self.settings.sheet_edit.text().strip() or SHEET_NAME_DEFAULT,
-                        save=False)
-        self.config.set("pdf_folder", self.settings.pdf_edit.text().strip(), save=False)
-        self.config.set("auto_refresh_minutes", self.settings.auto_spin.value(), save=False)
-        self.config.save()
-
-    def _loader_running(self) -> bool:
-        loader = self.loader
-        if loader is None:
-            return False
-        try:
-            return bool(loader.isRunning())
-        except RuntimeError:  # شیء C++ حذف شده است
-            self.loader = None
-            return False
-
-    def _set_loading(self, loading: bool) -> None:
-        self.loading_bar.setVisible(loading)
-        self.refresh_button.setText("در حال خواندن…" if loading else "به‌روزرسانی")
-        if loading:
-            self.sidebar_status.setText("در حال خواندن اکسل…")
-
-    def _on_loader_finished(self) -> None:
-        self._set_loading(False)
-        self.refresh_button.setEnabled(True)
-        self.loader = None
-
-    def _on_data_loaded(self, data: DashboardData, silent: bool) -> None:
-        self.data = data
-        self.dashboard.update_data(data)
-        self.contracts.model.set_records(data.records)
-        self.apply_view()
-        self.reports.update_data(data)
-        self.pdfs.set_folder(data.pdf_folder)
-        self.detail.setEnabled(bool(data.records))
-        self.status_source.setText(f"منبع: {data.excel_path}")
-        self.status_counts.setText(bidi(f"{fa(data.total_contracts)} قرارداد"))
-        self.status_loaded.setText(f"بارگذاری: {data.loaded_at_text}")
-        self.sidebar_status.setText(bidi(f"{fa(data.total_contracts)} قرارداد") + f"\n{data.loaded_at_text}")
-        self.statusBar().showMessage(
-            f"داده‌ها با موفقیت بارگذاری شد — {fa(data.total_contracts)} قرارداد"
-            + (f" | {len(data.warnings)} هشدار" if data.warnings else ""),
-            6000,
-        )
-        self._setup_auto_timer()
-        if not silent and data.warnings:
-            QMessageBox.warning(self, "هشدار داده‌ها", "\n".join(data.warnings))
-
-    def _on_load_failed(self, message: str, silent: bool) -> None:
-        self._last_error = message
-        self.statusBar().showMessage("بارگذاری داده‌ها ناموفق بود.", 8000)
-        self.sidebar_status.setText("داده‌ها بارگذاری نشد.")
-        if not self.data.records:
-            empty = empty_dashboard(message.splitlines()[0] if message else "خطا در بارگذاری")
-            self.dashboard.update_data(empty)
-            self.reports.update_data(empty)
-        if silent:
-            return
-        box = QMessageBox(self)
-        box.setWindowTitle("خطا در خواندن داده‌ها")
-        box.setIcon(QMessageBox.Critical)
-        box.setText("خواندن فایل اکسل ممکن نشد.")
-        box.setInformativeText(message)
-        pick_button = box.addButton("انتخاب فایل اکسل", QMessageBox.AcceptRole)
-        settings_button = box.addButton("تنظیمات", QMessageBox.ActionRole)
-        box.addButton("بستن", QMessageBox.RejectRole)
-        box.exec_()
-        clicked = box.clickedButton()
-        if clicked is pick_button:
-            self.pick_excel_file()
-        elif clicked is settings_button:
-            self.show_page("settings")
-
-    def _setup_auto_timer(self) -> None:
-        if not hasattr(self, "auto_timer"):
-            self.auto_timer = QTimer(self)
-            self.auto_timer.timeout.connect(self._auto_refresh)
-        minutes = int(self.config.get("auto_refresh_minutes") or 0)
-        self.auto_timer.stop()
-        if minutes > 0:
-            self.auto_timer.start(minutes * 60 * 1000)
-
-    def _auto_refresh(self) -> None:
-        path = self.data.excel_path or str(self.config.get("excel_path") or "")
-        if not path or not os.path.exists(path):
-            return
-        if self._loader_running():
-            return
-        try:
-            mtime = datetime.fromtimestamp(os.path.getmtime(path))
-        except OSError:
-            return
-        if self.data.source_mtime is None or mtime > self.data.source_mtime:
-            self.statusBar().showMessage("تغییر فایل اکسل شناسایی شد؛ بازخوانی…", 4000)
-            self.load_data(silent=True)
-
-    def pick_excel_file(self) -> None:
-        start = (str(self.config.get("excel_path") or "") or str(app_dir()))
-        if os.path.isfile(start):
-            start = os.path.dirname(start)
-        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
-        if not path:
-            return
-        self.config.set("excel_path", path)
-        pdf_folder = str(self.config.get("pdf_folder") or "")
-        if not pdf_folder:
-            guess = default_pdf_folder(path, self.config)
-            if guess:
-                self.config.set("pdf_folder", guess, save=False)
-                self.config.save()
-        self.settings.load_values(self.config)
-        self.load_data()
-
-    def save_settings(self, values: Dict[str, Any]) -> None:
-        for key, value in values.items():
-            self.config.set(key, value, save=False)
-        self.config.save()
-        theme = str(values.get("theme") or "light")
-        font_size = int(values.get("font_size") or 10)
-        self.apply_theme(theme, font_size, persist=False)
-        self._setup_auto_timer()
-        self.statusBar().showMessage("تنظیمات ذخیره شد.", 4000)
-        self.load_data()
-
-    def _on_refresh_requested(self) -> None:
-        if not str(self.config.get("excel_path") or "").strip():
-            self.show_page("settings")
-            self.pick_excel_file()
-            return
-        self.load_data()
-
-    # ------------------------------------------------------------------
-    # جستجو و فیلتر
-    # ------------------------------------------------------------------
-    def _on_search_text_changed(self, text: str) -> None:
-        if not hasattr(self, "search_timer"):
-            self.search_timer = QTimer(self)
-            self.search_timer.setSingleShot(True)
-            self.search_timer.timeout.connect(self.apply_view)
-        self.search_timer.start(220)
-        if self.contracts.search_edit.text() != text:
-            self.contracts.search_edit.blockSignals(True)
-            self.contracts.search_edit.setText(text)
-            self.contracts.search_edit.blockSignals(False)
-
-    def _on_page_search(self, text: str) -> None:
-        if self.search_edit.text() != text:
-            self.search_edit.blockSignals(True)
-            self.search_edit.setText(text)
-            self.search_edit.blockSignals(False)
-        self.apply_view()
-
-    def _on_filter_changed(self, key: str) -> None:
-        self.apply_view(filter_key=key)
-
-    def apply_view(self, filter_key: Optional[str] = None) -> None:
-        search = self.search_edit.text().strip() or self.contracts.current_search().strip()
-        key = filter_key if filter_key is not None else self.contracts.current_filter()
-        bookmarks_only = self.contracts.bookmark_check.isChecked()
-        self.contracts.model.apply_view(search, key, bookmarks_only)
-        self.dashboard.apply_filter(search, key, bookmarks_only)
-        self.contracts.refresh_counts()
-
-    def on_card_clicked(self, filter_key: str) -> None:
-        key = filter_key or "all"
-        label = dict(FILTER_CHOICES).get(key)
-        self.contracts.set_filter(key, label)
-        self.apply_view(filter_key=key)
-        self.show_page("contracts")
-
-    def on_slice_clicked(self, field: str, label: str) -> None:
-        key = f"{field}:{label}"
-        prefix = FIELD_LABELS.get(field, field)
-        self.contracts.set_filter(key, f"{prefix}: {label}")
-        self.apply_view(filter_key=key)
-        self.show_page("contracts")
-
-    # ------------------------------------------------------------------
-    # جزئیات، یادداشت و PDF
-    # ------------------------------------------------------------------
-    def show_record_detail(self, record: Optional[ContractRecord]) -> None:
-        if record is None:
-            return
-        self.detail.set_record(record)
-        self.detail.show()
-        self.detail.raise_()
-
-    def toggle_bookmark(self, key: str) -> None:
-        if not key:
-            return
-        flagged = self.notes.toggle_bookmark(key)
-        self.contracts.model.refresh_bookmarks()
-        self.dashboard.preview_model.refresh_bookmarks()
-        record = self.data.find(key)
-        if record and self.detail.record is not None and self.detail.record.key == key:
-            self.detail.set_record(record)
-        self.statusBar().showMessage(
-            "قرارداد نشان‌گذاری شد." if flagged else "نشان قرارداد برداشته شد.", 3000
-        )
-
-    def _on_notes_changed(self, key: str) -> None:
-        self.contracts.model.refresh_bookmarks()
-        self.dashboard.preview_model.refresh_bookmarks()
-        self.config.set("last_author", self.detail.author_edit.text().strip(), save=False)
-        self.config.save()
-        self.statusBar().showMessage("یادداشت ذخیره شد.", 3000)
-
-    def _pdf_path(self, filename: str) -> str:
-        folder = self.data.pdf_folder or str(self.config.get("pdf_folder") or "")
-        if not folder:
-            return ""
-        return os.path.join(folder, filename)
-
-    def open_pdf(self, filename: str) -> None:
-        if not filename:
-            return
-        path = self._pdf_path(filename)
-        if not path or not os.path.exists(path):
-            QMessageBox.information(
-                self, "فایل PDF",
-                "فایل پیدا نشد.\nمسیر پوشهٔ PDF را در تنظیمات بررسی کنید.",
-            )
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-    def reveal_pdf(self, filename: str) -> None:
-        if not filename:
-            return
-        path = self._pdf_path(filename)
-        if not path or not os.path.exists(path):
-            QMessageBox.information(self, "فایل PDF", "فایل پیدا نشد.")
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
-
-    def copy_text(self, text: str) -> None:
-        if not text:
-            return
-        QApplication.clipboard().setText(text)
-        self.statusBar().showMessage("در کلیپ‌بورد کپی شد.", 2500)
-
-    # ------------------------------------------------------------------
-    # خروجی‌ها
-    # ------------------------------------------------------------------
-    def export_table(self) -> None:
-        if not self.data.records:
-            QMessageBox.information(self, "خروجی اکسل", "هنوز داده‌ای بارگذاری نشده است.")
-            return
-        visible = self.contracts.model.visible_records()
-        selected = self.contracts.selected_records()
-        dialog = ExportDialog(EXPORT_COLUMN_TITLES,
-                              len(visible), len(selected), len(self.data.records), self)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        scope = dialog.scope()
-        if scope == "all":
-            records = self.data.records
-        elif scope == "selected":
-            records = selected
-        else:
-            records = visible
-        if not records:
-            QMessageBox.information(self, "خروجی اکسل", "ردیفی برای خروجی وجود ندارد.")
-            return
-        default_name = f"قراردادها-{jalali_filename_stamp()}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(self, "ذخیرهٔ خروجی اکسل",
-                                              str(app_dir() / default_name), "فایل اکسل (*.xlsx)")
-        if not path:
-            return
-        try:
-            count = write_contracts_workbook(path, records, dialog.selected_columns())
-        except Exception as exc:
-            QMessageBox.critical(self, "خطا در خروجی", f"نوشتن فایل ممکن نشد:\n{exc}")
-            return
-        self._offer_open(path, f"{fa(count)} ردیف در فایل اکسل ذخیره شد.")
-
-    def export_management(self) -> None:
-        if not self.data.records:
-            QMessageBox.information(self, "گزارش مدیریتی", "هنوز داده‌ای بارگذاری نشده است.")
-            return
-        default_name = f"گزارش-مدیریتی-مهر-{jalali_filename_stamp()}.xlsx"
-        path, _ = QFileDialog.getSaveFileName(self, "ذخیرهٔ گزارش مدیریتی",
-                                              str(app_dir() / default_name), "فایل اکسل (*.xlsx)")
-        if not path:
-            return
-        try:
-            write_management_report(path, self.data)
-        except Exception as exc:
-            QMessageBox.critical(self, "خطا در گزارش", f"نوشتن فایل ممکن نشد:\n{exc}")
-            return
-        self._offer_open(path, "گزارش مدیریتی با سه شیت ذخیره شد.")
-
-    def _offer_open(self, path: str, message: str) -> None:
-        box = QMessageBox(self)
-        box.setWindowTitle("انجام شد")
-        box.setIcon(QMessageBox.Information)
-        box.setText(message)
-        box.setInformativeText(path)
-        open_button = box.addButton("باز کردن فایل", QMessageBox.AcceptRole)
-        box.addButton("بستن", QMessageBox.RejectRole)
-        box.exec_()
-        if box.clickedButton() is open_button:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-    def print_report(self) -> None:
-        if not self.data.records:
-            QMessageBox.information(self, "چاپ گزارش", "هنوز داده‌ای بارگذاری نشده است.")
-            return
-        try:
-            from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
-        except Exception:
-            QMessageBox.warning(self, "چاپ", "پشتیبانی چاپ در این سیستم نصب نیست.")
-            return
-        printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageSize(QPrinter.A4)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("چاپ / ذخیرهٔ PDF گزارش مدیریتی")
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        from PyQt5.QtGui import QTextDocument
-        document = QTextDocument()
-        option = document.defaultTextOption()
-        option.setTextDirection(Qt.RightToLeft)
-        document.setDefaultTextOption(option)
-        document.setHtml(self.reports.html())
-        document.print_(printer)
-        self.statusBar().showMessage("گزارش به چاپ ارسال شد.", 4000)
-
-    # ------------------------------------------------------------------
-    # پوسته و تنظیمات ظاهری
-    # ------------------------------------------------------------------
-    def apply_theme(self, theme: str, font_size: int = 10, persist: bool = True) -> None:
-        app = QApplication.instance()
-        self.colors = apply_theme(app, theme, font_size)
-        if persist:
-            self.config.set("theme", theme, save=False)
-            self.config.set("font_size", font_size, save=False)
-            self.config.save()
-        for widget in (self.dashboard, self.contracts, self.reports,
-                       self.pdfs, self.settings, self.help):
-            if hasattr(widget, "set_theme_colors"):
-                widget.set_theme_colors(self.colors)
-        if hasattr(self, "detail"):
-            self.detail.set_theme_colors(self.colors)
-        for combo in self.findChildren(Combo):
-            combo.set_arrow_color(self.colors["text_muted"])
-        for check in self.findChildren(CheckBox):
-            check.set_theme_colors(self.colors)
-        self._update_header_icons()
-        if hasattr(self, "nav_buttons"):
-            for button in self.nav_buttons.values():
-                button.setIcon(make_icon(self._nav_icon_kind(button), self.colors["sidebar_text"], 18))
-
-    def _nav_icon_kind(self, button: QPushButton) -> str:
-        for section, items in NAV_ITEMS:
-            for key, label, icon in items:
-                if label in button.text():
-                    return icon
-        return "document"
-
-    def _update_header_icons(self) -> None:
-        if not hasattr(self, "theme_button"):
-            return
-        is_dark = str(self.config.get("theme") or "light") == "dark"
-        self.theme_button.setIcon(make_icon("sun" if is_dark else "moon", self.colors["text"], 18))
-        self.theme_button.setToolTip("پوستهٔ روشن" if is_dark else "پوستهٔ تیره")
-        self.refresh_button.setIcon(make_icon("refresh", "#ffffff", 16))
-        self.export_button.setIcon(make_icon("download", self.colors["text"], 16))
-        if hasattr(self, "search_action"):
-            self.search_action.setIcon(make_icon("search", self.colors["text_muted"], 16))
-        self.export_button.setIconSize(QSize(16, 16))
-        self.refresh_button.setIconSize(QSize(16, 16))
-        self.theme_button.setIconSize(QSize(18, 18))
-
-    def toggle_theme(self) -> None:
-        current = str(self.config.get("theme") or "light")
-        new_theme = "dark" if current == "light" else "light"
-        self.apply_theme(new_theme, int(self.config.get("font_size") or 10))
-        self.config.set("theme", new_theme)
-
-    def show_about(self) -> None:
-        QMessageBox.about(
-            self, "دربارهٔ برنامه",
-            f"<div dir='rtl' style='font-family: Tahoma;'>"
-            f"<h3>{APP_NAME}</h3>"
-            f"<p>نسخهٔ {APP_VERSION} — برنامهٔ دسکتاپ تک‌فایلی بر پایهٔ PyQt5</p>"
-            f"<p>داده‌ها مستقیماً از فایل اکسل (شیت colorcode) خوانده می‌شوند و "
-            f"به Flask، مرورگر یا فایل HTML نیازی نیست.</p>"
-            f"<p style='color:#66756f;'>مسیر تنظیمات: {self.config.path}</p>"
-            f"</div>",
-        )
-
-    # ------------------------------------------------------------------
-    # رخدادهای پنجره
-    # ------------------------------------------------------------------
-    def _restore_geometry(self) -> None:
-        stored = str(self.config.get("window_geometry") or "")
-        if stored:
-            try:
-                if self.restoreGeometry(QByteArray.fromBase64(stored.encode("ascii"))):
-                    return
-            except Exception:
-                pass
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geometry = screen.availableGeometry()
-            width = min(1480, int(geometry.width() * 0.92))
-            height = min(940, int(geometry.height() * 0.92))
-            self.resize(width, height)
-            self.move(geometry.center().x() - width // 2, geometry.center().y() - height // 2)
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith((".xlsx", ".xlsm", ".xls")):
-                    event.acceptProposedAction()
-                    return
-        super().dragEnterEvent(event)
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith((".xlsx", ".xlsm", ".xls")):
-                self.config.set("excel_path", path)
-                self.settings.load_values(self.config)
-                self.load_data()
-                event.acceptProposedAction()
-                return
-        super().dropEvent(event)
-
-    def closeEvent(self, event) -> None:  # noqa: N802
-        try:
-            self.config.set("window_geometry",
-                            bytes(self.saveGeometry().toBase64()).decode("ascii"), save=False)
-            self.config.set("last_author", self.detail.author_edit.text().strip(), save=False)
-            self.config.save()
-            self.notes.save()
-        except Exception:
-            pass
-        loader = self.loader
-        if loader is not None:
-            try:
-                if loader.isRunning():
-                    loader.requestInterruption()
-                    if not loader.wait(4000):
-                        loader.terminate()
-                        loader.wait(1000)
-            except RuntimeError:
-                pass
-            self.loader = None
-        super().closeEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# اجرای برنامه
-# ---------------------------------------------------------------------------
 def write_error_log(detail: str) -> Optional[Path]:
     """ذخیرهٔ خطاها در فایل لاگ کنار برنامه برای عیب‌یابی."""
     try:
@@ -5936,6 +3763,3567 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return app.exec_()
 
 
+
+# ==========================================================================
+# اجزای مشترک رابط
+# ==========================================================================
+# ---------------------------------------------------------------------------
+# اجزای مشترک رابط (کاشی آمار، کارت نمودار، دکمه‌ها و ورودی‌ها)
+# ---------------------------------------------------------------------------
+def icon_pixmap(kind: str, color: str, size: int = 16, width: float = 1.7) -> QPixmap:
+    """ساخت آیکون به‌صورت پیکس‌مپ برای استفاده در دکمه‌ها و منوها."""
+    ratio = 2
+    pixmap = QPixmap(size * ratio, size * ratio)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    draw_icon(painter, kind, QRectF(0, 0, size * ratio, size * ratio), QColor(color), width)
+    painter.end()
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+class IconButton(QPushButton):
+    """دکمهٔ متنی/آیکونی با پشتیبانی از تغییر رنگ در تم تاریک."""
+
+    def __init__(self, text: str = "", kind: str = "", icon_color: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._kind = kind
+        self._icon_color = icon_color
+        if kind:
+            self._apply_icon()
+
+    def set_icon_kind(self, kind: str, color: Optional[str] = None) -> None:
+        self._kind = kind
+        if color:
+            self._icon_color = color
+        self._apply_icon()
+
+    def set_icon_color(self, color: str) -> None:
+        self._icon_color = color
+        self._apply_icon()
+
+    def _apply_icon(self) -> None:
+        if self._kind:
+            self.setIcon(QIcon(icon_pixmap(self._kind, self._icon_color or "#0E7A6A", 16)))
+            self.setIconSize(QSize(16, 16))
+
+
+def make_icon(kind: str, color: str, size: int = 18) -> QIcon:
+    return QIcon(icon_pixmap(kind, color, size))
+
+
+class SearchBox(QLineEdit):
+    """کادر جستجو با آیکون ذره‌بین و دکمهٔ پاک‌کردن."""
+
+    def __init__(self, placeholder: str = "جستجو…", parent=None) -> None:
+        super().__init__(parent)
+        self.setPlaceholderText(placeholder)
+        self.setClearButtonEnabled(True)
+        self.setMinimumHeight(38)
+        self._color = "#7A8C86"
+        self._sync_action()
+
+    def set_icon_color(self, color: str) -> None:
+        self._color = color
+        self._sync_action()
+
+    def _sync_action(self) -> None:
+        icon = QIcon(icon_pixmap("search", self._color, 15, 1.8))
+        action = self.actions()[0] if self.actions() else None
+        if action is None:
+            self.addAction(icon, QLineEdit.LeadingPosition)
+        else:
+            action.setIcon(icon)
+
+
+class PillTabs(QWidget):
+    """نوار تب‌های قرصی‌شکل (فیلترها) با امکان انتخاب یکی."""
+
+    changed = pyqtSignal(str)
+
+    def __init__(self, items: Sequence[Tuple[str, str]], colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._buttons: Dict[str, QPushButton] = {}
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(6)
+        self._current = ""
+        for key, label in items:
+            button = QPushButton(label)
+            button.setObjectName("Chip")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, k=key: self.select(k))
+            self.layout.addWidget(button)
+            self._buttons[key] = button
+        self.layout.addStretch(1)
+        if items:
+            self.select(items[0][0])
+
+    def current(self) -> str:
+        return self._current
+
+    def select(self, key: str) -> None:
+        if key not in self._buttons:
+            return
+        changed = key != self._current
+        self._current = key
+        for button_key, button in self._buttons.items():
+            button.setChecked(button_key == key)
+        if changed:
+            self.changed.emit(key)
+
+    def set_current(self, key: str) -> None:
+        self.select(key)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+
+
+class StatTile(Card):
+    """کاشی آمار با آیکون، مقدار بزرگ، توضیح و نوار درصد."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, key: str, title: str, kind: str, accent: str,
+                 colors: Dict[str, str], parent=None) -> None:
+        super().__init__(colors, radius=16, padding=14, hoverable=True, parent=parent)
+        self.key = key
+        self.accent = accent
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(148)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.set_accent(accent)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.tile = IconTile(kind, accent, alpha(accent, 26).name(QColor.HexArgb), size=42, radius=13)
+        top.addWidget(self.tile, 0, Qt.AlignTop)
+        top.addStretch(1)
+        self.badge = QLabel("")
+        self.badge.setObjectName("Chip")
+        self.badge.setVisible(False)
+        top.addWidget(self.badge, 0, Qt.AlignTop)
+        self.body.addLayout(top)
+
+        self.value_label = QLabel("—")
+        self.value_label.setObjectName("CardValue")
+        self.value_label.setStyleSheet("font-size: 19pt; font-weight: 800;")
+        self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.body.addWidget(self.value_label)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("CardTitle")
+        self.title_label.setStyleSheet("font-size: 9pt; font-weight: 600;")
+        self.title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.body.addWidget(self.title_label)
+
+        self.bar = MiniBar(colors, accent)
+        self.body.addWidget(self.bar)
+
+        self.hint_label = QLabel("")
+        self.hint_label.setObjectName("Muted")
+        self.hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.body.addWidget(self.hint_label)
+        self.body.addStretch(1)
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        super().set_theme(colors)
+        self.tile.set_colors(self.accent, alpha(self.accent, 26).name(QColor.HexArgb))
+        self.bar.set_theme(colors, self.accent)
+
+    def set_values(self, value: str, hint: str = "", ratio: Optional[float] = None,
+                   badge: str = "") -> None:
+        self.value_label.setText(value)
+        self.hint_label.setText(hint)
+        if ratio is not None:
+            self.bar.set_value(ratio)
+            self.bar.setVisible(True)
+        else:
+            self.bar.setVisible(False)
+        self.badge.setText(badge)
+        self.badge.setVisible(bool(badge))
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit(self.key)
+        super().mouseReleaseEvent(event)
+
+
+class ChartCard(Card):
+    """کارت نمودار با سرتیتر، توضیح و ناحیهٔ محتوا."""
+
+    def __init__(self, title: str, subtitle: str, colors: Dict[str, str],
+                 min_height: int = 260, parent=None) -> None:
+        super().__init__(colors, radius=16, padding=16, parent=parent)
+        self.setMinimumHeight(min_height)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SectionTitle")
+        self.subtitle_label = QLabel(subtitle)
+        self.subtitle_label.setObjectName("Muted")
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(self.subtitle_label)
+        header.addLayout(title_box)
+        header.addStretch(1)
+        self.actions = QHBoxLayout()
+        self.actions.setSpacing(6)
+        header.addLayout(self.actions)
+        self.body.addLayout(header)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 2, 0, 0)
+        self.content_layout.setSpacing(8)
+        self.body.addWidget(self.content, 1)
+        self.set_theme_colors(colors)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.set_theme(colors)
+
+    def add_action(self, widget: QWidget) -> None:
+        self.actions.addWidget(widget)
+
+
+class LegendDot(QWidget):
+    """نقطهٔ رنگی کوچک برای راهنماها."""
+
+    def __init__(self, color: str, size: int = 9, parent=None) -> None:
+        super().__init__(parent)
+        self.color = QColor(color)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.color)
+        painter.drawRoundedRect(QRectF(self.rect()), 2.5, 2.5)
+
+
+class NoticeBar(QFrame):
+    """نوار اطلاع‌رسانی ظریف (هشدار یا راهنما)."""
+
+    actionClicked = pyqtSignal()
+
+    def __init__(self, colors: Dict[str, str], tone: str = "warning", parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.tone = tone
+        self.setObjectName("NoticeBar")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(10)
+        self.icon = IconWidget("alert" if tone == "warning" else "info",
+                               colors["warning"] if tone == "warning" else colors["info"], 18)
+        layout.addWidget(self.icon)
+        self.label = QLabel("")
+        self.label.setWordWrap(True)
+        self.label.setObjectName("Subtle")
+        layout.addWidget(self.label, 1)
+        self.action_button = QPushButton("")
+        self.action_button.setObjectName("Ghost")
+        self.action_button.setCursor(Qt.PointingHandCursor)
+        self.action_button.clicked.connect(self.actionClicked.emit)
+        self.action_button.setVisible(False)
+        layout.addWidget(self.action_button)
+        self.close_button = IconButton("", "close", colors["ink_3"])
+        self.close_button.setFixedSize(28, 28)
+        self.close_button.setObjectName("Ghost")
+        self.close_button.clicked.connect(self.hide)
+        layout.addWidget(self.close_button)
+        self.set_theme(colors)
+
+    def set_text(self, text: str, action_text: str = "") -> None:
+        self.label.setText(text)
+        self.action_button.setText(action_text)
+        self.action_button.setVisible(bool(action_text))
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        fg = colors["warning"] if self.tone == "warning" else colors["info"]
+        bg = colors["warning_soft"] if self.tone == "warning" else colors["info_soft"]
+        self.setStyleSheet(
+            f"QFrame#NoticeBar {{ background: {bg}; border-radius: 14px; }}"
+            f" QLabel {{ color: {fg}; }}"
+        )
+        self.label.setStyleSheet(f"color: {fg};")
+        self.icon.set_color(fg)
+        self.close_button.set_icon_color(fg)
+
+
+# ---------------------------------------------------------------------------
+# ورودی‌های بومی (بدون وابستگی به تصاویر QSS)
+# ---------------------------------------------------------------------------
+class Combo(QPushButton):
+    """کمبوی سفارشی: دکمه‌ای با منوی کشویی و فلش رسم‌شده.
+
+    ظاهر کاملاً نقاشی می‌شود تا در حالت RTL و پوستهٔ تیره یکدست بماند، اما
+    همان رابط QComboBox (addItem/currentData/findData/…) را ارائه می‌دهد.
+    """
+
+    currentIndexChanged = pyqtSignal(int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.colors: Dict[str, str] = THEMES["light"]
+        self._items: List[Tuple[str, Any]] = []
+        self._index = -1
+        self._hover = False
+        self.setText("")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(36)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_Hover, True)
+        self._menu = QMenu(self)
+        self.clicked.connect(self._show_menu)
+
+    # ---- تم ----
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def set_arrow_color(self, color: str) -> None:  # سازگاری با کد قدیمی
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    # ---- API شبیه QComboBox ----
+    def addItem(self, text: str, data: Any = None) -> None:  # noqa: N802
+        self._items.append((str(text), data))
+        if self._index < 0:
+            self._index = 0
+        self.update()
+
+    def addItems(self, texts: Sequence[str]) -> None:  # noqa: N802
+        for text in texts:
+            self.addItem(text, None)
+
+    def clear(self) -> None:
+        self._items = []
+        self._index = -1
+        self.update()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemText(self, index: int) -> str:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index][0]
+        return ""
+
+    def currentIndex(self) -> int:  # noqa: N802
+        return self._index
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+        if not self._items:
+            self._index = -1
+            self.update()
+            return
+        index = max(0, min(len(self._items) - 1, int(index)))
+        changed = index != self._index
+        self._index = index
+        self.update()
+        if changed:
+            self.currentIndexChanged.emit(index)
+
+    def currentText(self) -> str:  # noqa: N802
+        return self.itemText(self._index)
+
+    def currentData(self) -> Any:  # noqa: N802
+        if 0 <= self._index < len(self._items):
+            return self._items[self._index][1]
+        return None
+
+    def findData(self, data: Any) -> int:  # noqa: N802
+        for index, (_text, value) in enumerate(self._items):
+            if value == data:
+                return index
+        return -1
+
+    def findText(self, text: str) -> int:  # noqa: N802
+        for index, (label, _value) in enumerate(self._items):
+            if label == text:
+                return index
+        return -1
+
+    def _show_menu(self) -> None:
+        self._menu.clear()
+        for index, (text, _data) in enumerate(self._items):
+            action = self._menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(index == self._index)
+            action.triggered.connect(lambda _checked=False, i=index: self.setCurrentIndex(i))
+        if self._items:
+            point = self.mapToGlobal(self.rect().bottomLeft())
+            self._menu.setMinimumWidth(self.width())
+            self._menu.exec_(point)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        c = self.colors
+        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        enabled = self.isEnabled()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(c["surface_2"] if not enabled else c["surface"]))
+        painter.drawRoundedRect(body, 11, 11)
+        border = QColor(c["brand_2"]) if (self._hover or self.hasFocus()) and enabled else QColor(c["border"])
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(body, 11, 11)
+
+        arrow_color = QColor(c["brand_deep"] if self._hover else c["ink_3"])
+        if not enabled:
+            arrow_color = QColor(c["ink_3"])
+        painter.setPen(QPen(arrow_color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        cx = body.left() + 16
+        cy = body.center().y()
+        path = QPainterPath()
+        path.moveTo(cx - 4.2, cy - 2.0)
+        path.lineTo(cx, cy + 2.4)
+        path.lineTo(cx + 4.2, cy - 2.0)
+        painter.drawPath(path)
+
+        font = app_font(9, QFont.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(c["ink"] if enabled else c["ink_3"])))
+        text_rect = body.adjusted(30, 0, -12, 0)
+        metrics = QFontMetrics(font)
+        text = metrics.elidedText(self.currentText(), Qt.ElideRight, int(text_rect.width()))
+        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, text)
+
+
+class CheckBox(QCheckBox):
+    """چک‌باکس بومی با پالت هماهنگ پوسته."""
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        palette = self.palette()
+        palette.setColor(QPalette.Base, QColor(colors["surface"]))
+        palette.setColor(QPalette.Text, QColor(colors["ink"]))
+        palette.setColor(QPalette.WindowText, QColor(colors["ink"]))
+        palette.setColor(QPalette.Highlight, QColor(colors["brand"]))
+        self.setPalette(palette)
+        self.update()
+
+
+class SpinBox(QSpinBox):
+    """عددشمار با دکمه‌های بومی."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.setMinimumHeight(34)
+
+
+class NumberStepper(QWidget):
+    """عددشمار سفارشی با دکمه‌های ‎−‎/‎+‎ و بدون وابستگی به استایل بومی."""
+
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._min = 0
+        self._max = 100
+        self._value = 0
+        self._suffix = ""
+        self._special = ""
+        self.setMinimumHeight(36)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(6)
+        self.minus_button = QPushButton("−")
+        self.minus_button.setObjectName("Stepper")
+        self.minus_button.setCursor(Qt.PointingHandCursor)
+        self.minus_button.clicked.connect(lambda: self.setValue(self._value - 1))
+        layout.addWidget(self.minus_button)
+        self.value_label = QLabel("")
+        self.value_label.setAlignment(Qt.AlignCenter)
+        self.value_label.setStyleSheet("font-size: 10pt; font-weight: 700;")
+        layout.addWidget(self.value_label, 1)
+        self.plus_button = QPushButton("+")
+        self.plus_button.setObjectName("Stepper")
+        self.plus_button.setCursor(Qt.PointingHandCursor)
+        self.plus_button.clicked.connect(lambda: self.setValue(self._value + 1))
+        layout.addWidget(self.plus_button)
+        self._sync()
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # noqa: N802
+        self._min, self._max = int(minimum), int(maximum)
+        self.setValue(self._value)
+
+    def setSuffix(self, suffix: str) -> None:  # noqa: N802
+        self._suffix = suffix or ""
+        self._sync()
+
+    def setSpecialValueText(self, text: str) -> None:  # noqa: N802
+        self._special = text or ""
+        self._sync()
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, value: int) -> None:  # noqa: N802
+        clamped = max(self._min, min(self._max, int(value)))
+        changed = clamped != self._value
+        self._value = clamped
+        self._sync()
+        if changed:
+            self.valueChanged.emit(clamped)
+
+    def _sync(self) -> None:
+        if self._special and self._value == self._min:
+            text = self._special
+        else:
+            text = f"{fa(self._value)}{self._suffix}"
+        self.value_label.setText(text)
+        self.minus_button.setEnabled(self._value > self._min)
+        self.plus_button.setEnabled(self._value < self._max)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(self.colors["surface"]))
+        painter.drawRoundedRect(body, 10, 10)
+        painter.setPen(QPen(QColor(self.colors["border"]), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(body, 10, 10)
+
+
+
+# ==========================================================================
+# صفحه‌های برنامه
+# ==========================================================================
+# ---------------------------------------------------------------------------
+# صفحه‌های برنامه
+# ---------------------------------------------------------------------------
+PAGE_TITLES: Dict[str, str] = {
+    "dashboard": "داشبورد",
+    "contracts": "قراردادها",
+    "reports": "گزارش مدیریتی",
+    "pdfs": "کتابخانهٔ PDF",
+    "settings": "تنظیمات",
+    "help": "راهنما",
+}
+
+PAGE_SUBTITLES: Dict[str, str] = {
+    "dashboard": "نمای کلی سبد قراردادها، پیشرفت اختتام و موارد نیازمند پیگیری",
+    "contracts": "جستجو، فیلتر و بررسی جزئیات همهٔ قراردادها",
+    "reports": "خلاصهٔ مدیریتی قابل چاپ و خروجی اکسل سه‌بخشی",
+    "pdfs": "فایل‌های PDF پوشهٔ قراردادها با جستجوی سریع",
+    "settings": "منبع داده، پوسته، قلم و بازخوانی خودکار",
+    "help": "شروع سریع، میان‌برها و نگاشت امکانات نسخهٔ وب",
+}
+
+
+def clear_layout(layout) -> None:
+    """خالی کردن چیدمان و حذف ویجت‌های آن."""
+    if layout is None:
+        return
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+        else:
+            child = item.layout()
+            if child is not None:
+                clear_layout(child)
+
+
+def drain_layout(layout) -> None:
+    """برداشتن آیتم‌های چیدمان بدون حذف ویجت‌ها (برای چیدمان دوباره)."""
+    if layout is None:
+        return
+    while layout.count():
+        layout.takeAt(0)
+
+
+def page_step_label(text: str, number: int, colors: Dict[str, str]) -> QWidget:
+    """یک گام شماره‌دار برای بخش «شروع سریع»."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 3, 0, 3)
+    layout.setSpacing(10)
+    badge = QLabel(fa(number))
+    badge.setAlignment(Qt.AlignCenter)
+    badge.setFixedSize(22, 22)
+    badge.setStyleSheet(
+        f"background: {colors['brand_soft']}; color: {colors['brand_deep']};"
+        f"border-radius: 11px; font-weight: 800; font-size: 8pt;"
+    )
+    layout.addWidget(badge, 0, Qt.AlignTop)
+    label = QLabel(text)
+    label.setObjectName("Subtle")
+    label.setWordWrap(True)
+    layout.addWidget(label, 1)
+    return row
+
+
+def _card_title(title: str, subtitle: str = "") -> QWidget:
+    box = QWidget()
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 6)
+    layout.setSpacing(1)
+    main = QLabel(title)
+    main.setObjectName("SectionTitle")
+    layout.addWidget(main)
+    if subtitle:
+        sub = QLabel(subtitle)
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        layout.addWidget(sub)
+    return box
+
+
+def _muted(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("Muted")
+    label.setWordWrap(True)
+    return label
+
+
+# ---------------------------------------------------------------------------
+# داشبورد
+# ---------------------------------------------------------------------------
+class AttentionRow(QWidget):
+    """یک ردیف «نیازمند پیگیری» در داشبورد."""
+
+    activated = pyqtSignal(object)
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.record: Optional[ContractRecord] = None
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(50)
+        self._hover = False
+        self.setAttribute(Qt.WA_Hover, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setSpacing(10)
+        self.avatar = Avatar("", 34)
+        layout.addWidget(self.avatar)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(1)
+        self.name_label = QLabel("—")
+        self.name_label.setStyleSheet("font-weight: 700;")
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("Muted")
+        text_box.addWidget(self.name_label)
+        text_box.addWidget(self.meta_label)
+        layout.addLayout(text_box, 1)
+        self.chips = QHBoxLayout()
+        self.chips.setSpacing(5)
+        layout.addLayout(self.chips)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self._hover:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(alpha(self.colors["brand"], 14))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, -1), 10, 10)
+
+    def set_record(self, record: ContractRecord, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.record = record
+        self.avatar.set_name(record.col2 or record.col3 or "?")
+        self.name_label.setText(record.col2 or "—")
+        self.meta_label.setText(bidi(f"{record.col3} • {_truncate(record.col4 or '—', 46)}"))
+        clear_layout(self.chips)
+        if record.is_expired:
+            self._add_chip("منقضی", colors["danger"], colors["danger_soft"])
+        if record.open_flags:
+            self._add_chip(f"{fa(len(record.open_flags))} مورد باز",
+                           colors["warning"], colors["warning_soft"])
+        if record.pdf_file:
+            self._add_chip("PDF", colors["info"], colors["info_soft"])
+        if not (record.is_expired or record.open_flags or record.pdf_file):
+            self._add_chip("بررسی‌شده", colors["success"], colors["success_soft"])
+
+    def _add_chip(self, text: str, fg: str, bg: str) -> None:
+        chip = QLabel(text)
+        chip.setStyleSheet(
+            f"background: {bg}; color: {fg}; border-radius: 8px;"
+            f"padding: 2px 8px; font-size: 7.5pt; font-weight: 700;"
+        )
+        self.chips.addWidget(chip)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.record is not None:
+            self.activated.emit(self.record)
+        super().mouseReleaseEvent(event)
+
+
+class DashboardPage(QWidget):
+    """صفحهٔ نخست: کارت قهرمان، کاشی‌های آمار، نمودارها و پیگیری‌ها."""
+
+    filterRequested = pyqtSignal(str)
+    recordActivated = pyqtSignal(object)
+    navigateRequested = pyqtSignal(str)
+    exportRequested = pyqtSignal()
+    reloadRequested = pyqtSignal()
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.data: Optional[DashboardData] = None
+        self.preview_model = None  # در پنجرهٔ اصلی به مدل جدول وصل می‌شود
+        self._tile_layout_state: Optional[bool] = None
+        self._chart_layout_state: Optional[bool] = None
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll)
+
+        content = QWidget()
+        self.scroll.setWidget(content)
+        self.body = QVBoxLayout(content)
+        self.body.setContentsMargins(30, 22, 30, 26)
+        self.body.setSpacing(16)
+
+        # --- کارت قهرمان -------------------------------------------------
+        self.hero = Card(colors, radius=22, padding=22, variant="hero")
+        hero_row = QHBoxLayout()
+        hero_row.setSpacing(26)
+        self.gauge = RingGauge(colors)
+        self.gauge.set_hero_mode(True)
+        self.gauge.setFixedSize(176, 176)
+        hero_row.addWidget(self.gauge, 0, Qt.AlignVCenter)
+        hero_text = QVBoxLayout()
+        hero_text.setSpacing(4)
+        self.hero_eyebrow = QLabel("سند قراردادها — نمای زندهٔ سبد")
+        self.hero_eyebrow.setStyleSheet(
+            f"color: {colors['hero_muted']}; font-size: 9pt; font-weight: 700;")
+        self.hero_title = QLabel("پیشرفت اختتام قراردادها")
+        self.hero_title.setStyleSheet(
+            f"color: {colors['hero_ink']}; font-size: 19pt; font-weight: 800;")
+        self.hero_meta = QLabel("—")
+        self.hero_meta.setStyleSheet(f"color: {colors['hero_muted']}; font-size: 9pt;")
+        self.hero_meta.setWordWrap(True)
+        hero_text.addWidget(self.hero_eyebrow)
+        hero_text.addWidget(self.hero_title)
+        hero_text.addWidget(self.hero_meta)
+        self.hero_chips = QHBoxLayout()
+        self.hero_chips.setSpacing(6)
+        hero_text.addSpacing(4)
+        hero_text.addLayout(self.hero_chips)
+        hero_text.addStretch(1)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.view_button = QPushButton("مشاهدهٔ قراردادها")
+        self.view_button.setObjectName("OnHeroSolid")
+        self.view_button.setCursor(Qt.PointingHandCursor)
+        self.view_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
+        actions.addWidget(self.view_button)
+        report_button = QPushButton("گزارش مدیریتی")
+        report_button.setObjectName("OnHero")
+        report_button.setCursor(Qt.PointingHandCursor)
+        report_button.setIcon(make_icon("chart", colors["hero_ink"], 15))
+        report_button.clicked.connect(lambda: self.navigateRequested.emit("reports"))
+        actions.addWidget(report_button)
+        reload_button = QPushButton("بازخوانی")
+        reload_button.setObjectName("OnHero")
+        reload_button.setCursor(Qt.PointingHandCursor)
+        reload_button.setIcon(make_icon("refresh", colors["hero_ink"], 15))
+        reload_button.clicked.connect(self.reloadRequested.emit)
+        actions.addWidget(reload_button)
+        actions.addStretch(1)
+        hero_text.addLayout(actions)
+        hero_row.addLayout(hero_text, 1)
+        self.hero.body.addLayout(hero_row)
+        self.body.addWidget(self.hero)
+
+        # --- نوار هشدار ---------------------------------------------------
+        self.banner = NoticeBar(colors, "warning")
+        self.banner.setVisible(False)
+        self.banner.actionClicked.connect(lambda: self.filterRequested.emit("expired"))
+        self.body.addWidget(self.banner)
+
+        # --- کاشی‌های آمار ------------------------------------------------
+        self.tiles: Dict[str, StatTile] = {}
+        self.tiles_grid = QGridLayout()
+        self.tiles_grid.setHorizontalSpacing(14)
+        self.tiles_grid.setVerticalSpacing(14)
+        specs = [
+            ("all", "کل قراردادها", "documents", colors["brand"]),
+            ("progress", "میانگین پیشرفت اختتام", "gauge", colors["brand_2"]),
+            ("deductions", "دارای کسورات", "wallet", colors["accent"]),
+            ("pdf", "دارای فایل PDF", "pdf", colors["info"]),
+        ]
+        for key, title, kind, accent in specs:
+            tile = StatTile(key, title, kind, accent, colors)
+            tile.clicked.connect(self.filterRequested.emit)
+            self.tiles[key] = tile
+        self.body.addLayout(self.tiles_grid)
+
+        # --- نمودارها -----------------------------------------------------
+        self.charts_grid = QGridLayout()
+        self.charts_grid.setHorizontalSpacing(14)
+        self.charts_grid.setVerticalSpacing(14)
+
+        self.progress_card = ChartCard(
+            "وضعیت پیشرفت کارکرد",
+            "بر اساس ستون‌های کارکرد فایل اکسل — برای فیلتر کلیک کنید",
+            colors, min_height=290,
+        )
+        self.donut = DonutChart(colors, CHART_COLORS["progress"])
+        self.donut.setMinimumSize(180, 180)
+        self.donut.sliceClicked.connect(self._on_progress_slice)
+        self.legend = LegendList(colors)
+        self.legend.setMaximumWidth(238)
+        self.legend.itemClicked.connect(self._on_progress_slice)
+        donut_row = QHBoxLayout()
+        donut_row.setSpacing(8)
+        donut_row.addWidget(self.legend, 0)
+        donut_row.addWidget(self.donut, 1)
+        self.progress_card.content_layout.addLayout(donut_row, 1)
+
+        self.types_card = ChartCard(
+            "پرکاربردترین انواع قرارداد",
+            "۱۰ نوع نخست — کلیک روی هر میله جدول را فیلتر می‌کند",
+            colors, min_height=290,
+        )
+        self.types_bar = BarChart(colors)
+        self.types_bar.barClicked.connect(self._on_type_bar)
+        self.types_card.content_layout.addWidget(self.types_bar, 1)
+
+        self.attention_card = ChartCard(
+            "نیازمند پیگیری",
+            "قراردادهایی با مورد باز یا الحاقیهٔ منقضی",
+            colors, min_height=250,
+        )
+        follow_button = QPushButton("همه")
+        follow_button.setObjectName("Ghost")
+        follow_button.setCursor(Qt.PointingHandCursor)
+        follow_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
+        self.attention_card.add_action(follow_button)
+        self.attention_box = QVBoxLayout()
+        self.attention_box.setSpacing(2)
+        self.attention_card.content_layout.addLayout(self.attention_box)
+        self.attention_empty = _muted("موردی برای پیگیری وجود ندارد.")
+        self.attention_card.content_layout.addWidget(self.attention_empty)
+        self.attention_card.content_layout.addStretch(1)
+
+        self.type_card = ChartCard(
+            "ترکیب نوع قرارداد", "سهم هر نوع از کل سبد", colors, min_height=250,
+        )
+        self.type_pie = DonutChart(colors, CHART_COLORS["type"])
+        self.type_pie.setMinimumSize(136, 136)
+        self.type_pie.sliceClicked.connect(self._on_type_slice)
+        self.type_legend = LegendList(colors)
+        self.type_legend.setMaximumWidth(196)
+        self.type_legend.max_rows = 6
+        self.type_legend.itemClicked.connect(self._on_type_slice)
+        type_row = QHBoxLayout()
+        type_row.setSpacing(6)
+        type_row.addWidget(self.type_legend, 0)
+        type_row.addWidget(self.type_pie, 1)
+        self.type_card.content_layout.addLayout(type_row, 1)
+
+        self.body.addLayout(self.charts_grid, 1)
+        self.body.addStretch(1)
+        self._place_cards(False)
+
+    # ---- چیدمان واکنش‌گرا ----
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._place_cards(self.width() < 1220)
+
+    def _place_cards(self, compact: bool) -> None:
+        if self._tile_layout_state != compact:
+            self._tile_layout_state = compact
+            drain_layout(self.tiles_grid)
+            keys = ["all", "progress", "deductions", "pdf"]
+            for index, key in enumerate(keys):
+                if compact:
+                    self.tiles_grid.addWidget(self.tiles[key], index // 2, index % 2)
+                else:
+                    self.tiles_grid.addWidget(self.tiles[key], 0, index)
+            for column in range(4):
+                self.tiles_grid.setColumnStretch(column, 1 if (not compact or column < 2) else 0)
+
+        if self._chart_layout_state != compact:
+            self._chart_layout_state = compact
+            drain_layout(self.charts_grid)
+            self.progress_card.setParent(self)
+            self.types_card.setParent(self)
+            self.attention_card.setParent(self)
+            self.type_card.setParent(self)
+            if compact:
+                self.charts_grid.addWidget(self.progress_card, 0, 0)
+                self.charts_grid.addWidget(self.types_card, 1, 0)
+                self.charts_grid.addWidget(self.attention_card, 2, 0)
+                self.charts_grid.addWidget(self.type_card, 3, 0)
+                self.charts_grid.setColumnStretch(0, 1)
+                self.charts_grid.setColumnStretch(1, 0)
+            else:
+                self.charts_grid.addWidget(self.progress_card, 0, 0)
+                self.charts_grid.addWidget(self.types_card, 0, 1)
+                self.charts_grid.addWidget(self.attention_card, 1, 0)
+                self.charts_grid.addWidget(self.type_card, 1, 1)
+                self.charts_grid.setColumnStretch(0, 3)
+                self.charts_grid.setColumnStretch(1, 2)
+            for widget in (self.progress_card, self.types_card,
+                           self.attention_card, self.type_card):
+                widget.show()
+
+    # ---- داده ----
+    def set_data(self, data: DashboardData) -> None:
+        self.data = data
+        self.gauge.set_value(data.progress_percent)
+        self.hero_meta.setText(bidi(
+            f"شیت {data.sheet_name}  •  {os.path.basename(data.excel_path) or '—'}"
+        ))
+        clear_layout(self.hero_chips)
+        pdf_count = sum(1 for record in data.records if record.pdf_file)
+        for text in (f"{fa(data.total_contracts)} قرارداد",
+                     f"{fa(data.contracts_with_deductions)} کسورات",
+                     f"{fa(pdf_count)} فایل PDF"):
+            chip = QLabel(text)
+            chip.setStyleSheet(
+                "background: rgba(255,255,255,0.16); color: #FFFFFF; border-radius: 10px;"
+                "padding: 4px 10px; font-size: 8pt; font-weight: 700;"
+            )
+            chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            self.hero_chips.addWidget(chip)
+        self.hero_chips.addStretch(1)
+
+        total = max(1, data.total_contracts)
+        types_dist = data.dist("type")
+        self.tiles["all"].set_values(
+            fa(data.total_contracts), f"مستند از شیت {data.sheet_name}", 1.0,
+            badge=f"{fa(len(types_dist.labels))} نوع",
+        )
+        self.tiles["progress"].set_values(
+            f"{data.progress_percent_text}٪", "میانگین پیشرفت اختتام سند",
+            data.progress_percent / 100.0,
+        )
+        self.tiles["deductions"].set_values(
+            fa(data.contracts_with_deductions), f"از کل {fa(data.total_contracts)} قرارداد",
+            data.contracts_with_deductions / total,
+            badge=f"{fa(round(data.contracts_with_deductions / total * 100))}٪",
+        )
+        self.tiles["pdf"].set_values(
+            fa(pdf_count), "قرارداد دارای فایل پیوست PDF", pdf_count / total,
+        )
+
+        progress = data.dist("progress")
+        progress_labels = [pretty_label(label).replace(" درصد", "٪")
+                           for label in progress.labels]
+        self.donut.set_data(progress_labels, progress.values,
+                            "پیشرفت کارکرد", CHART_COLORS["progress"])
+        self.legend.set_data(progress_labels, progress.values, CHART_COLORS["progress"])
+        self.types_bar.set_data(data.top_types)
+
+        self.type_pie.set_data([pretty_label(label) for label in types_dist.labels],
+                               types_dist.values, "قرارداد", CHART_COLORS["type"])
+        self.type_legend.set_data(types_dist.labels, types_dist.values, CHART_COLORS["type"])
+
+        records = [record for record in data.records
+                   if record.open_flags or record.is_expired]
+        self._fill_attention(records[:6])
+        self.attention_empty.setVisible(not records)
+        self.banner.setVisible(data.expired_count > 0)
+        if data.expired_count:
+            self.banner.set_text(
+                f"{fa(data.expired_count)} قرارداد با الحاقیهٔ منقضی‌شده نیازمند بررسی است.",
+                "نمایش موارد",
+            )
+
+    def _fill_attention(self, records: Sequence[ContractRecord]) -> None:
+        clear_layout(self.attention_box)
+        for record in records:
+            row = AttentionRow(self.colors)
+            row.set_record(record, self.colors)
+            row.activated.connect(self.recordActivated.emit)
+            self.attention_box.addWidget(row)
+
+    # ---- تعامل ----
+    def _on_progress_slice(self, label: str) -> None:
+        self.filterRequested.emit(f"progress:{label}")
+
+    def _on_type_slice(self, label: str) -> None:
+        self.filterRequested.emit(f"type:{label}")
+
+    def _on_type_bar(self, label: str) -> None:
+        self.filterRequested.emit(f"type:{label}")
+
+    # ---- تم ----
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+            if isinstance(card, ChartCard):
+                card.set_theme_colors(colors)
+        self.gauge.set_theme(colors)
+        self.donut.set_theme(colors, CHART_COLORS["progress"])
+        self.type_pie.set_theme(colors, CHART_COLORS["type"])
+        self.legend.set_theme(colors, CHART_COLORS["progress"])
+        self.type_legend.set_theme(colors, CHART_COLORS["type"])
+        self.types_bar.set_theme(colors)
+        self.banner.set_theme(colors)
+        for tile in self.tiles.values():
+            tile.set_theme(colors)
+        self.hero_eyebrow.setStyleSheet(
+            f"color: {colors['hero_muted']}; font-size: 8.5pt; font-weight: 700;"
+        )
+        self.hero_title.setStyleSheet(
+            f"color: {colors['hero_ink']}; font-size: 21pt; font-weight: 800;"
+        )
+        self.hero_meta.setStyleSheet(f"color: {colors['hero_muted']}; font-size: 9pt;")
+        if self.data is not None:
+            self.set_data(self.data)
+        self.scroll.viewport().update()
+
+
+# ---------------------------------------------------------------------------
+# قراردادها
+# ---------------------------------------------------------------------------
+class ContractsPage(QWidget):
+    """جدول قراردادها با جستجو، فیلتر، مرتب‌سازی و انتخاب چندردیفی."""
+
+    recordActivated = pyqtSignal(object)
+    exportRequested = pyqtSignal()
+    detailRequested = pyqtSignal(object)
+    bookmarkRequested = pyqtSignal(object)
+
+    def __init__(self, notes: NotesStore, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.notes = notes
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 22, 30, 24)
+        layout.setSpacing(12)
+
+        # ---- نوار ابزار ----
+        toolbar = Card(colors, radius=16, padding=14)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.search_edit = SearchBox("جستجوی نام، شماره، موضوع یا کسورات…")
+        self.search_edit.textChanged.connect(self._on_search)
+        row.addWidget(self.search_edit, 1)
+        self.type_combo = Combo()
+        self.type_combo.set_theme_colors(colors)
+        self.type_combo.setFixedWidth(168)
+        self.type_combo.currentIndexChanged.connect(lambda _i: self._on_filter_changed())
+        row.addWidget(self.type_combo)
+        self.status_combo = Combo()
+        self.status_combo.set_theme_colors(colors)
+        self.status_combo.setFixedWidth(186)
+        self.status_combo.currentIndexChanged.connect(lambda _i: self._on_filter_changed())
+        row.addWidget(self.status_combo)
+        self.bookmark_check = CheckBox("فقط نشان‌شده‌ها")
+        self.bookmark_check.set_theme_colors(colors)
+        self.bookmark_check.toggled.connect(lambda _checked: self._on_filter_changed())
+        row.addWidget(self.bookmark_check)
+        toolbar.body.addLayout(row)
+
+        pills = QHBoxLayout()
+        pills.setSpacing(6)
+        self.pills = PillTabs([
+            ("all", "همه"),
+            ("deductions", "دارای کسورات"),
+            ("expired", "منقضی‌شده"),
+            ("needs_follow", "نیازمند پیگیری"),
+        ], colors)
+        self.pills.changed.connect(lambda _key: self._on_filter_changed())
+        pills.addWidget(self.pills, 1)
+        self.footer_label = QLabel("—")
+        self.footer_label.setObjectName("Muted")
+        pills.addWidget(self.footer_label)
+        export_button = QPushButton("خروجی اکسل")
+        export_button.setIcon(make_icon("download", colors["ink_2"], 15))
+        export_button.setCursor(Qt.PointingHandCursor)
+        export_button.clicked.connect(self.exportRequested.emit)
+        pills.addWidget(export_button)
+        toolbar.body.addLayout(pills)
+        layout.addWidget(toolbar)
+
+        # ---- جدول ----
+        table_card = Card(colors, radius=16, padding=6)
+        self.model = ContractTableModel(notes, self)
+        self.delegate = ContractDelegate(self)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setItemDelegate(self.delegate)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(46)
+        header = self.table.horizontalHeader()
+        header.setHighlightSections(False)
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(self._on_header_clicked)
+        for index, spec in enumerate(ContractTableModel.COLUMNS):
+            self.table.setColumnWidth(index, spec.width)
+            header.setSectionResizeMode(index, QHeaderView.Interactive)
+        self.table.doubleClicked.connect(self._on_double_click)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        table_card.body.addWidget(self.table, 1)
+        layout.addWidget(table_card, 1)
+
+        self._extra_filter = ""
+        self._columns_menu = QMenu(self)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._apply_view)
+
+        self.populate_combos()
+        self.model.apply_view("", "all", False)
+        self._refresh_counts()
+
+    # ---- آماده‌سازی ----
+    def populate_combos(self) -> None:
+        records = self.model.all_records()
+        self.type_combo.blockSignals(True)
+        self.type_combo.clear()
+        self.type_combo.addItem("همهٔ انواع", "")
+        for label in sorted({record.f_value for record in records if record.f_value}, key=normalize_per):
+            self.type_combo.addItem(label, label)
+        self.type_combo.setCurrentIndex(0)
+        self.type_combo.blockSignals(False)
+
+        self.status_combo.blockSignals(True)
+        self.status_combo.clear()
+        self.status_combo.addItem("همهٔ وضعیت‌ها", "")
+        for label in sorted({record.as_status for record in records if record.as_status}, key=normalize_per):
+            self.status_combo.addItem(label, label)
+        self.status_combo.setCurrentIndex(0)
+        self.status_combo.blockSignals(False)
+
+    def set_data(self, data: DashboardData) -> None:
+        self.model.set_records(data.records)
+        self.populate_combos()
+        self.pills.set_current("all")
+        self.bookmark_check.blockSignals(True)
+        self.bookmark_check.setChecked(False)
+        self.bookmark_check.blockSignals(False)
+        self._apply_view()
+
+    # ---- فیلتر ----
+    def _active_key(self) -> str:
+        if self._extra_filter:
+            return self._extra_filter
+        type_value = self.type_combo.currentData() or ""
+        status_value = self.status_combo.currentData() or ""
+        if type_value:
+            return f"type:{type_value}"
+        if status_value:
+            return f"status:{status_value}"
+        if self.bookmark_check.isChecked():
+            return "bookmarked"
+        return self.pills.current() or "all"
+
+    def _on_search(self, _text: str) -> None:
+        self._search_timer.start()
+
+    def _on_filter_changed(self) -> None:
+        self._extra_filter = ""
+        if self.sender() and hasattr(self.sender(), "currentData"):
+            if self.sender() is self.type_combo and (self.type_combo.currentData() or ""):
+                self.status_combo.blockSignals(True)
+                self.status_combo.setCurrentIndex(0)
+                self.status_combo.blockSignals(False)
+            if self.sender() is self.status_combo and (self.status_combo.currentData() or ""):
+                self.type_combo.blockSignals(True)
+                self.type_combo.setCurrentIndex(0)
+                self.type_combo.blockSignals(False)
+        self._apply_view()
+
+    def _apply_view(self) -> None:
+        self.model.apply_view(self.search_edit.text().strip(), self._active_key(),
+                              self.bookmark_check.isChecked())
+        self.table.clearSelection()
+        self.table.setCurrentIndex(QModelIndex())
+        self._refresh_counts()
+
+    def _refresh_counts(self) -> None:
+        visible = self.model.visible_count()
+        total = self.model.source_count()
+        extra = f" از {fa(total)}" if visible != total else ""
+        self.footer_label.setText(bidi(f"{fa(visible)}{extra} قرارداد"))
+
+    def set_filter(self, key: str) -> None:
+        self._extra_filter = ""
+        known_pills = ("all", "deductions", "expired", "needs_follow", "bookmarked")
+        if key in known_pills:
+            if key == "bookmarked":
+                self.bookmark_check.blockSignals(True)
+                self.bookmark_check.setChecked(True)
+                self.bookmark_check.blockSignals(False)
+                self.pills.set_current("all")
+            else:
+                self.bookmark_check.blockSignals(True)
+                self.bookmark_check.setChecked(False)
+                self.bookmark_check.blockSignals(False)
+                self.pills.set_current(key)
+        elif key.startswith(("type:", "status:")):
+            field, _, value = key.partition(":")
+            if field == "type":
+                index = self.type_combo.findData(value)
+                self.type_combo.blockSignals(True)
+                self.type_combo.setCurrentIndex(max(0, index))
+                self.type_combo.blockSignals(False)
+            elif field == "status":
+                index = self.status_combo.findData(value)
+                self.status_combo.blockSignals(True)
+                self.status_combo.setCurrentIndex(max(0, index))
+                self.status_combo.blockSignals(False)
+        else:
+            self.pills.set_current("all")
+            self._extra_filter = key
+        self._apply_view()
+
+    def current_filter(self) -> str:
+        return self._active_key()
+
+    def set_search(self, text: str) -> None:
+        if self.search_edit.text() != text:
+            self.search_edit.blockSignals(True)
+            self.search_edit.setText(text)
+            self.search_edit.blockSignals(False)
+        self._apply_view()
+
+    def clear_filters(self) -> None:
+        self.type_combo.blockSignals(True)
+        self.status_combo.blockSignals(True)
+        self.type_combo.setCurrentIndex(0)
+        self.status_combo.setCurrentIndex(0)
+        self.type_combo.blockSignals(False)
+        self.status_combo.blockSignals(False)
+        self.bookmark_check.blockSignals(True)
+        self.bookmark_check.setChecked(False)
+        self.bookmark_check.blockSignals(False)
+        self.pills.set_current("all")
+        self._extra_filter = ""
+        self._apply_view()
+
+    def refresh_bookmarks(self) -> None:
+        self.model.refresh_bookmarks()
+        self._refresh_counts()
+
+    # ---- انتخاب و ردیف‌ها ----
+    def visible_records(self) -> List[ContractRecord]:
+        return self.model.visible_records()
+
+    def selected_records(self) -> List[ContractRecord]:
+        rows = sorted({index.row() for index in self.table.selectionModel().selectedRows()})
+        records = [self.model.record_at(row) for row in rows]
+        return [record for record in records if record is not None]
+
+    def record_at(self, row: int) -> Optional[ContractRecord]:
+        return self.model.record_at(row)
+
+    def _on_double_click(self, index) -> None:
+        record = self.model.record_at(index.row())
+        if record is not None:
+            self.recordActivated.emit(record)
+
+    def _on_header_clicked(self, column: int) -> None:
+        if column < 0 or column >= len(ContractTableModel.COLUMNS):
+            return
+        order = Qt.AscendingOrder
+        if self.table.horizontalHeader().sortIndicatorSection() == column:
+            current = self.table.horizontalHeader().sortIndicatorOrder()
+            order = Qt.DescendingOrder if current == Qt.AscendingOrder else Qt.AscendingOrder
+        else:
+            order = Qt.AscendingOrder
+        self.table.horizontalHeader().setSortIndicator(column, order)
+        self.model.set_sort(column, order)
+        self._refresh_counts()
+
+    def _show_context_menu(self, point) -> None:
+        record = self.model.record_at(self.table.rowAt(point.y()))
+        menu = QMenu(self)
+        detail_action = menu.addAction("جزئیات قرارداد")
+        detail_action.setEnabled(record is not None)
+        bookmark_action = menu.addAction("نشان‌گذاری / برداشتن نشان")
+        bookmark_action.setEnabled(record is not None)
+        menu.addSeparator()
+        copy_action = menu.addAction("کپی شمارهٔ قرارداد")
+        copy_action.setEnabled(record is not None)
+        export_action = menu.addAction("خروجی اکسل نمای فعلی")
+        chosen = menu.exec_(self.table.viewport().mapToGlobal(point))
+        if chosen is None:
+            return
+        if chosen is detail_action and record is not None:
+            self.recordActivated.emit(record)
+        elif chosen is bookmark_action and record is not None:
+            self.bookmarkRequested.emit(record)
+        elif chosen is copy_action and record is not None:
+            QApplication.clipboard().setText(record.col3)
+        elif chosen is export_action:
+            self.exportRequested.emit()
+
+    def _column_menu(self) -> QMenu:
+        self._columns_menu.clear()
+        for index, spec in enumerate(ContractTableModel.COLUMNS):
+            action = self._columns_menu.addAction(spec.title)
+            action.setCheckable(True)
+            action.setChecked(not self.table.isColumnHidden(index))
+            action.toggled.connect(lambda checked, i=index: self.table.setColumnHidden(i, not checked))
+        return self._columns_menu
+
+    # ---- تم ----
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.model.set_theme_colors(colors)
+        self.delegate.set_theme_colors(colors)
+        self.type_combo.set_theme_colors(colors)
+        self.status_combo.set_theme_colors(colors)
+        self.bookmark_check.set_theme_colors(colors)
+        self.search_edit.set_icon_color(colors["ink_3"])
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+
+
+
+# ==========================================================================
+# صفحه‌های گزارش، PDF، تنظیمات و راهنما
+# ==========================================================================
+# ---------------------------------------------------------------------------
+# گزارش مدیریتی
+# ---------------------------------------------------------------------------
+def _cell_width(widths: Optional[Sequence[str]], index: int) -> str:
+    if not widths or index >= len(widths):
+        return ""
+    return f' width="{widths[index]}"'
+
+
+def _report_table(headers: Sequence[str], rows: Sequence[Sequence[Any]],
+                  colors: Dict[str, str], widths: Optional[Sequence[str]] = None,
+                  table_width: str = "100%") -> str:
+    is_dark = QColor(colors["surface"]).lightness() < 128
+    head_bg = colors["surface_3"] if is_dark else colors["brand_soft"]
+    head_fg = colors["brand_2"] if is_dark else colors["brand_deep"]
+    head_cells = "".join(
+        f'<th bgcolor="{head_bg}" align="center"{_cell_width(widths, i)} '
+        f'style="padding:7px; color:{head_fg};">'
+        f'{html_module.escape(str(h))}</th>'
+        for i, h in enumerate(headers)
+    )
+    body = ""
+    for row in rows:
+        cells = "".join(
+            f'<td align="right"{_cell_width(widths, i)} style="padding:6px 8px;'
+            f' border-bottom:1px solid {colors["border_soft"]};">'
+            f'{html_module.escape(str(value))}</td>'
+            for i, value in enumerate(row)
+        )
+        body += f"<tr>{cells}</tr>"
+    colgroup = ""
+    if widths:
+        colgroup = "<colgroup>" + "".join(f'<col width="{w}">' for w in widths) + "</colgroup>"
+    return (
+        f'<table dir="rtl" width="{table_width}" cellspacing="0" cellpadding="0" border="0" '
+        f'style="border-collapse:collapse; margin-bottom:14px;">{colgroup}'
+        f"<tr>{head_cells}</tr>{body}</table>"
+    )
+
+
+def build_report_html(data: DashboardData, colors: Dict[str, str]) -> str:
+    """ساخت گزارش مدیریتی HTML با ظاهری آراسته و قابل چاپ."""
+    counts = data.flag_counts
+    overview = [
+        ("تعداد کل قرارداد", fa_num(data.total_contracts)),
+        ("قراردادهای دارای کسورات اسناد اختتام", fa_num(data.contracts_with_deductions)),
+        ("نیازمند مفاصاحساب بیمه", fa_num(counts["mofasa"])),
+        ("نیازمند تسویهٔ مالی نهایی", fa_num(counts["financial"])),
+        ("نیازمند بالانس متریال", fa_num(counts["balance"])),
+        ("نیازمند تحویل موقت", fa_num(counts["temporary"])),
+        ("نیازمند تحویل قطعی", fa_num(counts["delivery"])),
+        ("نیازمند صورت‌وضعیت ماقبل قطعی", fa_num(counts["prefinal"])),
+        ("نیازمند صورت‌وضعیت قطعی", fa_num(counts["statement"])),
+        ("نیازمند اقرارنامه", fa_num(counts["affidavit"])),
+        ("پکیج‌های آزادسازی انجام‌شده", fa_num(data.package_done)),
+        ("قراردادهای منقضی‌شده", fa_num(data.expired_count)),
+    ]
+    follow_rows = []
+    for record in data.records:
+        flags = record.open_flags
+        if not flags and not record.is_expired:
+            continue
+        follow_rows.append([
+            record.col2 or "—",
+            record.col3 or "—",
+            _truncate(record.col4 or "—", 60),
+            "بله" if record.is_expired else "—",
+            fa(len(flags)),
+            "، ".join(flags) or "—",
+        ])
+    shown = follow_rows[:60]
+    dist_rows = []
+    for name in ("status", "annex", "progress", "completion", "type"):
+        distribution = data.status_dist() if name == "status" else data.dist(name)
+        labels = "، ".join(
+            f"{pretty_label(label)} ({fa(value)})" for label, value in distribution.as_list()
+        ) or "—"
+        dist_rows.append([CHART_TITLES.get(name, name), labels])
+
+    callout_rows = "".join(
+        f'<td width="25%" align="right" style="padding:10px 12px;">'
+        f'<div style="color:{colors["ink_3"]}; font-size:9pt;">{title}</div>'
+        f'<div style="color:{colors["ink"]}; font-size:16pt; font-weight:bold;">{value}</div>'
+        f"</td>"
+        for title, value in (
+            ("منقضی‌شده", fa_num(data.expired_count)),
+            ("نیازمند پیگیری", fa_num(len(follow_rows))),
+            ("پیشرفت اختتام", f"{data.progress_percent_text}٪"),
+            ("کل قراردادها", fa_num(data.total_contracts)),
+        )
+    )
+    is_dark = QColor(colors["surface"]).lightness() < 128
+    band = colors["hero_1"] if is_dark else colors["brand_deep"]
+    band_soft = colors["hero_muted"]
+    band_title = colors["hero_ink"] if is_dark else "#FFFFFF"
+    return f"""
+    <div dir="rtl" style="font-family: Tahoma, sans-serif; color: {colors['ink']};">
+      <table dir="rtl" width="100%" cellspacing="0" cellpadding="0" border="0"
+             style="border-collapse:collapse; margin-bottom:12px;">
+        <tr>
+          <td bgcolor="{band}" style="padding:18px 20px; border-radius:12px;">
+            <div style="color:{band_soft}; font-size:9pt;">گزارش مدیریتی — پروژهٔ مهر خلیج فارس</div>
+            <div style="color:{band_title}; font-size:17pt; font-weight:bold; padding-top:4px;">
+              خلاصهٔ وضعیت سبد قراردادها
+            </div>
+            <div style="color:{band_soft}; font-size:9pt; padding-top:4px;">
+              تاریخ تهیه: {today_jalali()} &nbsp;•&nbsp; منبع داده: {html_module.escape(os.path.basename(data.excel_path) or '—')}
+              &nbsp;•&nbsp; آخرین تغییر فایل: {data.source_mtime_text}
+            </div>
+          </td>
+        </tr>
+      </table>
+      <table dir="rtl" width="100%" cellspacing="0" cellpadding="0" border="0"
+             bgcolor="{colors['surface_2']}" style="border-collapse:separate; margin-bottom:14px;">
+        <tr>{callout_rows}</tr>
+      </table>
+      <h3 style="color:{colors['brand_deep']}; margin:12px 0 6px 0;">شاخص‌های کلی</h3>
+      {_report_table(["شاخص", "مقدار"], overview, colors, ["470", "90"], table_width="560")}
+      <h3 style="color:{colors['brand_deep']}; margin:12px 0 6px 0;">قراردادهای نیازمند پیگیری</h3>
+      {_report_table(
+          ["نام شرکت", "شمارهٔ قرارداد", "موضوع", "منقضی", "موارد باز", "شرح موارد"],
+          shown, colors, ["20%", "13%", "27%", "8%", "8%", "24%"])}
+      <div style="color:{colors['ink_3']}; margin-bottom:12px;">مجموع قراردادهای نیازمند پیگیری:
+        {fa_num(len(follow_rows))}
+        {f" — فقط {fa(len(shown))} مورد اول نمایش داده شده است." if len(follow_rows) > len(shown) else ""}
+      </div>
+      <h3 style="color:{colors['brand_deep']}; margin:12px 0 6px 0;">توزیع‌ها</h3>
+      {_report_table(["نمودار", "توزیع (تعداد)"], dist_rows, colors, ["25%", "75%"])}
+      <div style="color:{colors['ink_3']}; font-size:8.5pt; margin-top:10px;">
+        تهیه‌شده با {APP_NAME} — نسخهٔ {APP_VERSION}
+      </div>
+    </div>
+    """
+
+
+class ReportsPage(QWidget):
+    """پیش‌نمایش گزارش مدیریتی با خروجی اکسل و چاپ."""
+
+    exportExcelRequested = pyqtSignal()
+    printRequested = pyqtSignal()
+    refreshRequested = pyqtSignal()
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._data: Optional[DashboardData] = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 22, 30, 24)
+        layout.setSpacing(12)
+
+        toolbar = Card(colors, radius=16, padding=14)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.summary_chip = QLabel("—")
+        self.summary_chip.setObjectName("ChipBrand")
+        row.addWidget(self.summary_chip)
+        self.follow_chip = QLabel("—")
+        self.follow_chip.setObjectName("Chip")
+        row.addWidget(self.follow_chip)
+        row.addStretch(1)
+        refresh_btn = QPushButton("بازخوانی")
+        refresh_btn.setObjectName("Ghost")
+        refresh_btn.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        refresh_btn.clicked.connect(self.refreshRequested.emit)
+        row.addWidget(refresh_btn)
+        print_btn = QPushButton("چاپ / ذخیرهٔ PDF")
+        print_btn.setIcon(make_icon("printer", colors["ink_2"], 15))
+        print_btn.setCursor(Qt.PointingHandCursor)
+        print_btn.clicked.connect(self.printRequested.emit)
+        row.addWidget(print_btn)
+        export_btn = QPushButton("خروجی اکسل گزارش")
+        export_btn.setObjectName("Primary")
+        export_btn.setIcon(make_icon("download", "#FFFFFF", 15))
+        export_btn.setCursor(Qt.PointingHandCursor)
+        export_btn.clicked.connect(self.exportExcelRequested.emit)
+        row.addWidget(export_btn)
+        toolbar.body.addLayout(row)
+        layout.addWidget(toolbar)
+
+        browser_card = Card(colors, radius=16, padding=8)
+        self.browser = QTextBrowser()
+        self.browser.setOpenExternalLinks(False)
+        self.browser.setFrameShape(QFrame.NoFrame)
+        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        configure_rtl_browser(self.browser)
+        self.browser.setStyleSheet(
+            f"QTextBrowser {{ background: {colors['paper']}; border: none; padding: 12px; }}"
+        )
+        browser_card.body.addWidget(self.browser, 1)
+        layout.addWidget(browser_card, 1)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.browser.setStyleSheet(
+            f"QTextBrowser {{ background: {colors['paper']}; border: none; padding: 12px; }}"
+        )
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+        if self._data is not None:
+            self.update_data(self._data)
+
+    def update_data(self, data: DashboardData) -> None:
+        self._data = data
+        self.browser.setHtml(build_report_html(data, self.colors))
+        configure_rtl_browser(self.browser)
+        self.summary_chip.setText(bidi(f"{data.progress_percent_text}٪ پیشرفت اختتام"))
+        follow = sum(1 for record in data.records if record.open_flags or record.is_expired)
+        self.follow_chip.setText(bidi(f"{fa(follow)} نیازمند پیگیری"))
+
+    def set_data(self, data: DashboardData) -> None:
+        self.update_data(data)
+
+    def html(self) -> str:
+        return self.browser.toHtml()
+
+
+# ---------------------------------------------------------------------------
+# کتابخانهٔ PDF
+# ---------------------------------------------------------------------------
+class PdfLibraryPage(QWidget):
+    """فهرست فایل‌های PDF پوشهٔ قراردادها با جستجو و باز کردن."""
+
+    openRequested = pyqtSignal(str)
+    folderRequested = pyqtSignal()
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.folder = ""
+        self._files: List[str] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 22, 30, 24)
+        layout.setSpacing(12)
+
+        toolbar = Card(colors, radius=16, padding=14)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.search_edit = SearchBox("جستجوی نام فایل PDF…")
+        self.search_edit.textChanged.connect(self._apply_filter)
+        row.addWidget(self.search_edit, 1)
+        self.count_chip = QLabel("—")
+        self.count_chip.setObjectName("Chip")
+        row.addWidget(self.count_chip)
+        refresh_btn = QPushButton("بازخوانی فهرست")
+        refresh_btn.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        refresh_btn.clicked.connect(self.refresh_list)
+        row.addWidget(refresh_btn)
+        folder_btn = QPushButton("انتخاب پوشه")
+        folder_btn.setIcon(make_icon("folder", colors["ink_2"], 15))
+        folder_btn.clicked.connect(self.folderRequested.emit)
+        row.addWidget(folder_btn)
+        toolbar.body.addLayout(row)
+        self.subtitle = QLabel("پوشهٔ PDF تنظیم نشده است.")
+        self.subtitle.setObjectName("Muted")
+        self.subtitle.setWordWrap(True)
+        toolbar.body.addWidget(self.subtitle)
+        layout.addWidget(toolbar)
+
+        list_card = Card(colors, radius=16, padding=8)
+        self.list_widget = QListWidget()
+        self.list_widget.setSpacing(2)
+        self.list_widget.itemDoubleClicked.connect(self._open_item)
+        list_card.body.addWidget(self.list_widget, 1)
+        layout.addWidget(list_card, 1)
+
+        footer = QHBoxLayout()
+        self.footer_label = QLabel("—")
+        self.footer_label.setObjectName("Muted")
+        footer.addWidget(self.footer_label, 1)
+        open_btn = QPushButton("باز کردن فایل انتخاب‌شده")
+        open_btn.setObjectName("Primary")
+        open_btn.setIcon(make_icon("external", "#FFFFFF", 15))
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.clicked.connect(self._open_selected)
+        footer.addWidget(open_btn)
+        layout.addLayout(footer)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.search_edit.set_icon_color(colors["ink_3"])
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+
+    def set_folder(self, folder: str) -> None:
+        self.folder = folder or ""
+        self.subtitle.setText(f"پوشه: \u202a{self.folder}\u202c" if self.folder
+                              else "پوشهٔ PDF تنظیم نشده است.")
+        self.refresh_list()
+
+    def refresh_list(self) -> None:
+        self._files = []
+        if self.folder and os.path.isdir(self.folder):
+            try:
+                with os.scandir(self.folder) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_file() and entry.name.lower().endswith(".pdf"):
+                                self._files.append(entry.name)
+                        except OSError:
+                            continue
+            except Exception as exc:
+                self.footer_label.setText(f"خطا در خواندن پوشه: {exc}")
+        self._files.sort(key=normalize_per)
+        self._apply_filter()
+        self.count_chip.setText(bidi(f"{fa(len(self._files))} فایل"))
+
+    def _apply_filter(self) -> None:
+        query = normalize_per(self.search_edit.text())
+        self.list_widget.clear()
+        shown = 0
+        for name in self._files:
+            if query and query not in normalize_per(name):
+                continue
+            shown += 1
+            if shown > 5000:
+                break
+            item = QListWidgetItem(f"\u202a{name}\u202c")
+            item.setData(Qt.UserRole, name)
+            item.setIcon(make_icon("pdf", self.colors["danger"], 18))
+            item.setSizeHint(QSize(0, 38))
+            self.list_widget.addItem(item)
+        if not shown:
+            message = ("پوشه‌ای انتخاب نشده است." if not self.folder
+                       else "فایل PDF‌ای در این پوشه پیدا نشد.")
+            item = QListWidgetItem(message)
+            item.setFlags(Qt.NoItemFlags)
+            self.list_widget.addItem(item)
+        self.footer_label.setText(
+            f"{fa(shown)} فایل نمایش داده می‌شود" + (f" از {fa(len(self._files))}" if query else "")
+        )
+
+    def _open_selected(self) -> None:
+        item = self.list_widget.currentItem()
+        if item:
+            self._open_item(item)
+
+    def _open_item(self, item: QListWidgetItem) -> None:
+        name = item.data(Qt.UserRole)
+        if name:
+            self.openRequested.emit(str(name))
+
+
+# ---------------------------------------------------------------------------
+# تنظیمات
+# ---------------------------------------------------------------------------
+class SettingsPage(QWidget):
+    """تنظیم مسیر اکسل/PDF، پوسته و بازخوانی خودکار."""
+
+    saveRequested = pyqtSignal(dict)
+    reloadRequested = pyqtSignal()
+    openDataFolderRequested = pyqtSignal()
+
+    def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.colors = colors
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 22, 30, 20)
+        layout.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(scroll, 1)
+        content = QWidget()
+        scroll.setWidget(content)
+        holder = QHBoxLayout(content)
+        holder.setContentsMargins(0, 0, 0, 0)
+        holder.setSpacing(14)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(14)
+        left_column = QVBoxLayout()
+        left_column.setSpacing(14)
+
+        # ---- منبع داده ----
+        source_card = Card(colors, radius=16, padding=18)
+        source_card.body.addWidget(_card_title("منبع داده", "مسیر اکسل و پوشهٔ فایل‌های PDF"))
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(10)
+        form.addWidget(QLabel("فایل اکسل:"), 0, 0)
+        self.excel_edit = QLineEdit(str(config.get("excel_path") or ""))
+        self.excel_edit.setPlaceholderText("مسیر فایل F.O.C(Mehr).xlsx")
+        form.addWidget(self.excel_edit, 0, 1)
+        browse_excel = QPushButton("انتخاب…")
+        browse_excel.setIcon(make_icon("folder", colors["ink_2"], 15))
+        browse_excel.setCursor(Qt.PointingHandCursor)
+        browse_excel.clicked.connect(self._browse_excel)
+        form.addWidget(browse_excel, 0, 2)
+        network_btn = QPushButton("مسیر شبکه")
+        network_btn.setObjectName("Ghost")
+        network_btn.setToolTip(ORIGINAL_EXCEL_PATH)
+        network_btn.clicked.connect(lambda: self.excel_edit.setText(ORIGINAL_EXCEL_PATH))
+        form.addWidget(network_btn, 0, 3)
+
+        form.addWidget(QLabel("نام شیت:"), 1, 0)
+        self.sheet_edit = QLineEdit(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
+        form.addWidget(self.sheet_edit, 1, 1)
+
+        form.addWidget(QLabel("پوشهٔ PDF:"), 2, 0)
+        self.pdf_edit = QLineEdit(str(config.get("pdf_folder") or ""))
+        self.pdf_edit.setPlaceholderText("پوشه‌ای که فایل‌های PDF قراردادها در آن است")
+        form.addWidget(self.pdf_edit, 2, 1)
+        browse_pdf = QPushButton("انتخاب…")
+        browse_pdf.setIcon(make_icon("folder", colors["ink_2"], 15))
+        browse_pdf.setCursor(Qt.PointingHandCursor)
+        browse_pdf.clicked.connect(self._browse_pdf)
+        form.addWidget(browse_pdf, 2, 2)
+        pdf_network = QPushButton("مسیر شبکه")
+        pdf_network.setObjectName("Ghost")
+        pdf_network.setToolTip(ORIGINAL_PDF_FOLDER)
+        pdf_network.clicked.connect(lambda: self.pdf_edit.setText(ORIGINAL_PDF_FOLDER))
+        form.addWidget(pdf_network, 2, 3)
+        form.setColumnStretch(1, 1)
+        source_card.body.addLayout(form)
+        hint = _muted("داده‌ها فقط خوانده می‌شوند؛ این برنامه هیچ‌گاه فایل اکسل اصلی را تغییر نمی‌دهد.")
+        source_card.body.addWidget(hint)
+        right_column.addWidget(source_card)
+
+        # ---- فایل‌های برنامه ----
+        storage_card = Card(colors, radius=16, padding=18)
+        storage_card.body.addWidget(_card_title("فایل‌های برنامه", "تنظیمات، یادداشت‌ها و نسخه"))
+        self.config_path_label = QLabel(f"تنظیمات: {config.path}")
+        self.config_path_label.setObjectName("Muted")
+        self.config_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.notes_path_label = QLabel(f"یادداشت‌ها: {data_dir() / NotesStore.FILENAME}")
+        self.notes_path_label.setObjectName("Muted")
+        self.notes_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        storage_card.body.addWidget(self.config_path_label)
+        storage_card.body.addWidget(self.notes_path_label)
+        self.version_label = QLabel(f"نسخهٔ برنامه: {fa(APP_VERSION)}")
+        self.version_label.setObjectName("Muted")
+        self.loaded_label = QLabel("آخرین بارگذاری: —")
+        self.loaded_label.setObjectName("Muted")
+        storage_card.body.addWidget(self.version_label)
+        storage_card.body.addWidget(self.loaded_label)
+        open_folder = QPushButton("باز کردن پوشهٔ برنامه")
+        open_folder.setIcon(make_icon("folder", colors["ink_2"], 15))
+        open_folder.setCursor(Qt.PointingHandCursor)
+        open_folder.clicked.connect(self.openDataFolderRequested.emit)
+        storage_card.body.addWidget(open_folder, 0, Qt.AlignRight)
+        right_column.addWidget(storage_card)
+
+        # ---- وضعیت داده ----
+        self.summary_card = Card(colors, radius=16, padding=18)
+        self.summary_card.body.addWidget(_card_title("وضعیت داده", "خلاصهٔ آخرین بارگذاری"))
+        summary_grid = QGridLayout()
+        summary_grid.setHorizontalSpacing(8)
+        summary_grid.setVerticalSpacing(8)
+        self._summary_values: Dict[str, QLabel] = {}
+        for index, (key, title) in enumerate((
+            ("contracts", "کل قراردادها"),
+            ("deductions", "دارای کسورات"),
+            ("pdfs", "دارای فایل PDF"),
+            ("follow", "نیازمند پیگیری"),
+        )):
+            box = QFrame()
+            box.setObjectName("MiniStat")
+            box.setStyleSheet(
+                f"QFrame#MiniStat {{ background: {colors['surface_2']};"
+                f" border-radius: 10px; }}"
+            )
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(8, 6, 8, 6)
+            box_layout.setSpacing(0)
+            caption = QLabel(title)
+            caption.setObjectName("Muted")
+            caption.setStyleSheet("font-size: 7pt;")
+            value = QLabel("—")
+            value.setStyleSheet(
+                f"color: {colors['ink']}; font-size: 13pt; font-weight: 800;"
+            )
+            box_layout.addWidget(caption)
+            box_layout.addWidget(value)
+            self._summary_values[key] = value
+            summary_grid.addWidget(box, 0, index)
+        for column in range(4):
+            summary_grid.setColumnStretch(column, 1)
+        self.summary_card.body.addLayout(summary_grid)
+        right_column.addWidget(self.summary_card)
+        right_column.addStretch(1)
+
+        # ---- نمایش ----
+        display_card = Card(colors, radius=16, padding=18)
+        display_card.body.addWidget(_card_title("نمایش", "پوسته، اندازهٔ قلم و بازخوانی خودکار"))
+        form2 = QGridLayout()
+        form2.setHorizontalSpacing(8)
+        form2.setVerticalSpacing(10)
+        form2.addWidget(QLabel("پوسته:"), 0, 0)
+        self.theme_combo = Combo()
+        self.theme_combo.set_theme_colors(colors)
+        self.theme_combo.addItem("روشن", "light")
+        self.theme_combo.addItem("تیره", "dark")
+        current_theme = str(config.get("theme") or "light")
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(current_theme)))
+        form2.addWidget(self.theme_combo, 0, 1)
+
+        form2.addWidget(QLabel("اندازهٔ قلم:"), 1, 0)
+        self.font_spin = NumberStepper(colors)
+        self.font_spin.setRange(8, 16)
+        self.font_spin.setSuffix(" pt")
+        self.font_spin.setValue(int(config.get("font_size") or 10))
+        form2.addWidget(self.font_spin, 1, 1)
+
+        form2.addWidget(QLabel("بازخوانی خودکار:"), 2, 0)
+        self.auto_spin = NumberStepper(colors)
+        self.auto_spin.setRange(0, 120)
+        self.auto_spin.setSuffix(" دقیقه")
+        self.auto_spin.setSpecialValueText("غیرفعال")
+        self.auto_spin.setValue(int(config.get("auto_refresh_minutes") or 5))
+        form2.addWidget(self.auto_spin, 2, 1)
+        form2.setColumnStretch(1, 1)
+        display_card.body.addLayout(form2)
+
+        swatches = QHBoxLayout()
+        swatches.setSpacing(6)
+        self._swatches: List[QFrame] = []
+        for color in (colors["brand"], colors["brand_2"], colors["accent"], colors["info"]):
+            swatch = QFrame()
+            swatch.setFixedSize(16, 16)
+            swatch.setStyleSheet(
+                f"background: {color}; border-radius: 8px;")
+            swatches.addWidget(swatch)
+            self._swatches.append(swatch)
+        swatches.addStretch(1)
+        display_card.body.addSpacing(4)
+        display_card.body.addLayout(swatches)
+        left_column.addWidget(display_card)
+
+        # ---- نکته‌ها ----
+        tips_card = Card(colors, radius=16, padding=18)
+        tips_card.body.addWidget(_card_title("نکته‌های کاربردی", "برای کار سریع‌تر با برنامه"))
+        for kind, title, text in (
+            ("refresh", "بازخوانی خودکار",
+             "اگر فایل اکسل تغییر کند، برنامه در فاصلهٔ تعیین‌شده دوباره آن را می‌خواند."),
+            ("clock", "میان‌برها",
+             "Ctrl+R بازخوانی، Ctrl+E خروجی اکسل، Ctrl+D تغییر پوسته و Ctrl+F جستجو."),
+            ("folder", "مسیر شبکه",
+             "برای استفاده از مسیر قبلی شبکه، دکمهٔ «مسیر شبکه» را بزنید؛ داده‌ها فقط خوانده می‌شوند."),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            row.addWidget(IconTile(kind, colors["brand"], colors["brand_soft"], size=34, radius=10))
+            box = QVBoxLayout()
+            box.setSpacing(0)
+            heading = QLabel(title)
+            heading.setStyleSheet("font-weight: 700;")
+            body = QLabel(text)
+            body.setObjectName("Muted")
+            body.setWordWrap(True)
+            box.addWidget(heading)
+            box.addWidget(body)
+            row.addLayout(box, 1)
+            tips_card.body.addLayout(row)
+        left_column.addWidget(tips_card)
+        left_column.addStretch(1)
+
+        holder.addLayout(right_column, 3)
+        holder.addLayout(left_column, 2)
+
+        save_bar = QHBoxLayout()
+        save_bar.setSpacing(8)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        save_bar.addWidget(self.status_label, 1)
+        reload_btn = QPushButton("بارگذاری مجدد داده‌ها")
+        reload_btn.setObjectName("Ghost")
+        reload_btn.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        reload_btn.clicked.connect(self.reloadRequested.emit)
+        save_bar.addWidget(reload_btn)
+        save_btn = QPushButton("ذخیره و اعمال")
+        save_btn.setObjectName("Primary")
+        save_btn.setIcon(make_icon("check", "#FFFFFF", 15))
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.clicked.connect(self._emit_save)
+        save_bar.addWidget(save_btn)
+        layout.addLayout(save_bar)
+
+    def _browse_excel(self) -> None:
+        start = self.excel_edit.text() or str(app_dir())
+        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
+        if path:
+            self.excel_edit.setText(path)
+            if not self.pdf_edit.text().strip():
+                guess = Path(path).parent / "PDF-MEHR"
+                if guess.is_dir():
+                    self.pdf_edit.setText(str(guess))
+
+    def _browse_pdf(self) -> None:
+        start = self.pdf_edit.text() or str(app_dir())
+        folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
+        if folder:
+            self.pdf_edit.setText(folder)
+
+    def _emit_save(self) -> None:
+        self.saveRequested.emit({
+            "excel_path": self.excel_edit.text().strip(),
+            "sheet_name": self.sheet_edit.text().strip() or SHEET_NAME_DEFAULT,
+            "pdf_folder": self.pdf_edit.text().strip(),
+            "theme": self.theme_combo.currentData(),
+            "font_size": self.font_spin.value(),
+            "auto_refresh_minutes": self.auto_spin.value(),
+        })
+
+    def update_data(self, data: DashboardData) -> None:
+        """به‌روزرسانی کارت «وضعیت داده» پس از هر بارگذاری."""
+        if not hasattr(self, "_summary_values"):
+            return
+        pdf_count = sum(1 for record in data.records if record.pdf_file)
+        follow = sum(1 for record in data.records
+                     if record.open_flags or record.is_expired)
+        values = {
+            "contracts": fa(data.total_contracts),
+            "deductions": fa(data.contracts_with_deductions),
+            "pdfs": fa(pdf_count),
+            "follow": fa(follow),
+        }
+        for key, label in self._summary_values.items():
+            label.setText(values.get(key, "—"))
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def set_loaded(self, text: str, count: int = 0) -> None:
+        suffix = f"  •  {fa(count)} قرارداد" if count else ""
+        self.loaded_label.setText(f"آخرین بارگذاری: {text}{suffix}")
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.theme_combo.set_theme_colors(colors)
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+        for stepper in self.findChildren(NumberStepper):
+            stepper.set_theme(colors)
+        for tile in self.findChildren(IconTile):
+            tile.set_colors(colors["brand"], colors["brand_soft"])
+
+    def load_values(self, config: AppConfig) -> None:
+        self.excel_edit.setText(str(config.get("excel_path") or ""))
+        self.sheet_edit.setText(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
+        self.pdf_edit.setText(str(config.get("pdf_folder") or ""))
+        theme_index = self.theme_combo.findData(str(config.get("theme") or "light"))
+        self.theme_combo.setCurrentIndex(max(0, theme_index))
+        self.font_spin.setValue(int(config.get("font_size") or 10))
+        self.auto_spin.setValue(int(config.get("auto_refresh_minutes") or 0))
+
+
+# ---------------------------------------------------------------------------
+# راهنما
+# ---------------------------------------------------------------------------
+class HelpPage(QWidget):
+    """راهنمای شروع سریع، میان‌برها و نگاشت امکانات نسخهٔ وب."""
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll)
+        content = QWidget()
+        self.scroll.setWidget(content)
+        self.layout = QVBoxLayout(content)
+        self.layout.setContentsMargins(30, 22, 30, 26)
+        self.layout.setSpacing(14)
+
+        row = QHBoxLayout()
+        row.setSpacing(14)
+
+        start_card = Card(colors, radius=16, padding=18)
+        start_card.body.addWidget(_card_title("شروع سریع", "چهار گام تا اولین گزارش"))
+        steps = [
+            "از صفحهٔ تنظیمات، فایل اکسل را انتخاب کنید یا فایل را کنار همین اسکریپت بگذارید.",
+            "پوشهٔ PDF را انتخاب کنید تا ستون «فایل» و پنل جزئیات فعال شود.",
+            "دکمهٔ بازخوانی یا Ctrl+R را بزنید تا داده‌ها دوباره خوانده شوند.",
+            "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
+        ]
+        for number, text in enumerate(steps, start=1):
+            start_card.body.addWidget(page_step_label(text, number, colors))
+        start_card.body.addStretch(1)
+        row.addWidget(start_card, 1)
+
+        shortcuts_card = Card(colors, radius=16, padding=18)
+        shortcuts_card.body.addWidget(_card_title("میان‌برها", "دسترسی سریع از هر صفحه"))
+        self._key_chips: List[QLabel] = []
+        for keys, description in (
+            ("Ctrl + R", "بازخوانی فایل اکسل"),
+            ("Ctrl + F", "جستجو در جدول قراردادها"),
+            ("Ctrl + E", "خروجی اکسل جدول"),
+            ("Ctrl + D", "تغییر پوستهٔ روشن/تیره"),
+            ("F1", "باز شدن راهنما"),
+            ("Esc", "بستن پنل جزئیات"),
+        ):
+            key_chip = QLabel(keys)
+            key_chip.setStyleSheet(
+                f"background: {colors['surface_3']}; color: {colors['ink_2']};"
+                f"border-radius: 7px; padding: 4px 9px; font-weight: 700; font-size: 8pt;"
+            )
+            key_chip.setFixedWidth(96)
+            key_chip.setAlignment(Qt.AlignCenter)
+            self._key_chips.append(key_chip)
+            shortcut_row = QWidget()
+            shortcut_layout = QHBoxLayout(shortcut_row)
+            shortcut_layout.setContentsMargins(0, 2, 0, 2)
+            shortcut_layout.setSpacing(10)
+            shortcut_layout.addWidget(key_chip)
+            label = QLabel(description)
+            label.setObjectName("Subtle")
+            shortcut_layout.addWidget(label, 1)
+            shortcuts_card.body.addWidget(shortcut_row)
+        shortcuts_card.body.addStretch(1)
+        row.addWidget(shortcuts_card, 1)
+        self.layout.addLayout(row)
+
+        mapping_card = Card(colors, radius=16, padding=18)
+        mapping_card.body.addWidget(_card_title(
+            "نگاشت امکانات نسخهٔ وب به دسکتاپ",
+            "همان محتوا و رفتار، این بار به‌صورت یک برنامهٔ مستقل",
+        ))
+        rows = [
+            ("صفحهٔ اصلی و کارت‌های آماری", "داشبورد با کاشی‌های قابل کلیک"),
+            ("فیلتر با کلیک روی کارت‌ها", "فیلتر جدول با کلیک روی کاشی، برش دونات یا میله"),
+            ("نمودارهای Chart.js", "نمودارهای بومی Qt با تعامل و راهنما"),
+            ("جدول قراردادها", "جدول با جستجو، مرتب‌سازی، مخفی‌کردن ستون و انتخاب چندردیفی"),
+            ("پنجرهٔ جزئیات و یادداشت", "کشوی جزئیات در سمت راست پنجره"),
+            ("خروجی اکسل مرورگر", "خروجی اکسل با انتخاب ستون و دامنه"),
+            ("گزارش مدیریتی", "پیش‌نمایش چاپی و خروجی سه‌شیتی اکسل"),
+            ("اتصال فایل PDF", "ستون فایل و باز کردن با برنامهٔ پیش‌فرض"),
+            ("چت Ollama و ورود کاربران", "حذف شده؛ برنامهٔ تک‌کاربره و مستقل است"),
+        ]
+        for index, (web, desktop) in enumerate(rows):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(2, 4, 2, 4)
+            row_layout.setSpacing(10)
+            draw = IconWidget("check" if index < 8 else "close",
+                              colors["success"] if index < 8 else colors["danger"], 15)
+            row_layout.addWidget(draw)
+            left = QLabel(web)
+            left.setObjectName("Muted")
+            left.setWordWrap(True)
+            left.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row_layout.addWidget(left, 1)
+            arrow = QLabel("←")
+            arrow.setStyleSheet(f"color: {colors['ink_3']};")
+            row_layout.addWidget(arrow)
+            right = QLabel(desktop)
+            right.setWordWrap(True)
+            right.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row_layout.addWidget(right, 1)
+            mapping_card.body.addWidget(row_widget)
+        mapping_card.body.addWidget(_card_title("یادداشت"))
+        note = _muted(
+            f"تنظیمات در mehr_qt_config.json و یادداشت‌ها در mehr_notes.json کنار برنامه ذخیره می‌شوند. "
+            f"برای اجرا: pip install PyQt5 openpyxl — نسخهٔ {APP_VERSION}"
+        )
+        mapping_card.body.addWidget(note)
+        self.layout.addWidget(mapping_card)
+        self.layout.addStretch(1)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+        for chip in self._key_chips:
+            chip.setStyleSheet(
+                f"background: {colors['surface_3']}; color: {colors['ink_2']};"
+                f"border-radius: 7px; padding: 4px 9px; font-weight: 700; font-size: 8pt;"
+            )
+        self.scroll.viewport().update()
+
+
+
+# ==========================================================================
+# پوسته، پنجرهٔ اصلی و اجرای برنامه
+# ==========================================================================
+# ---------------------------------------------------------------------------
+# پوستهٔ اصلی: ریل ناوبری، نوار بالا، کشوی جزئیات و پنجرهٔ برنامه
+# ---------------------------------------------------------------------------
+try:  # پشتیبانی چاپ اختیاری است
+    from PyQt5.QtPrintSupport import QPrintDialog, QPrinter  # noqa: E402
+except Exception:  # pragma: no cover
+    QPrintDialog = None  # type: ignore
+    QPrinter = None  # type: ignore
+
+
+NAV_ITEMS: List[Tuple[str, str, str]] = [
+    ("dashboard", "داشبورد", "dashboard"),
+    ("contracts", "قراردادها", "table"),
+    ("reports", "گزارش", "report"),
+    ("pdfs", "PDF", "pdf"),
+    ("settings", "تنظیمات", "settings"),
+    ("help", "راهنما", "help"),
+]
+
+
+class LogoMark(QWidget):
+    """نشان برنامه: مربع گرد با گرادیان برند و آیکون لایه‌ها."""
+
+    def __init__(self, colors: Dict[str, str], size: int = 44, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.setFixedSize(size, size)
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        gradient = QLinearGradient(body.topLeft(), body.bottomRight())
+        gradient.setColorAt(0.0, QColor("#2BC3AC"))
+        gradient.setColorAt(1.0, QColor("#0A5A4F"))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(body, body.width() * 0.30, body.width() * 0.30)
+        margin = body.width() * 0.26
+        draw_icon(painter, "layers", body.adjusted(margin, margin, -margin, -margin),
+                  QColor("#FFFFFF"), 1.7)
+
+
+class RailItem(QWidget):
+    """یک دکمهٔ ناوبری در ریل کنار با آیکون و برچسب."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, key: str, label: str, kind: str,
+                 colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.key = key
+        self.kind = kind
+        self.label = label
+        self.colors = colors
+        self.active = False
+        self._hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(62)
+        self.setAttribute(Qt.WA_Hover, True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 7, 0, 5)
+        layout.setSpacing(3)
+        self.icon = IconWidget(kind, colors["rail_muted"], 21, 1.7)
+        layout.addWidget(self.icon, 0, Qt.AlignHCenter)
+        self.label_widget = QLabel(label)
+        self.label_widget.setAlignment(Qt.AlignCenter)
+        self.label_widget.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 7.5pt; font-weight: 600;"
+        )
+        layout.addWidget(self.label_widget)
+
+    def set_active(self, active: bool) -> None:
+        self.active = active
+        self._sync()
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self._sync()
+
+    def _sync(self) -> None:
+        color = self.colors["rail_ink"] if (self.active or self._hover) else self.colors["rail_muted"]
+        self.icon.set_color(color)
+        self.label_widget.setStyleSheet(
+            f"color: {color}; font-size: 7.5pt;"
+            f"font-weight: {800 if self.active else 600};"
+        )
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self._sync()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self._sync()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        body = QRectF(self.rect()).adjusted(4, 3, -4, -3)
+        if self.active:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(alpha(self.colors["rail_active"], 235))
+            painter.drawRoundedRect(body, 13, 13)
+            painter.setBrush(QColor(self.colors["brand_2"]))
+            painter.drawRoundedRect(QRectF(body.right() - 2.5, body.center().y() - 13, 3, 26), 1.5, 1.5)
+        elif self._hover:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 14))
+            painter.drawRoundedRect(body, 13, 13)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(self.key)
+        super().mouseReleaseEvent(event)
+
+
+class Rail(QFrame):
+    """ریل ناوبری عمودی تیره در سمت چپ پنجره."""
+
+    pageRequested = pyqtSignal(str)
+    themeRequested = pyqtSignal()
+
+    WIDTH = 86
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.setFixedWidth(self.WIDTH)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 20, 0, 16)
+        layout.setSpacing(6)
+        self.logo = LogoMark(colors)
+        layout.addWidget(self.logo, 0, Qt.AlignHCenter)
+        layout.addSpacing(18)
+        self.items: Dict[str, RailItem] = {}
+        for key, label, kind in NAV_ITEMS:
+            item = RailItem(key, label, kind, colors)
+            item.clicked.connect(self.pageRequested.emit)
+            layout.addWidget(item)
+            self.items[key] = item
+        layout.addStretch(1)
+        self.theme_button = IconButton("", "moon", colors["rail_muted"])
+        self.theme_button.setObjectName("RailUtility")
+        self.theme_button.setFixedSize(38, 38)
+        self.theme_button.setCursor(Qt.PointingHandCursor)
+        self.theme_button.setToolTip("تغییر پوسته (Ctrl+D)")
+        self.theme_button.clicked.connect(self.themeRequested.emit)
+        layout.addWidget(self.theme_button, 0, Qt.AlignHCenter)
+        version = QLabel(f"v{fa(APP_VERSION)}")
+        version.setAlignment(Qt.AlignCenter)
+        version.setStyleSheet(f"color: {colors['rail_muted']}; font-size: 7pt;")
+        layout.addWidget(version)
+        self.version_label = version
+
+    def set_active(self, key: str) -> None:
+        for item_key, item in self.items.items():
+            item.set_active(item_key == key)
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.setStyleSheet(f"QFrame {{ background: {colors['rail']}; }}")
+        self.logo.set_theme(colors)
+        self.theme_button.set_icon_color(colors["rail_muted"])
+        self.version_label.setStyleSheet(f"color: {colors['rail_muted']}; font-size: 7pt;")
+        for item in self.items.values():
+            item.set_theme(colors)
+
+    def set_dark(self, dark: bool) -> None:
+        self.theme_button.set_icon_kind("sun" if dark else "moon",
+                                        self.colors["rail_muted"])
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.colors["rail"]))
+
+
+class TopBar(QFrame):
+    """نوار بالای پنجره: عنوان صفحه، جستجو و دکمه‌های اقدام."""
+
+    searchChanged = pyqtSignal(str)
+    reloadRequested = pyqtSignal()
+    themeToggled = pyqtSignal()
+    menuRequested = pyqtSignal()
+
+    HEIGHT = 96
+
+    def __init__(self, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.setFixedHeight(self.HEIGHT)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(30, 14, 30, 14)
+        layout.setSpacing(14)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
+        title_box.setContentsMargins(0, 0, 0, 0)
+        self.eyebrow = QLabel("پروژهٔ مهر خلیج فارس")
+        self.eyebrow.setObjectName("Eyebrow")
+        self.title = QLabel(PAGE_TITLES["dashboard"])
+        self.title.setObjectName("PageTitle")
+        self.subtitle = QLabel(PAGE_SUBTITLES["dashboard"])
+        self.subtitle.setObjectName("PageSubtitle")
+        title_box.addWidget(self.eyebrow)
+        title_box.addWidget(self.title)
+        title_box.addWidget(self.subtitle)
+        title_widget = QWidget()
+        title_widget.setLayout(title_box)
+        title_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        layout.addWidget(title_widget)
+        layout.addStretch(1)
+
+        self.search_edit = SearchBox("جستجوی قرارداد، شرکت، موضوع…")
+        self.search_edit.setMinimumWidth(300)
+        self.search_edit.setMaximumWidth(430)
+        self.search_edit.textChanged.connect(self.searchChanged.emit)
+        layout.addWidget(self.search_edit, 0)
+
+        self.date_chip = QLabel(today_jalali(with_time=False))
+        self.date_chip.setObjectName("Chip")
+        layout.addWidget(self.date_chip, 0)
+
+        self.reload_button = IconButton("", "refresh", colors["ink_2"])
+        self.reload_button.setObjectName("Ghost")
+        self.reload_button.setFixedSize(38, 38)
+        self.reload_button.setToolTip("بازخوانی اکسل (Ctrl+R)")
+        self.reload_button.setCursor(Qt.PointingHandCursor)
+        self.reload_button.clicked.connect(self.reloadRequested.emit)
+        layout.addWidget(self.reload_button)
+
+        self.theme_button = IconButton("", "moon", colors["ink_2"])
+        self.theme_button.setObjectName("Ghost")
+        self.theme_button.setFixedSize(38, 38)
+        self.theme_button.setToolTip("تغییر پوسته (Ctrl+D)")
+        self.theme_button.setCursor(Qt.PointingHandCursor)
+        self.theme_button.clicked.connect(self.themeToggled.emit)
+        layout.addWidget(self.theme_button)
+
+        self.menu_button = IconButton("", "dots", colors["ink_2"])
+        self.menu_button.setObjectName("Ghost")
+        self.menu_button.setFixedSize(38, 38)
+        self.menu_button.setToolTip("منوی برنامه")
+        self.menu_button.setCursor(Qt.PointingHandCursor)
+        self.menu_button.clicked.connect(self.menuRequested.emit)
+        layout.addWidget(self.menu_button)
+
+    def set_page(self, key: str) -> None:
+        self.title.setText(PAGE_TITLES.get(key, ""))
+        self.subtitle.setText(PAGE_SUBTITLES.get(key, ""))
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.reload_button.set_icon_color(colors["ink_2"])
+        self.menu_button.set_icon_color(colors["ink_2"])
+        self.search_edit.set_icon_color(colors["ink_3"])
+        self.update()
+
+    def set_dark(self, dark: bool) -> None:
+        self.theme_button.set_icon_kind("sun" if dark else "moon", self.colors["ink_2"])
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.colors["surface"]))
+        painter.setPen(QPen(QColor(self.colors["border_soft"]), 1))
+        painter.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+
+
+class DetailDrawer(QWidget):
+    """کشوی جزئیات قرارداد با یادداشت، پیگیری و نشان‌گذاری."""
+
+    closed = pyqtSignal()
+    notesChanged = pyqtSignal(str)
+    pdfRequested = pyqtSignal(str)
+    revealRequested = pyqtSignal(str)
+    bookmarkToggled = pyqtSignal(str)
+
+    WIDTH = 430
+
+    def __init__(self, colors: Dict[str, str], notes: NotesStore, parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.notes = notes
+        self.record: Optional[ContractRecord] = None
+        self._open = False
+        self.setObjectName("Drawer")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"QWidget#Drawer {{ background: {colors['surface']};"
+            f"border-left: 1px solid {colors['border']}; }}"
+        )
+        self.setFixedWidth(self.WIDTH)
+        self.hide()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        self.avatar = Avatar("", 42)
+        header.addWidget(self.avatar)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(1)
+        self.name_label = QLabel("—")
+        self.name_label.setStyleSheet("font-size: 12pt; font-weight: 800;")
+        self.meta_label = QLabel("—")
+        self.meta_label.setObjectName("Muted")
+        text_box.addWidget(self.name_label)
+        text_box.addWidget(self.meta_label)
+        header.addLayout(text_box, 1)
+        self.bookmark_button = IconButton("", "bookmark", colors["ink_3"])
+        self.bookmark_button.setObjectName("Ghost")
+        self.bookmark_button.setFixedSize(34, 34)
+        self.bookmark_button.setToolTip("نشان‌گذاری")
+        self.bookmark_button.setCursor(Qt.PointingHandCursor)
+        self.bookmark_button.clicked.connect(self._toggle_bookmark)
+        header.addWidget(self.bookmark_button)
+        close_button = IconButton("", "close", colors["ink_3"])
+        close_button.setObjectName("Ghost")
+        close_button.setFixedSize(34, 34)
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.clicked.connect(self.close_drawer)
+        header.addWidget(close_button)
+        layout.addLayout(header)
+
+        self.chips = QHBoxLayout()
+        self.chips.setSpacing(5)
+        layout.addLayout(self.chips)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(self.scroll, 1)
+        content = QWidget()
+        self.scroll.setWidget(content)
+        body = QVBoxLayout(content)
+        body.setContentsMargins(0, 0, 6, 0)
+        body.setSpacing(12)
+
+        self.info_grid = QGridLayout()
+        self.info_grid.setHorizontalSpacing(10)
+        self.info_grid.setVerticalSpacing(8)
+        body.addLayout(self.info_grid)
+
+        body.addWidget(_card_title("وضعیت‌ها"))
+        self.flags_box = QVBoxLayout()
+        self.flags_box.setSpacing(4)
+        body.addLayout(self.flags_box)
+
+        body.addWidget(_card_title("فایل قرارداد"))
+        pdf_row = QHBoxLayout()
+        pdf_row.setSpacing(8)
+        self.pdf_label = QLabel("فایلی متصل نیست.")
+        self.pdf_label.setObjectName("Muted")
+        self.pdf_label.setWordWrap(True)
+        pdf_row.addWidget(self.pdf_label, 1)
+        self.open_pdf_button = QPushButton("باز کردن")
+        self.open_pdf_button.setObjectName("Ghost")
+        self.open_pdf_button.setIcon(make_icon("external", colors["ink_2"], 14))
+        self.open_pdf_button.setCursor(Qt.PointingHandCursor)
+        self.open_pdf_button.clicked.connect(self._open_pdf)
+        pdf_row.addWidget(self.open_pdf_button)
+        self.reveal_pdf_button = IconButton("", "folder", colors["ink_2"])
+        self.reveal_pdf_button.setObjectName("Ghost")
+        self.reveal_pdf_button.setFixedSize(34, 34)
+        self.reveal_pdf_button.setToolTip("نمایش در پوشه")
+        self.reveal_pdf_button.clicked.connect(self._reveal_pdf)
+        pdf_row.addWidget(self.reveal_pdf_button)
+        body.addLayout(pdf_row)
+
+        footer = QVBoxLayout()
+        footer.setSpacing(6)
+        layout.addLayout(footer)
+        footer.addWidget(_card_title("یادداشت و پیگیری"))
+        self.author_edit = QLineEdit()
+        self.author_edit.setPlaceholderText("نام شما")
+        self.follow_edit = QLineEdit()
+        self.follow_edit.setPlaceholderText("تاریخ پیگیری (مثلاً ۱۴۰۵/۰۸/۱۲)")
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        input_row.addWidget(self.author_edit, 1)
+        input_row.addWidget(self.follow_edit, 1)
+        footer.addLayout(input_row)
+        self.note_edit = QPlainTextEdit()
+        self.note_edit.setPlaceholderText("یادداشت این قرارداد…")
+        self.note_edit.setFixedHeight(58)
+        footer.addWidget(self.note_edit)
+        save_button = QPushButton("ثبت یادداشت")
+        save_button.setObjectName("Primary")
+        save_button.setIcon(make_icon("check", "#FFFFFF", 14))
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.clicked.connect(self._save_note)
+        footer.addWidget(save_button)
+
+        self.notes_box = QVBoxLayout()
+        self.notes_box.setSpacing(6)
+        body.addLayout(self.notes_box)
+        self.notes_empty = _muted("هنوز یادداشتی ثبت نشده است.")
+        body.addWidget(self.notes_empty)
+        body.addStretch(1)
+
+        self._anim = QPropertyAnimation(self, b"pos", self)
+        self._anim.setDuration(240)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.finished.connect(self._on_anim_finished)
+
+    # ---- جای‌گیری ----
+    def place(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        x = parent.width() - self.WIDTH if self._open else parent.width()
+        self.setGeometry(x, 0, self.WIDTH, parent.height())
+
+    def open_drawer(self) -> None:
+        if self.record is None:
+            return
+        self._open = True
+        self.show()
+        self.raise_()
+        self.place()
+        self._animate_to(self.parentWidget().width() - self.WIDTH)
+
+    def close_drawer(self) -> None:
+        if not self._open:
+            self.hide()
+            return
+        self._open = False
+        self._animate_to(self.parentWidget().width())
+
+    def _animate_to(self, x: int) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self.pos())
+        self._anim.setEndValue(QPoint(x, 0))
+        self._anim.start()
+
+    def _on_anim_finished(self) -> None:
+        if not self._open:
+            self.hide()
+            self.closed.emit()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key_Escape:
+            self.close_drawer()
+            return
+        super().keyPressEvent(event)
+
+    # ---- محتوا ----
+    def set_record(self, record: ContractRecord) -> None:
+        self.record = record
+        self.avatar.set_name(record.col2 or "?")
+        self.name_label.setText(record.col2 or "—")
+        self.meta_label.setText(bidi(f"{record.col3} • ردیف {fa(record.excel_row)}"))
+        clear_layout(self.chips)
+        if record.is_expired:
+            self.chips.addWidget(chip_label("الحاقیه منقضی", self.colors["danger"],
+                                            self.colors["danger_soft"]))
+        if record.f_value:
+            self.chips.addWidget(chip_label(record.f_value, self.colors["brand_deep"],
+                                            self.colors["brand_soft"]))
+        if record.has_deductions:
+            self.chips.addWidget(chip_label("دارای کسورات", self.colors["warning"],
+                                            self.colors["warning_soft"]))
+        self.chips.addStretch(1)
+        self._sync_bookmark()
+        self.pdf_label.setText(record.pdf_file or "فایلی متصل نیست.")
+        self.open_pdf_button.setEnabled(bool(record.pdf_file))
+        self.reveal_pdf_button.setEnabled(bool(record.pdf_file))
+
+        clear_layout(self.info_grid)
+        rows = [
+            ("شمارهٔ قرارداد", record.col3 or "—"),
+            ("موضوع", record.col4 or "—"),
+            ("نوع قرارداد", record.f_value or "—"),
+            ("کسورات اسناد اختتام", record.deductions or "—"),
+            ("پیشرفت کارکرد", pretty_label(record.progress_status) or "—"),
+            ("پیشرفت اختتام", pretty_label(record.completion_status) or "—"),
+            ("الحاقیه / زمان", record.annex_status or "—"),
+            ("وضعیت پکیج آزادسازی", record.as_status or "—"),
+            ("پیشرفت جدول", record.progress_table or "—"),
+            ("اختتام جدول", record.completion_table or "—"),
+            ("AW / AX / AY", f"{record.aw or '—'} / {record.ax or '—'} / {record.ay or '—'}"),
+        ]
+        for index, (title, value) in enumerate(rows):
+            key_label = QLabel(title)
+            key_label.setObjectName("Muted")
+            key_label.setStyleSheet("font-size: 8pt;")
+            key_label.setFixedWidth(104)
+            key_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            value_label = QLabel(str(value))
+            value_label.setWordWrap(True)
+            value_label.setMinimumWidth(0)
+            value_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            value_label.setContentsMargins(0, 0, 10, 0)
+            value_label.setStyleSheet("font-size: 9pt; font-weight: 600;")
+            self.info_grid.addWidget(key_label, index, 0, Qt.AlignTop)
+            self.info_grid.addWidget(value_label, index, 1)
+        self.info_grid.setColumnStretch(0, 0)
+        self.info_grid.setColumnStretch(1, 1)
+
+        clear_layout(self.flags_box)
+        for key, label, _column in FLAG_DEFS:
+            state = bool(record.flags.get(key))
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            icon = IconWidget("check" if state else "close",
+                              self.colors["success"] if state else self.colors["ink_3"], 15)
+            row.addWidget(icon)
+            text = QLabel(label)
+            text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            text.setStyleSheet(
+                f"color: {self.colors['ink'] if state else self.colors['ink_3']};"
+            )
+            row.addWidget(text, 1)
+            self.flags_box.addLayout(row)
+
+        self._refresh_notes()
+        self.author_edit.setText(str(self.notes.entry(record.key).get("last_author", "")))
+
+    def _refresh_notes(self) -> None:
+        clear_layout(self.notes_box)
+        if self.record is None:
+            self.notes_empty.setVisible(True)
+            return
+        items = self.notes.notes_for(self.record.key)
+        self.notes_empty.setVisible(not items)
+        for note in items:
+            card = Card(self.colors, radius=10, padding=8, variant="flat")
+            head = QLabel(note.get("author") or "بدون نام")
+            head.setStyleSheet("font-weight: 700; font-size: 8.5pt;")
+            card.body.addWidget(head)
+            text = QLabel(note.get("text") or "")
+            text.setWordWrap(True)
+            text.setObjectName("Subtle")
+            card.body.addWidget(text)
+            if note.get("followup"):
+                card.body.addWidget(_muted(f"پیگیری: {note['followup']}"))
+            card.body.addWidget(_muted(note.get("created", "")[:10]))
+            self.notes_box.addWidget(card)
+
+    def _sync_bookmark(self) -> None:
+        if self.record is None:
+            return
+        flagged = self.notes.is_bookmarked(self.record.key)
+        self.bookmark_button.set_icon_kind("bookmark", self.colors["brand"] if flagged
+                                           else self.colors["ink_3"])
+        self.bookmark_button.setToolTip("برداشتن نشان" if flagged else "نشان‌گذاری")
+
+    def _toggle_bookmark(self) -> None:
+        if self.record is None:
+            return
+        self.notes.toggle_bookmark(self.record.key)
+        self._sync_bookmark()
+        self.bookmarkToggled.emit(self.record.key)
+
+    def _save_note(self) -> None:
+        if self.record is None:
+            return
+        text = self.note_edit.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "یادداشت", "متن یادداشت خالی است.")
+            return
+        author = self.author_edit.text().strip() or "کاربر"
+        self.notes.add_note(self.record.key, author, text, self.follow_edit.text().strip())
+        entry = self.notes.entry(self.record.key)
+        entry["last_author"] = author
+        self.notes.save()
+        self.note_edit.clear()
+        self.follow_edit.clear()
+        self._refresh_notes()
+        self.notesChanged.emit(self.record.key)
+
+    def _open_pdf(self) -> None:
+        if self.record is not None and self.record.pdf_file:
+            self.pdfRequested.emit(self.record.pdf_file)
+
+    def _reveal_pdf(self) -> None:
+        if self.record is not None and self.record.pdf_file:
+            self.revealRequested.emit(self.record.pdf_file)
+
+    def set_theme_colors(self, colors: Dict[str, str]) -> None:
+        self.colors = colors
+        self.setStyleSheet(
+            f"QWidget#Drawer {{ background: {colors['surface']};"
+            f"border-left: 1px solid {colors['border']}; }}"
+        )
+        for card in self.findChildren(Card):
+            card.set_theme(colors)
+        self.bookmark_button.set_icon_color(colors["ink_3"])
+        self.reveal_pdf_button.set_icon_color(colors["ink_2"])
+        if self.record is not None:
+            self.set_record(self.record)
+
+
+class ExportDialog(QDialog):
+    """انتخاب ستون‌ها و دامنهٔ خروجی اکسل."""
+
+    def __init__(self, column_titles: Sequence[str], visible_count: int,
+                 selected_count: int, total_count: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("خروجی اکسل")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(600)
+        self.setLayoutDirection(Qt.RightToLeft)
+        colors = THEMES["light"]
+        app = QApplication.instance()
+        if app is not None:
+            colors = THEMES["dark"] if app.property("mehr_theme") == "dark" else THEMES["light"]
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        header.addWidget(IconTile("download", colors["brand"], colors["brand_soft"], size=46))
+        text_box = QVBoxLayout()
+        text_box.setSpacing(1)
+        title = QLabel("خروجی سفارشی اکسل")
+        title.setObjectName("SectionTitle")
+        subtitle = QLabel("دامنهٔ داده و ستون‌های خروجی را انتخاب کنید.")
+        subtitle.setObjectName("Muted")
+        text_box.addWidget(title)
+        text_box.addWidget(subtitle)
+        header.addLayout(text_box, 1)
+        layout.addLayout(header)
+
+        scope_label = QLabel("دامنهٔ داده")
+        scope_label.setObjectName("CardTitle")
+        layout.addWidget(scope_label)
+        self.scope_tabs = PillTabs([
+            ("visible", f"ردیف‌های فیلترشده ({fa(visible_count)})"),
+            ("selected", f"انتخاب‌شده ({fa(selected_count)})"),
+            ("all", f"همه ({fa(total_count)})"),
+        ], colors)
+        if not selected_count:
+            self.scope_tabs._buttons["selected"].setEnabled(False)
+        self.scope_tabs.changed.connect(lambda _key: self._update_summary())
+        layout.addWidget(self.scope_tabs)
+
+        columns_label = QLabel("ستون‌ها")
+        columns_label.setObjectName("CardTitle")
+        layout.addWidget(columns_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        holder = QFrame()
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(12, 12, 12, 12)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+        self.checks: List[CheckBox] = []
+        for index, name in enumerate(column_titles):
+            check = CheckBox(name)
+            check.setChecked(True)
+            check.set_theme_colors(colors)
+            check.stateChanged.connect(lambda _state: self._update_summary())
+            self.checks.append(check)
+            grid.addWidget(check, index // 2, index % 2)
+        for column in range(2):
+            grid.setColumnStretch(column, 1)
+        scroll.setWidget(holder)
+        layout.addWidget(scroll, 1)
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        select_all = QPushButton("انتخاب همه")
+        select_all.setObjectName("Ghost")
+        select_all.clicked.connect(lambda: [c.setChecked(True) for c in self.checks])
+        tools.addWidget(select_all)
+        select_none = QPushButton("هیچ‌کدام")
+        select_none.setObjectName("Ghost")
+        select_none.clicked.connect(lambda: [c.setChecked(False) for c in self.checks])
+        tools.addWidget(select_none)
+        tools.addStretch(1)
+        self.summary = QLabel("")
+        self.summary.setObjectName("Muted")
+        tools.addWidget(self.summary)
+        layout.addLayout(tools)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = QPushButton("انصراف")
+        cancel.setObjectName("Ghost")
+        cancel.clicked.connect(self.reject)
+        footer.addWidget(cancel)
+        save = QPushButton("ذخیرهٔ فایل")
+        save.setObjectName("Primary")
+        save.setIcon(make_icon("download", "#FFFFFF", 15))
+        save.clicked.connect(self.accept)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        count = len(self.selected_columns())
+        self.summary.setText(bidi(f"{fa(count)} ستون انتخاب شده"))
+
+    def selected_columns(self) -> List[int]:
+        return [index for index, check in enumerate(self.checks) if check.isChecked()]
+
+    def scope(self) -> str:
+        return self.scope_tabs.current()
+
+    def accept(self) -> None:
+        if not self.selected_columns():
+            QMessageBox.warning(self, "خروجی اکسل", "حداقل یک ستون انتخاب کنید.")
+            return
+        super().accept()
+
+
+class MainWindow(QMainWindow):
+    """پنجرهٔ اصلی برنامه با ریل ناوبری، نوار بالا و صفحه‌های پشته‌ای."""
+
+    def __init__(self, config: AppConfig, notes: NotesStore) -> None:
+        super().__init__()
+        self.config = config
+        self.notes = notes
+        self.data: DashboardData = empty_dashboard()
+        self.loader = None
+        self._current_page = ""
+        self._last_error = ""
+        self.colors: Dict[str, str] = THEMES["light"]
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(make_app_icon())
+        self.setAcceptDrops(True)
+        self.setMinimumSize(1120, 720)
+        self._restore_geometry()
+        self._build_ui()
+        self._create_actions()
+        theme = str(config.get("theme") or "light")
+        self.apply_theme(theme, int(config.get("font_size") or 10))
+        self._setup_auto_timer()
+        QTimer.singleShot(240, self.initial_load)
+
+    # ------------------------------------------------------------------
+    # ساخت رابط
+    # ------------------------------------------------------------------
+    def _build_ui(self) -> None:
+        central = QWidget()
+        central.setObjectName("Central")
+        self.setCentralWidget(central)
+        self.central = central
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+
+        self.rail = Rail(self.colors)
+        self.rail.pageRequested.connect(self.show_page)
+        self.rail.themeRequested.connect(self.toggle_theme)
+        shell.addWidget(self.rail)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        shell.addWidget(right, 1)
+
+        self.topbar = TopBar(self.colors)
+        self.topbar.reloadRequested.connect(self.load_data)
+        self.topbar.themeToggled.connect(self.toggle_theme)
+        self.topbar.menuRequested.connect(self._show_app_menu)
+        self.topbar.searchChanged.connect(self._on_search_text_changed)
+        right_layout.addWidget(self.topbar)
+
+        self.stack = QStackedWidget()
+        right_layout.addWidget(self.stack, 1)
+
+        self.dashboard = DashboardPage(self.colors)
+        self.contracts = ContractsPage(self.notes, self.colors)
+        self.reports = ReportsPage(self.colors)
+        self.pdfs = PdfLibraryPage(self.colors)
+        self.settings = SettingsPage(self.config, self.colors)
+        self.help = HelpPage(self.colors)
+        for page in (self.dashboard, self.contracts, self.reports,
+                     self.pdfs, self.settings, self.help):
+            self.stack.addWidget(page)
+
+        self.search_edit = self.topbar.search_edit
+        self.status_source = QLabel("منبع: —")
+        self.status_counts = QLabel("—")
+        self.status_loaded = QLabel("—")
+        self.statusBar().addWidget(self.status_source, 1)
+        self.statusBar().addPermanentWidget(self.status_counts)
+        self.statusBar().addPermanentWidget(self.status_loaded)
+
+        self.detail = DetailDrawer(self.colors, self.notes, central)
+        self.detail.closed.connect(self._on_drawer_closed)
+        self.detail.notesChanged.connect(self._on_notes_changed)
+        self.detail.pdfRequested.connect(self.open_pdf)
+        self.detail.revealRequested.connect(self.reveal_pdf)
+        self.detail.bookmarkToggled.connect(self._on_bookmark_changed)
+        self.detail.setEnabled(False)
+
+        self.toast = Toast(central)
+
+        # ---- اتصال صفحه‌ها ----
+        self.dashboard.filterRequested.connect(self._on_filter_requested)
+        self.dashboard.recordActivated.connect(self.show_record_detail)
+        self.dashboard.navigateRequested.connect(self.show_page)
+        self.dashboard.reloadRequested.connect(self.load_data)
+        self.dashboard.preview_model = self.contracts.model
+        self.contracts.recordActivated.connect(self.show_record_detail)
+        self.contracts.bookmarkRequested.connect(
+            lambda record: self.toggle_bookmark(record.key)
+        )
+        self.contracts.exportRequested.connect(self.export_table)
+        self.reports.exportExcelRequested.connect(self.export_management)
+        self.reports.printRequested.connect(self.print_report)
+        self.reports.refreshRequested.connect(self.load_data)
+        self.pdfs.openRequested.connect(self.open_pdf)
+        self.pdfs.folderRequested.connect(self.pick_pdf_folder)
+        self.settings.saveRequested.connect(self.save_settings)
+        self.settings.reloadRequested.connect(self.load_data)
+        self.settings.openDataFolderRequested.connect(self._open_data_folder)
+
+        self.show_page("dashboard")
+        self.detail.place()
+
+    def _create_actions(self) -> None:
+        self.shortcuts = []
+        for sequence, slot in (
+            ("Ctrl+R", self.load_data),
+            ("Ctrl+F", self.focus_search),
+            ("Ctrl+E", self.export_table),
+            ("Ctrl+D", self.toggle_theme),
+            ("Ctrl+I", self._toggle_detail_dock),
+            ("F1", lambda: self.show_page("help")),
+            ("Esc", self._on_escape),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(slot)
+            self.shortcuts.append(shortcut)
+
+        menu = self.menuBar()
+        menu.setVisible(False)
+
+    def _show_app_menu(self) -> None:
+        menu = QMenu(self)
+        for key in ("dashboard", "contracts", "reports", "pdfs", "settings", "help"):
+            action = menu.addAction(PAGE_TITLES[key])
+            action.triggered.connect(lambda _checked=False, k=key: self.show_page(k))
+        menu.addSeparator()
+        for label, slot in (
+            ("بازخوانی اکسل", self.load_data),
+            ("تغییر پوسته", self.toggle_theme),
+            ("انتخاب فایل اکسل", self.pick_excel_file),
+            ("تنظیمات", lambda: self.show_page("settings")),
+            ("دربارهٔ برنامه", self.show_about),
+            ("خروج", self.close),
+        ):
+            action = menu.addAction(label)
+            action.triggered.connect(slot)
+        menu.exec_(self.topbar.menu_button.mapToGlobal(
+            self.topbar.menu_button.rect().bottomLeft()))
+
+    # ------------------------------------------------------------------
+    # ناوبری
+    # ------------------------------------------------------------------
+    def show_page(self, key: str) -> None:
+        pages = {
+            "dashboard": self.dashboard,
+            "contracts": self.contracts,
+            "reports": self.reports,
+            "pdfs": self.pdfs,
+            "settings": self.settings,
+            "help": self.help,
+        }
+        page = pages.get(key)
+        if page is None:
+            return
+        self.rail.set_active(key)
+        self.topbar.set_page(key)
+        self.stack.setCurrentWidget(page)
+        self._current_page = key
+        if key == "reports":
+            self.reports.update_data(self.data)
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def _on_escape(self) -> None:
+        if self.detail.isVisible():
+            self.detail.close_drawer()
+            return
+        if self._current_page == "contracts":
+            self.show_page("dashboard")
+
+    def _toggle_detail_dock(self) -> None:
+        if self.detail.isVisible():
+            self.detail.close_drawer()
+        elif self.contracts.table.currentIndex().isValid():
+            self.show_record_detail(
+                self.contracts.record_at(self.contracts.table.currentIndex().row())
+            )
+
+    def _on_drawer_closed(self) -> None:
+        try:
+            self.contracts.table.setFocus()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # بارگذاری داده
+    # ------------------------------------------------------------------
+    def initial_load(self) -> None:
+        excel = str(self.config.get("excel_path") or "")
+        if not excel or not os.path.exists(excel):
+            found = find_default_excel(self.config)
+            if found:
+                self.config.set("excel_path", found, save=False)
+                self.config.save()
+                excel = found
+        if not excel or not os.path.exists(excel):
+            self.show_page("settings")
+            self._notify("فایل اکسل پیدا نشد؛ مسیر را در تنظیمات انتخاب کنید", "alert")
+            self.settings.set_status("فایل اکسل پیدا نشد.")
+            return
+        self.load_data(silent=True)
+
+    def load_data(self, *_args, silent: bool = False) -> None:
+        if self._loader_running():
+            return
+        excel = str(self.config.get("excel_path") or "").strip()
+        if not excel:
+            self.show_page("settings")
+            return
+        if not os.path.exists(excel):
+            self._on_load_failed(f"فایل اکسل پیدا نشد:\n{excel}", silent)
+            return
+        sheet = str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
+        pdf_folder = str(self.config.get("pdf_folder") or "")
+        self._set_loading(True)
+        loader = ExcelLoader(excel, sheet, pdf_folder, self)
+        loader.loaded.connect(lambda data, silent=silent: self._on_data_loaded(data, silent))
+        loader.failed.connect(lambda message, silent=silent: self._on_load_failed(message, silent))
+        loader.finished.connect(self._on_loader_finished)
+        self.loader = loader
+        loader.start()
+
+    def _loader_running(self) -> bool:
+        loader = self.loader
+        if loader is None:
+            return False
+        try:
+            return bool(loader.isRunning())
+        except RuntimeError:
+            self.loader = None
+            return False
+
+    def _set_loading(self, loading: bool) -> None:
+        self.topbar.reload_button.setEnabled(not loading)
+        if loading:
+            self.statusBar().showMessage("در حال خواندن فایل اکسل…", 0)
+
+    def _on_loader_finished(self) -> None:
+        self._set_loading(False)
+        self.topbar.reload_button.setEnabled(True)
+        self.loader = None
+
+    def _on_data_loaded(self, data: DashboardData, silent: bool = False) -> None:
+        self.data = data
+        self.dashboard.set_data(data)
+        self.contracts.set_data(data)
+        self.reports.update_data(data)
+        self.pdfs.set_folder(data.pdf_folder)
+        self.settings.load_values(self.config)
+        self.settings.set_loaded(data.loaded_at_text, data.total_contracts)
+        self.settings.update_data(data)
+        self.detail.setEnabled(bool(data.records))
+        self.status_source.setText(bidi(f"منبع: \u202a{data.excel_path}\u202c"))
+        self.status_counts.setText(bidi(f"{fa(data.total_contracts)} قرارداد"))
+        self.status_loaded.setText(f"بارگذاری: {data.loaded_at_text}")
+        self.statusBar().showMessage(
+            f"داده‌ها با موفقیت بارگذاری شد — {fa(data.total_contracts)} قرارداد"
+            + (f" | {len(data.warnings)} هشدار" if data.warnings else ""),
+            6000,
+        )
+        if not silent:
+            self._notify(f"{fa(data.total_contracts)} قرارداد بارگذاری شد", "check")
+        self._setup_auto_timer()
+        if not silent and data.warnings:
+            QMessageBox.warning(self, "هشدار داده‌ها", "\n".join(data.warnings))
+
+    def _on_load_failed(self, message: str, silent: bool = False) -> None:
+        self._last_error = message
+        self.statusBar().showMessage("بارگذاری داده‌ها ناموفق بود.", 8000)
+        self._notify("بارگذاری داده‌ها ناموفق بود", "alert")
+        if not self.data.records:
+            empty = empty_dashboard(message.splitlines()[0] if message else "خطا در بارگذاری")
+            self.dashboard.set_data(empty)
+            self.reports.update_data(empty)
+        if silent:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("خطا در خواندن داده‌ها")
+        box.setIcon(QMessageBox.Critical)
+        box.setText("خواندن فایل اکسل ممکن نشد.")
+        box.setInformativeText(message)
+        pick_button = box.addButton("انتخاب فایل اکسل", QMessageBox.AcceptRole)
+        settings_button = box.addButton("تنظیمات", QMessageBox.ActionRole)
+        box.addButton("بستن", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is pick_button:
+            self.pick_excel_file()
+        elif clicked is settings_button:
+            self.show_page("settings")
+
+    def _setup_auto_timer(self) -> None:
+        if not hasattr(self, "auto_timer"):
+            self.auto_timer = QTimer(self)
+            self.auto_timer.timeout.connect(self._auto_refresh)
+        minutes = int(self.config.get("auto_refresh_minutes") or 0)
+        self.auto_timer.stop()
+        if minutes > 0:
+            self.auto_timer.start(minutes * 60 * 1000)
+
+    def _auto_refresh(self) -> None:
+        path = self.data.excel_path or str(self.config.get("excel_path") or "")
+        if not path or not os.path.exists(path):
+            return
+        if self._loader_running():
+            return
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+        except OSError:
+            return
+        if self.data.source_mtime is None or mtime > self.data.source_mtime:
+            self.statusBar().showMessage("تغییر فایل اکسل شناسایی شد؛ بازخوانی…", 4000)
+            self.load_data(silent=True)
+
+    def pick_excel_file(self) -> None:
+        start = (str(self.config.get("excel_path") or "") or str(app_dir()))
+        if os.path.isfile(start):
+            start = os.path.dirname(start)
+        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
+        if not path:
+            return
+        self.config.set("excel_path", path)
+        pdf_folder = str(self.config.get("pdf_folder") or "")
+        if not pdf_folder:
+            guess = default_pdf_folder(path, self.config)
+            if guess:
+                self.config.set("pdf_folder", guess, save=False)
+                self.config.save()
+        self.settings.load_values(self.config)
+        self.load_data()
+
+    def pick_pdf_folder(self) -> None:
+        start = str(self.settings.pdf_edit.text() or app_dir())
+        folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
+        if folder:
+            self.settings.pdf_edit.setText(folder)
+            self.config.set("pdf_folder", folder)
+            self.load_data()
+
+    def save_settings(self, values: Dict[str, Any]) -> None:
+        for key, value in values.items():
+            self.config.set(key, value, save=False)
+        self.config.save()
+        theme = str(values.get("theme") or "light")
+        font_size = int(values.get("font_size") or 10)
+        self.apply_theme(theme, font_size, persist=False)
+        self.settings.set_status(f"ذخیره شد — {jalali_datetime(datetime.now())}")
+        self._setup_auto_timer()
+        self.statusBar().showMessage("تنظیمات ذخیره شد.", 4000)
+        self._notify("تنظیمات ذخیره شد", "check")
+        self.load_data()
+
+    # ------------------------------------------------------------------
+    # جستجو و فیلتر
+    # ------------------------------------------------------------------
+    def _on_search_text_changed(self, text: str) -> None:
+        if not hasattr(self, "search_timer"):
+            self.search_timer = QTimer(self)
+            self.search_timer.setSingleShot(True)
+            self.search_timer.timeout.connect(self.apply_view)
+        self.search_timer.start(220)
+        if self.contracts.search_edit.text() != text:
+            self.contracts.search_edit.blockSignals(True)
+            self.contracts.search_edit.setText(text)
+            self.contracts.search_edit.blockSignals(False)
+        if text.strip() and self._current_page != "contracts":
+            self.show_page("contracts")
+
+    def _on_filter_requested(self, key: str) -> None:
+        self.contracts.set_filter(key)
+        search = self.topbar.search_edit.text().strip()
+        if search:
+            self.contracts.set_search(search)
+        self.show_page("contracts")
+
+    def apply_view(self, filter_key: Optional[str] = None) -> None:
+        search = self.topbar.search_edit.text().strip()
+        key = filter_key if filter_key is not None else self.contracts.current_filter()
+        self.contracts.set_search(search)
+        self.contracts.model.apply_view(search, key, key == "bookmarked")
+        self.contracts._refresh_counts()
+
+    def on_card_clicked(self, filter_key: str) -> None:
+        mapping = {"all": "all", "progress": "all", "deductions": "deductions", "pdf": "pdf"}
+        key = mapping.get(filter_key or "all", "all")
+        self.contracts.set_filter(key)
+        self.apply_view(filter_key=key)
+        self.show_page("contracts")
+        if filter_key == "progress":
+            self._notify("برای دیدن جزئیات پیشرفت، از فیلترهای جدول استفاده کنید", "info")
+
+    def on_slice_clicked(self, field: str, label: str) -> None:
+        key = f"{field}:{label}"
+        self.contracts.set_filter(key)
+        self.show_page("contracts")
+
+    # ------------------------------------------------------------------
+    # جزئیات، یادداشت و PDF
+    # ------------------------------------------------------------------
+    def show_record_detail(self, record: Optional[ContractRecord]) -> None:
+        if record is None:
+            return
+        self.detail.record = None
+        self.detail.set_record(record)
+        self.detail.open_drawer()
+
+    def _on_notes_changed(self, key: str) -> None:
+        self.contracts.refresh_bookmarks()
+        self.config.set("last_author", self.detail.author_edit.text().strip(), save=False)
+        self.config.save()
+        self.statusBar().showMessage("یادداشت ذخیره شد.", 3000)
+        self._notify("یادداشت ذخیره شد", "check")
+
+    def _on_bookmark_changed(self, key: str) -> None:
+        self.contracts.refresh_bookmarks()
+        flagged = self.notes.is_bookmarked(key)
+        self.statusBar().showMessage(
+            "قرارداد نشان‌گذاری شد." if flagged else "نشان قرارداد برداشته شد.", 3000
+        )
+
+    def toggle_bookmark(self, key: str) -> None:
+        if not key:
+            return
+        flagged = self.notes.toggle_bookmark(key)
+        self.contracts.refresh_bookmarks()
+        record = self.data.find(key)
+        if record and self.detail.record is not None and self.detail.record.key == key:
+            self.detail.set_record(record)
+        self.statusBar().showMessage(
+            "قرارداد نشان‌گذاری شد." if flagged else "نشان قرارداد برداشته شد.", 3000
+        )
+
+    def _pdf_path(self, filename: str) -> str:
+        folder = self.data.pdf_folder or str(self.config.get("pdf_folder") or "")
+        if not folder:
+            return ""
+        return os.path.join(folder, filename)
+
+    def open_pdf(self, filename: str) -> None:
+        if not filename:
+            return
+        path = self._pdf_path(filename)
+        if not path or not os.path.exists(path):
+            QMessageBox.information(
+                self, "فایل PDF",
+                "فایل پیدا نشد.\nمسیر پوشهٔ PDF را در تنظیمات بررسی کنید.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def reveal_pdf(self, filename: str) -> None:
+        if not filename:
+            return
+        path = self._pdf_path(filename)
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "فایل PDF", "فایل پیدا نشد.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+
+    def copy_text(self, text: str) -> None:
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage("در کلیپ‌بورد کپی شد.", 2500)
+
+    # ------------------------------------------------------------------
+    # خروجی‌ها
+    # ------------------------------------------------------------------
+    def export_table(self) -> None:
+        if not self.data.records:
+            QMessageBox.information(self, "خروجی اکسل", "هنوز داده‌ای بارگذاری نشده است.")
+            return
+        visible = self.contracts.visible_records()
+        selected = self.contracts.selected_records()
+        dialog = ExportDialog(EXPORT_COLUMN_TITLES,
+                              len(visible), len(selected), len(self.data.records), self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        scope = dialog.scope()
+        if scope == "all":
+            records = self.data.records
+        elif scope == "selected":
+            records = selected
+        else:
+            records = visible
+        if not records:
+            QMessageBox.information(self, "خروجی اکسل", "ردیفی برای خروجی وجود ندارد.")
+            return
+        default_name = f"قراردادها-{jalali_filename_stamp()}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "ذخیرهٔ خروجی اکسل",
+                                              str(app_dir() / default_name), "فایل اکسل (*.xlsx)")
+        if not path:
+            return
+        try:
+            count = write_contracts_workbook(path, records, dialog.selected_columns())
+        except Exception as exc:
+            QMessageBox.critical(self, "خطا در خروجی", f"نوشتن فایل ممکن نشد:\n{exc}")
+            return
+        self._offer_open(path, f"{fa(count)} ردیف در فایل اکسل ذخیره شد.")
+
+    def export_management(self) -> None:
+        if not self.data.records:
+            QMessageBox.information(self, "گزارش مدیریتی", "هنوز داده‌ای بارگذاری نشده است.")
+            return
+        default_name = f"گزارش-مدیریتی-مهر-{jalali_filename_stamp()}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(self, "ذخیرهٔ گزارش مدیریتی",
+                                              str(app_dir() / default_name), "فایل اکسل (*.xlsx)")
+        if not path:
+            return
+        try:
+            write_management_report(path, self.data)
+        except Exception as exc:
+            QMessageBox.critical(self, "خطا در گزارش", f"نوشتن فایل ممکن نشد:\n{exc}")
+            return
+        self._offer_open(path, "گزارش مدیریتی با سه شیت ذخیره شد.")
+
+    def _offer_open(self, path: str, message: str) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("انجام شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText(message)
+        box.setInformativeText(path)
+        open_button = box.addButton("باز کردن فایل", QMessageBox.AcceptRole)
+        box.addButton("بستن", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def print_report(self) -> None:
+        if not self.data.records:
+            QMessageBox.information(self, "چاپ گزارش", "هنوز داده‌ای بارگذاری نشده است.")
+            return
+        if QPrinter is None or QPrintDialog is None:
+            QMessageBox.warning(self, "چاپ", "پشتیبانی چاپ در این سیستم نصب نیست.")
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageSize(QPrinter.A4)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("چاپ / ذخیرهٔ PDF گزارش مدیریتی")
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        from PyQt5.QtGui import QTextDocument
+        document = QTextDocument()
+        option = document.defaultTextOption()
+        option.setTextDirection(Qt.RightToLeft)
+        document.setDefaultTextOption(option)
+        document.setHtml(self.reports.html())
+        document.print_(printer)
+        self.statusBar().showMessage("گزارش به چاپ ارسال شد.", 4000)
+
+    def _open_data_folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
+
+    # ------------------------------------------------------------------
+    # پوسته
+    # ------------------------------------------------------------------
+    def apply_theme(self, theme: str, font_size: int = 10, persist: bool = True) -> None:
+        app = QApplication.instance()
+        self.colors = apply_theme(app, theme, font_size)
+        app.setProperty("mehr_theme", theme)
+        if persist:
+            self.config.set("theme", theme, save=False)
+            self.config.set("font_size", font_size, save=False)
+            self.config.save()
+        for widget in (self.dashboard, self.contracts, self.reports,
+                       self.pdfs, self.settings, self.help):
+            if hasattr(widget, "set_theme_colors"):
+                widget.set_theme_colors(self.colors)
+        self.rail.set_theme(self.colors)
+        self.rail.set_dark(theme == "dark")
+        self.topbar.set_theme(self.colors)
+        self.topbar.set_dark(theme == "dark")
+        self.detail.set_theme_colors(self.colors)
+        for combo in self.findChildren(Combo):
+            combo.set_theme_colors(self.colors)
+        for check in self.findChildren(CheckBox):
+            check.set_theme_colors(self.colors)
+        self.toast.colors = self.colors
+        self.statusBar().setStyleSheet(
+            f"QStatusBar {{ background: {self.colors['surface']};"
+            f" border-top: 1px solid {self.colors['border_soft']}; }}"
+        )
+        self.central.setStyleSheet(f"QWidget#Central {{ background: {self.colors['bg']}; }}")
+
+    def toggle_theme(self) -> None:
+        current = str(self.config.get("theme") or "light")
+        new_theme = "dark" if current == "light" else "light"
+        self.apply_theme(new_theme, int(self.config.get("font_size") or 10))
+        self.config.set("theme", new_theme)
+        self.settings.load_values(self.config)
+        self._notify("پوستهٔ روشن" if new_theme == "light" else "پوستهٔ تیره", "sun")
+
+    def show_about(self) -> None:
+        QMessageBox.about(
+            self, "دربارهٔ برنامه",
+            f"<div dir='rtl' style='font-family: Tahoma;'>"
+            f"<h3>{APP_NAME}</h3>"
+            f"<p>نسخهٔ {APP_VERSION} — برنامهٔ دسکتاپ تک‌فایلی بر پایهٔ PyQt5</p>"
+            f"<p>داده‌ها مستقیماً از فایل اکسل (شیت colorcode) خوانده می‌شوند و "
+            f"به Flask، مرورگر یا فایل HTML نیازی نیست.</p>"
+            f"<p style='color:#66756f;'>مسیر تنظیمات: {self.config.path}</p>"
+            f"</div>",
+        )
+
+    def _notify(self, text: str, icon: str = "check") -> None:
+        try:
+            self.toast.show_message(text, icon, self.colors)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # رخدادهای پنجره
+    # ------------------------------------------------------------------
+    def _restore_geometry(self) -> None:
+        stored = str(self.config.get("window_geometry") or "")
+        if stored:
+            try:
+                if self.restoreGeometry(QByteArray.fromBase64(stored.encode("ascii"))):
+                    return
+            except Exception:
+                pass
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geometry = screen.availableGeometry()
+            width = min(1480, int(geometry.width() * 0.92))
+            height = min(940, int(geometry.height() * 0.92))
+            self.resize(width, height)
+            self.move(geometry.center().x() - width // 2, geometry.center().y() - height // 2)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "detail"):
+            self.detail.place()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith((".xlsx", ".xlsm", ".xls")):
+                    event.acceptProposedAction()
+                    return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith((".xlsx", ".xlsm", ".xls")):
+                self.config.set("excel_path", path)
+                self.settings.load_values(self.config)
+                self.load_data()
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        try:
+            self.config.set("window_geometry",
+                            bytes(self.saveGeometry().toBase64()).decode("ascii"), save=False)
+            self.config.set("last_author", self.detail.author_edit.text().strip(), save=False)
+            self.config.save()
+            self.notes.save()
+        except Exception:
+            pass
+        loader = self.loader
+        if loader is not None:
+            try:
+                if loader.isRunning():
+                    loader.requestInterruption()
+                    if not loader.wait(4000):
+                        loader.terminate()
+                        loader.wait(1000)
+            except RuntimeError:
+                pass
+            self.loader = None
+        super().closeEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# اجرای برنامه
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
         sys.exit(main())
