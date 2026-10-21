@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.spec
+mehr_qt_config.json
+mehr_notes.json
+*.xlsx
+*.xlsm
+*.pdf
