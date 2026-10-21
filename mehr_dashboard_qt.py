@@ -2743,7 +2743,10 @@ class BarChart(QWidget):
         self.update()
 
     def _row_height(self) -> int:
-        return int(max(24, min(40, (self.height() - 12) / max(1, len(self.items)))))
+        if not self.items:
+            return 24
+        available = max(80, self.height() - 10)
+        return int(max(13, min(34, available / len(self.items))))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -2766,7 +2769,7 @@ class BarChart(QWidget):
         track_right = self.width() - label_width - 12
         track_left = value_width + 12
         track_width = max(40, track_right - track_left)
-        top = (self.height() - row_height * len(self.items)) / 2 + 2
+        top = max(2.0, (self.height() - row_height * len(self.items)) / 2)
 
         for index, item in enumerate(self.items):
             y = top + index * row_height
@@ -2808,7 +2811,7 @@ class BarChart(QWidget):
         if not self.items:
             return -1
         row_height = self._row_height()
-        top = (self.height() - row_height * len(self.items)) / 2 + 2
+        top = max(2.0, (self.height() - row_height * len(self.items)) / 2)
         row = int((y - top) // row_height)
         return row if 0 <= row < len(self.items) else -1
 
@@ -3092,7 +3095,16 @@ class ContractTableModel(QAbstractTableModel):
             if field == "status":
                 return record.as_status == value
             def same(raw: str) -> bool:
-                return bool(raw) and (raw == value or pretty_label(raw) == value)
+                if not raw:
+                    return False
+                if raw == value:
+                    return True
+                pretty = pretty_label(raw)
+                if pretty == value:
+                    return True
+                compact_a = pretty.replace(" درصد", "٪")
+                compact_b = str(value).replace(" درصد", "٪")
+                return compact_a == compact_b
 
             if field == "progress":
                 return same(record.progress_status)
@@ -3952,6 +3964,64 @@ class StatTile(Card):
         super().mouseReleaseEvent(event)
 
 
+FLAG_ICONS = {
+    "temporary": "truck",
+    "prefinal": "report",
+    "balance": "layers",
+    "statement": "note",
+    "mofasa": "shield",
+    "affidavit": "check-plain",
+    "delivery": "check",
+    "financial": "money",
+}
+
+
+class FlagTile(Card):
+    """کارت کوچک و قابل کلیک برای یکی از وضعیت‌های اسناد اختتام."""
+
+    clicked = pyqtSignal(str)
+
+    def __init__(self, key: str, title: str, colors: Dict[str, str], parent=None) -> None:
+        super().__init__(colors, radius=14, padding=11, hoverable=True, parent=parent)
+        self.key = key
+        self.colors = colors
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(84)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.tile = IconTile(FLAG_ICONS.get(key, "check"), colors["brand"],
+                             colors["brand_soft"], size=28, radius=9)
+        top.addWidget(self.tile, 0, Qt.AlignTop)
+        top.addStretch(1)
+        self.value_label = QLabel("—")
+        self.value_label.setStyleSheet("font-size: 14pt; font-weight: 800;")
+        self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        top.addWidget(self.value_label, 0, Qt.AlignTop)
+        self.body.addLayout(top)
+
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("font-size: 7.5pt; font-weight: 600;")
+        self.title_label.setWordWrap(True)
+        self.title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.body.addWidget(self.title_label)
+        self.body.addStretch(1)
+
+    def set_value(self, value: str) -> None:
+        self.value_label.setText(value)
+
+    def set_theme(self, colors: Dict[str, str]) -> None:
+        super().set_theme(colors)
+        self.colors = colors
+        self.tile.set_colors(colors["brand"], colors["brand_soft"])
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit(self.key)
+        super().mouseReleaseEvent(event)
+
+
 class ChartCard(Card):
     """کارت نمودار با سرتیتر، توضیح و ناحیهٔ محتوا."""
 
@@ -4421,7 +4491,7 @@ class AttentionRow(QWidget):
         self.colors = colors
         self.record: Optional[ContractRecord] = None
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(50)
+        self.setFixedHeight(56)
         self._hover = False
         self.setAttribute(Qt.WA_Hover, True)
         layout = QHBoxLayout(self)
@@ -4508,6 +4578,8 @@ class DashboardPage(QWidget):
         self.preview_model = None  # در پنجرهٔ اصلی به مدل جدول وصل می‌شود
         self._tile_layout_state: Optional[bool] = None
         self._chart_layout_state: Optional[bool] = None
+        self._flag_layout_state: Optional[bool] = None
+        self._chart_raw: Dict[str, Dict[str, str]] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -4599,6 +4671,23 @@ class DashboardPage(QWidget):
             self.tiles[key] = tile
         self.body.addLayout(self.tiles_grid)
 
+        # --- کارت‌های وضعیت اسناد اختتام ----------------------------------
+        self.status_card = Card(colors, radius=18, padding=16)
+        self.status_card.body.addWidget(_card_title(
+            "وضعیت اسناد اختتام",
+            "برای دیدن قراردادهای هر وضعیت، روی کارت آن کلیک کنید",
+        ))
+        self.flag_grid = QGridLayout()
+        self.flag_grid.setHorizontalSpacing(10)
+        self.flag_grid.setVerticalSpacing(10)
+        self.flag_tiles: Dict[str, FlagTile] = {}
+        for flag_key, flag_label, _column in FLAG_DEFS:
+            tile = FlagTile(flag_key, flag_label, colors, self.status_card)
+            tile.clicked.connect(self.filterRequested.emit)
+            self.flag_tiles[flag_key] = tile
+        self.status_card.body.addLayout(self.flag_grid)
+        self.body.addWidget(self.status_card)
+
         # --- نمودارها -----------------------------------------------------
         self.charts_grid = QGridLayout()
         self.charts_grid.setHorizontalSpacing(14)
@@ -4607,7 +4696,7 @@ class DashboardPage(QWidget):
         self.progress_card = ChartCard(
             "وضعیت پیشرفت کارکرد",
             "بر اساس ستون‌های کارکرد فایل اکسل — برای فیلتر کلیک کنید",
-            colors, min_height=290,
+            colors, min_height=340,
         )
         self.donut = DonutChart(colors, CHART_COLORS["progress"])
         self.donut.setMinimumSize(180, 180)
@@ -4623,8 +4712,8 @@ class DashboardPage(QWidget):
 
         self.types_card = ChartCard(
             "پرکاربردترین انواع قرارداد",
-            "۱۰ نوع نخست — کلیک روی هر میله جدول را فیلتر می‌کند",
-            colors, min_height=290,
+            "همهٔ انواع قرارداد — کلیک روی هر میله جدول را فیلتر می‌کند",
+            colors, min_height=340,
         )
         self.types_bar = BarChart(colors)
         self.types_bar.barClicked.connect(self._on_type_bar)
@@ -4633,7 +4722,7 @@ class DashboardPage(QWidget):
         self.attention_card = ChartCard(
             "نیازمند پیگیری",
             "قراردادهایی با مورد باز یا الحاقیهٔ منقضی",
-            colors, min_height=250,
+            colors, min_height=430,
         )
         follow_button = QPushButton("همه")
         follow_button.setObjectName("Ghost")
@@ -4663,6 +4752,45 @@ class DashboardPage(QWidget):
         type_row.addWidget(self.type_pie, 1)
         self.type_card.content_layout.addLayout(type_row, 1)
 
+        self.annex_card = ChartCard(
+            "وضعیت الحاقیه",
+            "توزیع زمان الحاقیه — برای فیلتر جدول کلیک کنید",
+            colors, min_height=310,
+        )
+        self.annex_donut = DonutChart(colors, CHART_COLORS["annex"])
+        self.annex_donut.setMinimumSize(150, 150)
+        self.annex_donut.sliceClicked.connect(
+            lambda label: self._emit_chart_filter("annex", label))
+        self.annex_legend = LegendList(colors)
+        self.annex_legend.setMaximumWidth(268)
+        self.annex_legend.max_rows = 8
+        self.annex_legend.itemClicked.connect(
+            lambda label: self._emit_chart_filter("annex", label))
+        annex_row = QHBoxLayout()
+        annex_row.setSpacing(8)
+        annex_row.addWidget(self.annex_legend, 0)
+        annex_row.addWidget(self.annex_donut, 1)
+        self.annex_card.content_layout.addLayout(annex_row, 1)
+
+        self.completion_card = ChartCard(
+            "وضعیت پیشرفت اختتام",
+            "توزیع پیشرفت اختتام — برای فیلتر جدول کلیک کنید",
+            colors, min_height=310,
+        )
+        self.completion_donut = DonutChart(colors, CHART_COLORS["completion"])
+        self.completion_donut.setMinimumSize(150, 150)
+        self.completion_donut.sliceClicked.connect(
+            lambda label: self._emit_chart_filter("completion", label))
+        self.completion_legend = LegendList(colors)
+        self.completion_legend.setMaximumWidth(238)
+        self.completion_legend.itemClicked.connect(
+            lambda label: self._emit_chart_filter("completion", label))
+        completion_row = QHBoxLayout()
+        completion_row.setSpacing(8)
+        completion_row.addWidget(self.completion_legend, 0)
+        completion_row.addWidget(self.completion_donut, 1)
+        self.completion_card.content_layout.addLayout(completion_row, 1)
+
         self.body.addLayout(self.charts_grid, 1)
         self.body.addStretch(1)
         self._place_cards(False)
@@ -4685,30 +4813,40 @@ class DashboardPage(QWidget):
             for column in range(4):
                 self.tiles_grid.setColumnStretch(column, 1 if (not compact or column < 2) else 0)
 
+        if self._flag_layout_state != compact:
+            self._flag_layout_state = compact
+            drain_layout(self.flag_grid)
+            columns = 2 if compact else 4
+            for index, tile in enumerate(self.flag_tiles.values()):
+                tile.setParent(self.status_card)
+                self.flag_grid.addWidget(tile, index // columns, index % columns)
+                tile.show()
+            for column in range(4):
+                self.flag_grid.setColumnStretch(column, 1 if column < columns else 0)
+
         if self._chart_layout_state != compact:
             self._chart_layout_state = compact
             drain_layout(self.charts_grid)
-            self.progress_card.setParent(self)
-            self.types_card.setParent(self)
-            self.attention_card.setParent(self)
-            self.type_card.setParent(self)
+            cards = (self.progress_card, self.types_card, self.annex_card,
+                     self.completion_card, self.attention_card, self.type_card)
+            for card in cards:
+                card.setParent(self)
             if compact:
-                self.charts_grid.addWidget(self.progress_card, 0, 0)
-                self.charts_grid.addWidget(self.types_card, 1, 0)
-                self.charts_grid.addWidget(self.attention_card, 2, 0)
-                self.charts_grid.addWidget(self.type_card, 3, 0)
+                for index, card in enumerate(cards):
+                    self.charts_grid.addWidget(card, index, 0)
                 self.charts_grid.setColumnStretch(0, 1)
                 self.charts_grid.setColumnStretch(1, 0)
             else:
                 self.charts_grid.addWidget(self.progress_card, 0, 0)
                 self.charts_grid.addWidget(self.types_card, 0, 1)
-                self.charts_grid.addWidget(self.attention_card, 1, 0)
-                self.charts_grid.addWidget(self.type_card, 1, 1)
+                self.charts_grid.addWidget(self.annex_card, 1, 0)
+                self.charts_grid.addWidget(self.completion_card, 1, 1)
+                self.charts_grid.addWidget(self.attention_card, 2, 0)
+                self.charts_grid.addWidget(self.type_card, 2, 1)
                 self.charts_grid.setColumnStretch(0, 3)
                 self.charts_grid.setColumnStretch(1, 2)
-            for widget in (self.progress_card, self.types_card,
-                           self.attention_card, self.type_card):
-                widget.show()
+            for card in cards:
+                card.show()
 
     # ---- داده ----
     def set_data(self, data: DashboardData) -> None:
@@ -4751,11 +4889,27 @@ class DashboardPage(QWidget):
         )
 
         progress = data.dist("progress")
-        progress_labels = [pretty_label(label).replace(" درصد", "٪")
-                           for label in progress.labels]
+        progress_labels = self._display_labels("progress", progress)
         self.donut.set_data(progress_labels, progress.values,
                             "پیشرفت کارکرد", CHART_COLORS["progress"])
         self.legend.set_data(progress_labels, progress.values, CHART_COLORS["progress"])
+
+        annex = data.dist("annex")
+        annex_labels = self._display_labels("annex", annex)
+        self.annex_donut.set_data(annex_labels, annex.values,
+                                  "الحاقیه", CHART_COLORS["annex"])
+        self.annex_legend.set_data(annex_labels, annex.values, CHART_COLORS["annex"])
+
+        completion = data.dist("completion")
+        completion_labels = self._display_labels("completion", completion)
+        self.completion_donut.set_data(completion_labels, completion.values,
+                                       "اختتام", CHART_COLORS["completion"])
+        self.completion_legend.set_data(completion_labels, completion.values,
+                                        CHART_COLORS["completion"])
+
+        flag_counts = data.flag_counts
+        for flag_key, tile in self.flag_tiles.items():
+            tile.set_value(fa(flag_counts.get(flag_key, 0)))
         self.types_bar.set_data(data.top_types)
 
         self.type_pie.set_data([pretty_label(label) for label in types_dist.labels],
@@ -4782,8 +4936,24 @@ class DashboardPage(QWidget):
             self.attention_box.addWidget(row)
 
     # ---- تعامل ----
+    def _display_labels(self, name: str, distribution: Distribution) -> List[str]:
+        mapping: Dict[str, str] = {}
+        labels: List[str] = []
+        for raw in distribution.labels:
+            text = pretty_label(raw)
+            if name == "progress":
+                text = text.replace(" درصد", "٪")
+            mapping[text] = raw
+            labels.append(text)
+        self._chart_raw[name] = mapping
+        return labels
+
+    def _emit_chart_filter(self, name: str, label: str) -> None:
+        raw = self._chart_raw.get(name, {}).get(label, label)
+        self.filterRequested.emit(f"{name}:{raw}")
+
     def _on_progress_slice(self, label: str) -> None:
-        self.filterRequested.emit(f"progress:{label}")
+        self._emit_chart_filter("progress", label)
 
     def _on_type_slice(self, label: str) -> None:
         self.filterRequested.emit(f"type:{label}")
@@ -4801,8 +4971,14 @@ class DashboardPage(QWidget):
         self.gauge.set_theme(colors)
         self.donut.set_theme(colors, CHART_COLORS["progress"])
         self.type_pie.set_theme(colors, CHART_COLORS["type"])
+        self.annex_donut.set_theme(colors, CHART_COLORS["annex"])
+        self.completion_donut.set_theme(colors, CHART_COLORS["completion"])
         self.legend.set_theme(colors, CHART_COLORS["progress"])
         self.type_legend.set_theme(colors, CHART_COLORS["type"])
+        self.annex_legend.set_theme(colors, CHART_COLORS["annex"])
+        self.completion_legend.set_theme(colors, CHART_COLORS["completion"])
+        for tile in self.flag_tiles.values():
+            tile.set_theme(colors)
         self.types_bar.set_theme(colors)
         self.banner.set_theme(colors)
         for tile in self.tiles.values():
@@ -4986,11 +5162,41 @@ class ContractsPage(QWidget):
         self.table.setCurrentIndex(QModelIndex())
         self._refresh_counts()
 
+    def _filter_description(self) -> str:
+        key = self._active_key()
+        if key in ("", "all", None):
+            return ""
+        simple = {
+            "deductions": "دارای کسورات اسناد اختتام",
+            "expired": "الحاقیهٔ منقضی‌شده",
+            "needs_follow": "نیازمند پیگیری",
+            "bookmarked": "فقط نشان‌شده‌ها",
+        }
+        if key in simple:
+            return simple[key]
+        if ":" in key:
+            field, _, value = key.partition(":")
+            titles = {
+                "type": "نوع قرارداد",
+                "status": "وضعیت پکیج",
+                "progress": "پیشرفت کارکرد",
+                "completion": "پیشرفت اختتام",
+                "annex": "الحاقیه",
+            }
+            if field in ("progress", "completion", "annex"):
+                value = pretty_label(value)
+            return f"{titles.get(field, field)}: {value}"
+        return FLAG_LABELS.get(key, key)
+
     def _refresh_counts(self) -> None:
         visible = self.model.visible_count()
         total = self.model.source_count()
         extra = f" از {fa(total)}" if visible != total else ""
-        self.footer_label.setText(bidi(f"{fa(visible)}{extra} قرارداد"))
+        text = f"{fa(visible)}{extra} قرارداد"
+        description = self._filter_description()
+        if description:
+            text += f" — فیلتر: {description}"
+        self.footer_label.setText(bidi(text))
 
     def set_filter(self, key: str) -> None:
         self._extra_filter = ""
@@ -5019,6 +5225,13 @@ class ContractsPage(QWidget):
                 self.status_combo.setCurrentIndex(max(0, index))
                 self.status_combo.blockSignals(False)
         else:
+            for combo in (self.type_combo, self.status_combo):
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+            self.bookmark_check.blockSignals(True)
+            self.bookmark_check.setChecked(False)
+            self.bookmark_check.blockSignals(False)
             self.pills.set_current("all")
             self._extra_filter = key
         self._apply_view()
