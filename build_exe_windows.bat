@@ -8,7 +8,7 @@ setlocal
 
 echo [1/3] نصب پیش‌نیازها ...
 python -m pip install --upgrade pip >nul
-python -m pip install PyQt5 openpyxl pyinstaller || goto :error
+python -m pip install PyQt5 openpyxl mysql-connector-python pyinstaller || goto :error
 
 echo [2/3] پاک‌سازی خروجی قبلی ...
 if exist build rmdir /s /q build
@@ -16,7 +16,6 @@ if exist dist rmdir /s /q dist
 
 echo [3/3] ساخت فایل تک‌فایلی ...
 set EXTRA=
-if exist "F.O.C(Mehr).xlsx" set EXTRA=--add-data "F.O.C(Mehr).xlsx;."
 
 python -m PyInstaller ^
   --noconfirm ^
@@ -27,6 +26,9 @@ python -m PyInstaller ^
   --hidden-import openpyxl ^
   --hidden-import openpyxl.styles ^
   --hidden-import openpyxl.utils ^
+  --hidden-import mysql.connector ^
+  --hidden-import mysql.connector.plugins ^
+  --collect-submodules mysql.connector ^
   mehr_dashboard_qt.py || goto :error
 
 echo.

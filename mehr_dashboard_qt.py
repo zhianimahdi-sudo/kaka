@@ -7,8 +7,9 @@
 این برنامه تبدیل نسخهٔ Flask/dashboard.html به یک برنامهٔ دسکتاپ تک‌فایلی است:
 
 * دیگر به Flask، مرورگر، dashboard.html یا فایل mehr_optimized.py نیاز ندارد.
-* داده‌ها مستقیماً از همان فایل اکسل قبلی خوانده می‌شوند
-  (شیت colorcode و همان شماره‌ستون‌های نسخهٔ وب) تا هیچ محاسبه‌ای تغییر نکند.
+* داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شوند: کتاب کار اکسل با شناسهٔ
+  مشخص (پیش‌فرض ۱) که در جدول‌های excel_workbooks / excel_original_files
+  ذخیره شده است؛ دیگر هیچ فایل اکسل محلی لازم نیست.
 * نمودارها، فیلترها، جستجو، جزئیات قرارداد، یادداشت‌ها، خروجی اکسل، گزارش
   مدیریتی و اتصال فایل PDF همه درون همین فایل پیاده‌سازی شده‌اند.
 
@@ -16,17 +17,21 @@
     python mehr_dashboard_qt.py
 
 پیش‌نیازها:
-    pip install PyQt5 openpyxl
+    pip install PyQt5 openpyxl mysql-connector-python
 
 گزینه‌های خط فرمان:
-    --excel PATH     مسیر فایل اکسل (بر موقت بر تنظیمات ذخیره‌شده اولویت دارد)
-    --check          فقط صحت خواندن اکسل و آمار را بررسی کن (بدون باز کردن پنجره)
+    --db-host / --db-port / --db-name / --db-user / --db-password
+    --workbook-id    شناسهٔ کتاب کار در دیتابیس (پیش‌فرض ۱)
+    --check          فقط اتصال به دیتابیس و آمار را بررسی کن (بدون باز کردن پنجره)
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import ctypes
 import html as html_module
+import io
 import json
 import math
 import os
@@ -121,6 +126,10 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit(1)
 
 try:
+    import mysql.connector as mysql_connector
+except Exception:  # pragma: no cover - نصب اختیاری
+    mysql_connector = None
+try:
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font as XLFont, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -149,7 +158,6 @@ ORIGINAL_PDF_FOLDER = (
     r"\ژیانی\کندو\PDF-MEHR"
 )
 
-EXCEL_FILTER = "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*.*)"
 PDF_FILTER = "همهٔ فایل‌ها (*.*)"
 
 # هشت وضعیت پیگیری که در ستون‌های مشخصی از اکسل با حرف M علامت خورده‌اند
@@ -480,12 +488,138 @@ def data_dir() -> Path:
     return _DATA_DIR_CACHE
 
 
+class SecretStore:
+    """نگهداری رمز دیتابیس به‌صورت رمزنگاری‌شده (DPAPI در ویندوز)."""
+
+    FILENAME = "mehr_db_secret.bin"
+    _KEY = b"mehr-dashboard-db-secret-v1"
+
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = Path(path) if path else (data_dir() / self.FILENAME)
+
+    @staticmethod
+    def _dpapi(data: bytes, protect: bool) -> bytes:
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", ctypes.c_uint32),
+                        ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        buffer = ctypes.create_string_buffer(data)
+        blob_in = DATA_BLOB(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+        blob_out = DATA_BLOB()
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+        ok = fn(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out))
+        if not ok:
+            raise OSError("DPAPI operation failed")
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+
+    def _mask(self, data: bytes) -> bytes:
+        key = self._KEY
+        return bytes(byte ^ key[index % len(key)] for index, byte in enumerate(data))
+
+    def save(self, password: str) -> None:
+        if not password:
+            self.clear()
+            return
+        raw = password.encode("utf-8")
+        try:
+            payload = self._dpapi(raw, protect=True) if os.name == "nt" else self._mask(raw)
+            prefix = b"DPAPI1" if os.name == "nt" else b"LOCAL1"
+        except Exception:
+            payload = self._mask(raw)
+            prefix = b"LOCAL1"
+        try:
+            self.path.write_bytes(prefix + base64.b64encode(payload))
+        except Exception as exc:  # pragma: no cover
+            print(f"هشدار: ذخیرهٔ رمز دیتابیس ممکن نشد ({exc})")
+
+    def load(self) -> str:
+        try:
+            if not self.path.exists():
+                return ""
+            blob = self.path.read_bytes()
+            prefix, payload = blob[:6], base64.b64decode(blob[6:])
+            if prefix == b"DPAPI1":
+                raw = self._dpapi(payload, protect=False)
+            else:
+                raw = self._mask(payload)
+            return raw.decode("utf-8")
+        except Exception:
+            return ""
+
+    def clear(self) -> None:
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+class ExcelDataError(Exception):
+    """خطای خواندن یا ساختار نامعتبر فایل اکسل."""
+
+
+MANAGER_FOLDER_NAME = "CentralDatabaseManager"
+DB_DEFAULTS: Dict[str, Any] = {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "master_data",
+    "user": "master_app",
+    "workbook_id": 1,
+}
+
+
+def manager_app_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / MANAGER_FOLDER_NAME
+
+
+def read_manager_settings() -> Dict[str, Any]:
+    """خواندن تنظیمات اتصال از برنامهٔ «مدیریت دیتابیس مرکزی»."""
+    path = manager_app_dir() / "settings.json"
+    result: Dict[str, Any] = {}
+    try:
+        if path.exists():
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                result = {
+                    "host": str(stored.get("host") or ""),
+                    "port": int(stored.get("port") or 3306),
+                    "database": str(stored.get("database") or ""),
+                    "user": str(stored.get("app_user") or ""),
+                }
+    except Exception:
+        return {}
+    return {key: value for key, value in result.items() if value}
+
+
+def read_manager_password() -> str:
+    """رمز کاربر برنامه را از فایل امن مدیر دیتابیس می‌خواند (فقط ویندوز)."""
+    path = manager_app_dir() / "secrets.bin"
+    if os.name != "nt" or not path.exists():
+        return ""
+    try:
+        raw = SecretStore._dpapi(path.read_bytes(), protect=False)
+        stored = json.loads(raw.decode("utf-8"))
+        return str(stored.get("app_password") or "")
+    except Exception:
+        return ""
+
+
 class AppConfig:
     """تنظیمات سادهٔ JSON (قابل انتقال و قابل خواندن)."""
 
     FILENAME = "mehr_qt_config.json"
     DEFAULTS: Dict[str, Any] = {
-        "excel_path": "",
+        "db_host": "127.0.0.1",
+        "db_port": 3306,
+        "db_name": "master_data",
+        "db_user": "master_app",
+        "db_workbook_id": 1,
+        "db_remember_password": True,
         "sheet_name": SHEET_NAME_DEFAULT,
         "pdf_folder": "",
         "theme": "light",
@@ -499,7 +633,10 @@ class AppConfig:
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path else (data_dir() / self.FILENAME)
         self.values: Dict[str, Any] = dict(self.DEFAULTS)
+        self.secrets = SecretStore(self.path.with_name(SecretStore.FILENAME))
         self.load()
+        if not self.values.get("db_password"):
+            self.values["db_password"] = self.secrets.load()
 
     def load(self) -> None:
         try:
@@ -515,9 +652,11 @@ class AppConfig:
 
     def save(self) -> None:
         try:
+            payload = {key: value for key, value in self.values.items()
+                       if key != "db_password"}
             tmp = self.path.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(self.values, handle, ensure_ascii=False, indent=2)
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
         except Exception as exc:
             print(f"هشدار: ذخیرهٔ تنظیمات ممکن نشد ({exc})")
@@ -530,49 +669,172 @@ class AppConfig:
         if save:
             self.save()
 
+    # ---- رمز دیتابیس ----
+    def get_password(self) -> str:
+        return str(self.values.get("db_password") or "")
 
-def find_default_excel(config: Optional[AppConfig] = None) -> str:
-    """پیدا کردن فایل اکسل: متغیر محیطی، تنظیمات، کنار برنامه و در آخر مسیر شبکه."""
-    env_path = os.environ.get("MEHR_EXCEL_PATH", "").strip()
-    if env_path and os.path.exists(env_path):
-        return env_path
+    def set_password(self, password: str, remember: Optional[bool] = None) -> None:
+        self.values["db_password"] = password
+        keep = self.get("db_remember_password") if remember is None else bool(remember)
+        if keep:
+            self.secrets.save(password)
+        else:
+            self.secrets.clear()
 
-    if config is not None:
-        saved = str(config.get("excel_path") or "").strip()
-        if saved and os.path.exists(saved):
-            return saved
-
-    candidates = [
-        app_dir() / "F.O.C(Mehr).xlsx",
-        app_dir() / "F.O.C (Mehr).xlsx",
-        app_dir() / "F.O.C-Mehr.xlsx",
-        app_dir() / "mehr.xlsx",
-        app_dir() / "F.O.C(Mehr).xlsm",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    if os.path.exists(ORIGINAL_EXCEL_PATH):
-        return ORIGINAL_EXCEL_PATH
-    return "" if config is None else str(config.get("excel_path") or "")
+    def db_settings(self) -> Dict[str, Any]:
+        """تنظیمات اتصال و کتاب کار به‌صورت یک دیکشنری ساده."""
+        return {
+            "host": str(self.get("db_host") or "127.0.0.1").strip(),
+            "port": int(self.get("db_port") or 3306),
+            "database": str(self.get("db_name") or "master_data").strip(),
+            "user": str(self.get("db_user") or "master_app").strip(),
+            "password": self.get_password(),
+            "workbook_id": int(self.get("db_workbook_id") or 1),
+            "sheet_name": str(self.get("sheet_name") or SHEET_NAME_DEFAULT),
+        }
 
 
-def default_pdf_folder(excel_path: str, config: Optional[AppConfig] = None) -> str:
+def default_pdf_folder(config: Optional[AppConfig] = None) -> str:
     if config is not None:
         saved = str(config.get("pdf_folder") or "").strip()
         if saved:
             return saved
-    if excel_path:
-        beside_excel = Path(excel_path).parent / "PDF-MEHR"
-        if beside_excel.is_dir():
-            return str(beside_excel)
     local = app_dir() / "PDF-MEHR"
     if local.is_dir():
         return str(local)
     if os.path.isdir(ORIGINAL_PDF_FOLDER):
         return ORIGINAL_PDF_FOLDER
     return ""
+
+
+class DatabaseError(ExcelDataError):
+    """خطای اتصال یا خواندن از دیتابیس مرکزی."""
+
+
+def connect_database(settings: Dict[str, Any], timeout: int = 8):
+    if mysql_connector is None:
+        raise DatabaseError(
+            "کتابخانهٔ mysql-connector-python نصب نیست.\n"
+            "دستور نصب: pip install mysql-connector-python"
+        )
+    try:
+        return mysql_connector.connect(
+            host=settings.get("host") or "127.0.0.1",
+            port=int(settings.get("port") or 3306),
+            user=settings.get("user") or "master_app",
+            password=settings.get("password") or "",
+            database=settings.get("database") or "master_data",
+            charset="utf8mb4",
+            connection_timeout=timeout,
+            autocommit=False,
+        )
+    except Exception as exc:
+        host = settings.get("host") or "127.0.0.1"
+        port = settings.get("port") or 3306
+        raise DatabaseError(
+            f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{exc}"
+        ) from exc
+
+
+def fetch_workbook_blob(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """دریافت فایل اصلی کتاب کار از دیتابیس (جدول excel_original_files)."""
+    workbook_id = int(settings.get("workbook_id") or 1)
+    connection = connect_database(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT original_filename, file_size, imported_at "
+                "FROM excel_workbooks WHERE workbook_id=%s",
+                (workbook_id,),
+            )
+            meta = cursor.fetchone()
+            if not meta:
+                raise DatabaseError(
+                    f"کتاب کار با شناسهٔ {fa(workbook_id)} در دیتابیس پیدا نشد."
+                )
+            cursor.execute(
+                "SELECT binary_data FROM excel_original_files WHERE workbook_id=%s",
+                (workbook_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row[0] is None:
+                raise DatabaseError(
+                    "فایل اصلی کتاب کار در دیتابیس ذخیره نشده است "
+                    "(جدول excel_original_files خالی است)."
+                )
+            blob = row[0]
+            if isinstance(blob, memoryview):
+                blob = blob.tobytes()
+            elif not isinstance(blob, (bytes, bytearray)):
+                blob = bytes(blob)
+            return {
+                "filename": str(meta[0] or f"workbook-{workbook_id}.xlsx"),
+                "size": int(meta[1] or len(blob)),
+                "imported_at": meta[2],
+                "data": bytes(blob),
+            }
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def fetch_workbook_updated_at(settings: Dict[str, Any]) -> Optional[datetime]:
+    """زمان آخرین بارگذاری کتاب کار (برای بازخوانی خودکار)."""
+    connection = connect_database(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT imported_at FROM excel_workbooks WHERE workbook_id=%s",
+                (int(settings.get("workbook_id") or 1),),
+            )
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    if row and isinstance(row[0], datetime):
+        return row[0]
+    return None
+
+
+def _parse_imported_at(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = str(value or "").strip()
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:19], pattern)
+        except Exception:
+            continue
+    return None
+
+
+def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> DashboardData:
+    """اتصال به دیتابیس مرکزی، خواندن کتاب کار و ساخت داده‌های داشبورد."""
+    info = fetch_workbook_blob(settings)
+    note = "دیتابیس {} • شناسهٔ {}".format(
+        settings.get("database") or "master_data", fa(int(settings.get("workbook_id") or 1))
+    )
+    return parse_workbook_bytes(
+        info["filename"],
+        info["data"],
+        sheet_name=str(settings.get("sheet_name") or SHEET_NAME_DEFAULT),
+        pdf_folder=pdf_folder,
+        source_time=_parse_imported_at(info.get("imported_at")),
+        source_size=int(info.get("size") or len(info["data"])),
+        source_note=note,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -668,10 +930,6 @@ class NotesStore:
 # ---------------------------------------------------------------------------
 # خواندن اکسل و ساخت داده‌های داشبورد
 # ---------------------------------------------------------------------------
-class ExcelDataError(Exception):
-    """خطای خواندن یا ساختار نامعتبر فایل اکسل."""
-
-
 @dataclass
 class ContractRecord:
     """یک قرارداد (یک ردیف داده در شیت colorcode)."""
@@ -752,7 +1010,7 @@ class Distribution:
 
 @dataclass
 class DashboardData:
-    excel_path: str
+    source_name: str
     sheet_name: str
     pdf_folder: str
     records: List[ContractRecord]
@@ -767,6 +1025,12 @@ class DashboardData:
     source_mtime: Optional[datetime]
     source_size: int
     warnings: List[str]
+    source_note: str = ""
+
+    @property
+    def excel_path(self) -> str:
+        """نام کتاب کار (سازگاری با کدهای قبلی که این فیلد را می‌خوانند)."""
+        return self.source_name
 
     # ---- آمار کلی ----
     @property
@@ -837,33 +1101,29 @@ def _progress_like(value: Any) -> str:
     return text.replace("%", "٪")
 
 
-def read_excel_workbook(
-    path: str,
+def parse_workbook_bytes(
+    filename: str,
+    blob: bytes,
     sheet_name: str = SHEET_NAME_DEFAULT,
     pdf_folder: str = "",
+    source_time: Optional[datetime] = None,
+    source_size: int = 0,
+    source_note: str = "",
 ) -> DashboardData:
-    """خواندن اکسل و ساخت کامل داده‌های داشبورد بدون هیچ‌گونه کد وب."""
+    """ساخت کامل داده‌های داشبورد از بایت‌های کتاب کار (خوانده‌شده از دیتابیس)."""
+    workbook_name = str(filename or "کتاب کار")
     if openpyxl is None:
         raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
-    if not path:
-        raise ExcelDataError("مسیر فایل اکسل مشخص نشده است.")
-    if not os.path.exists(path):
-        raise ExcelDataError(f"فایل اکسل پیدا نشد:\n{path}")
-    if str(path).lower().endswith(".xls"):
-        raise ExcelDataError(
-            "فرمت قدیمی ‎.xls‎ پشتیبانی نمی‌شود.\n"
-            "فایل را در اکسل با فرمت ‎.xlsx‎ ذخیره کنید و دوباره انتخاب کنید."
-        )
+    if not blob:
+        raise ExcelDataError("محتوای کتاب کار خالی است.")
 
     warnings: List[str] = []
     try:
-        workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    except PermissionError as exc:
-        raise ExcelDataError(
-            f"دسترسی به فایل ممکن نیست (احتمالاً در حال استفاده است):\n{path}\n{exc}"
-        ) from exc
+        workbook = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
     except Exception as exc:
-        raise ExcelDataError(f"فایل اکسل باز نشد:\n{path}\n{exc}") from exc
+        raise ExcelDataError(
+            f"کتاب کار ذخیره‌شده در دیتابیس باز نشد:\n{exc}"
+        ) from exc
 
     try:
         sheet_names = list(workbook.sheetnames)
@@ -1021,14 +1281,7 @@ def read_excel_workbook(
         for label, count in list(zip(type_labels, type_values))[:10]
     ]
 
-    source_mtime = None
-    source_size = 0
-    try:
-        stat = os.stat(path)
-        source_mtime = datetime.fromtimestamp(stat.st_mtime)
-        source_size = stat.st_size
-    except Exception:
-        pass
+    source_mtime = source_time
 
     if not records:
         warnings.append("هیچ ردیف داده‌ای در شیت پیدا نشد.")
@@ -1040,7 +1293,7 @@ def read_excel_workbook(
     ]
 
     return DashboardData(
-        excel_path=os.path.abspath(path),
+        source_name=workbook_name,
         sheet_name=target,
         pdf_folder=pdf_folder,
         records=records,
@@ -1059,8 +1312,9 @@ def read_excel_workbook(
         header_labels=header_labels,
         loaded_at=datetime.now(),
         source_mtime=source_mtime,
-        source_size=source_size,
+        source_size=source_size or len(blob),
         warnings=warnings,
+        source_note=source_note,
     )
 
 
@@ -1101,7 +1355,7 @@ def build_pdf_index(folder: str, limit: int = 20000) -> Dict[str, str]:
 def empty_dashboard(message: str = "") -> DashboardData:
     """دادهٔ خالی برای زمانی که هنوز اکسل بارگذاری نشده است."""
     return DashboardData(
-        excel_path="",
+        source_name="",
         sheet_name=SHEET_NAME_DEFAULT,
         pdf_folder="",
         records=[],
@@ -2763,9 +3017,11 @@ class BarChart(QWidget):
 
         row_height = self._row_height()
         max_count = max(1, max(int(item["count"]) for item in self.items))
-        value_width = metrics.horizontalAdvance(bidi("۱۰۰ درصد")) + 14
-        label_width = int(max(90, min(max(120, self.width() * 0.30),
-                                      self.width() - value_width - 96)))
+        value_width = metrics.horizontalAdvance(bidi("۱۰۰٪")) + 12
+        texts = [f"{item['label']} ({fa_num(item['count'])})" for item in self.items]
+        longest = max(metrics.horizontalAdvance(text) for text in texts)
+        label_width = int(min(longest + 10, max(120, self.width() * 0.42),
+                              max(90, self.width() - value_width - 120)))
         track_right = self.width() - label_width - 12
         track_left = value_width + 12
         track_width = max(40, track_right - track_left)
@@ -2799,7 +3055,7 @@ class BarChart(QWidget):
                 QRectF(track_right + 10, y, label_width, row_height),
                 Qt.AlignRight | Qt.AlignVCenter,
                 metrics.elidedText(
-                    f"{item['label']} ({fa_num(item['count'])})", Qt.ElideMiddle, label_width,
+                    f"{item['label']} ({fa_num(item['count'])})", Qt.ElideRight, label_width,
                 ),
             )
             value_text = bidi(f"{fa(item['percent'])}٪")
@@ -3376,29 +3632,33 @@ class ContractDelegate(QStyledItemDelegate):
 # ---------------------------------------------------------------------------
 # ابزارهای داده و خروجی (بارگذاری، خروجی اکسل و گزارش)
 # ---------------------------------------------------------------------------
-class ExcelLoader(QThread):
-    """بارگذاری اکسل در رشتهٔ جداگانه تا رابط کاربری قفل نشود."""
+class DataLoader(QThread):
+    """خواندن کتاب کار از دیتابیس مرکزی در رشتهٔ جداگانه."""
 
     loaded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, path: str, sheet: str, pdf_folder: str, parent=None) -> None:
+    def __init__(self, settings: Dict[str, Any], pdf_folder: str, parent=None) -> None:
         super().__init__(parent)
-        self.path = path
-        self.sheet = sheet
+        self.settings = dict(settings)
         self.pdf_folder = pdf_folder
 
     def run(self) -> None:
         try:
-            data = read_excel_workbook(self.path, self.sheet, self.pdf_folder)
+            data = read_database_workbook(self.settings, self.pdf_folder)
         except ExcelDataError as exc:
             self.failed.emit(str(exc))
             return
         except Exception as exc:  # خطای پیش‌بینی‌نشده
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
-            self.failed.emit(f"خطای پیش‌بینی‌نشده در خواندن اکسل:\n{detail}")
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در خواندن دیتابیس:\n{detail}")
             return
         self.loaded.emit(data)
+
+
+# سازگاری با نام قدیمی
+ExcelLoader = DataLoader
 
 
 # ---------------------------------------------------------------------------
@@ -3511,7 +3771,10 @@ def write_management_report(path: str, data: DashboardData) -> None:
     sheet["A1"] = "گزارش مدیریتی — پروژه مهر خلیج فارس (کندو)"
     sheet["A1"].font = title_font
     sheet.merge_cells("A2:B2")
-    sheet["A2"] = f"تاریخ تهیهٔ گزارش: {today_jalali()}   •   منبع: {data.excel_path}"
+    sheet["A2"] = (
+        f"تاریخ تهیهٔ گزارش: {today_jalali()}   •   منبع: {data.excel_path}"
+        + (f"   •   {data.source_note}" if data.source_note else "")
+    )
     sheet["A2"].font = sub_font
 
     sheet["A4"] = "پیشرفت کل اختتام"
@@ -3644,6 +3907,7 @@ def make_app_icon() -> QIcon:
 def configure_rtl_browser(browser: QTextBrowser) -> None:
     """راست‌به‌چپ کردن متن HTML در QTextBrowser."""
     browser.setLayoutDirection(Qt.RightToLeft)
+    browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     document = browser.document()
     option = document.defaultTextOption()
     option.setTextDirection(Qt.RightToLeft)
@@ -3685,10 +3949,10 @@ def write_error_log(detail: str) -> Optional[Path]:
         return None
 
 
-def run_check(excel: str, sheet: str, pdf_folder: str) -> int:
-    """بررسی سریع داده‌ها بدون باز کردن پنجره (برای عیب‌یابی)."""
+def run_check(settings: Dict[str, Any], pdf_folder: str) -> int:
+    """بررسی سریع اتصال به دیتابیس و داده‌ها بدون باز کردن پنجره."""
     try:
-        data = read_excel_workbook(excel, sheet, pdf_folder)
+        data = read_database_workbook(settings, pdf_folder)
     except ExcelDataError as exc:
         print(f"❌ {exc}")
         return 2
@@ -3696,8 +3960,11 @@ def run_check(excel: str, sheet: str, pdf_folder: str) -> int:
         print(f"❌ خطای غیرمنتظره: {exc}")
         write_error_log(traceback.format_exc())
         return 3
-    print("✅ خواندن اکسل موفق بود")
-    print(f"مسیر: {data.excel_path}")
+    print("✅ خواندن داده از دیتابیس موفق بود")
+    print(f"دیتابیس: {settings.get('database')} روی {settings.get('host')}:{settings.get('port')}")
+    print(f"کتاب کار: {data.source_name} (شناسهٔ {fa(int(settings.get('workbook_id') or 1))})")
+    if data.source_note:
+        print(f"منبع: {data.source_note}")
     print(f"شیت: {data.sheet_name}")
     print(f"تعداد قرارداد: {data.total_contracts}")
     print(f"پیشرفت کل: {data.progress_percent_text}%")
@@ -3716,37 +3983,54 @@ def run_check(excel: str, sheet: str, pdf_folder: str) -> int:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="داشبورد قراردادهای مهر خلیج فارس — نسخهٔ دسکتاپ PyQt5",
+        description="داشبورد قراردادهای مهر خلیج فارس — نسخهٔ دسکتاپ PyQt5 (دیتابیس مرکزی)",
     )
-    parser.add_argument("--excel", help="مسیر فایل اکسل (بر تنظیمات ذخیره‌شده اولویت دارد)")
+    parser.add_argument("--db-host", help="میزبان MySQL (پیش‌فرض: 127.0.0.1)")
+    parser.add_argument("--db-port", type=int, help="پورت MySQL (پیش‌فرض: 3306)")
+    parser.add_argument("--db-name", help="نام دیتابیس (پیش‌فرض: master_data)")
+    parser.add_argument("--db-user", help="نام کاربری دیتابیس (پیش‌فرض: master_app)")
+    parser.add_argument("--db-password", help="رمز دیتابیس (در تنظیمات هم قابل ذخیره است)")
+    parser.add_argument("--workbook-id", type=int,
+                        help="شناسهٔ کتاب کار در دیتابیس (پیش‌فرض: 1)")
     parser.add_argument("--sheet", help=f"نام شیت (پیش‌فرض: {SHEET_NAME_DEFAULT})")
     parser.add_argument("--pdf-folder", help="مسیر پوشهٔ فایل‌های PDF")
     parser.add_argument("--check", action="store_true",
-                        help="فقط بررسی خواندن داده‌ها؛ پنجره باز نمی‌شود")
+                        help="فقط بررسی اتصال و خواندن داده‌ها؛ پنجره باز نمی‌شود")
     parser.add_argument("--theme", choices=["light", "dark"], help="پوستهٔ برنامه")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     return parser.parse_args(argv)
 
 
+def _apply_args(config: AppConfig, args: argparse.Namespace) -> None:
+    mapping = {
+        "db_host": args.db_host,
+        "db_port": args.db_port,
+        "db_name": args.db_name,
+        "db_user": args.db_user,
+        "db_workbook_id": args.workbook_id,
+        "sheet_name": args.sheet,
+    }
+    for key, value in mapping.items():
+        if value not in (None, ""):
+            config.values[key] = value
+    if args.db_password:
+        config.values["db_password"] = args.db_password
+    if args.pdf_folder:
+        config.values["pdf_folder"] = os.path.abspath(args.pdf_folder)
+    if args.theme:
+        config.values["theme"] = args.theme
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
-    # حالت بررسی: بدون نیاز به نمایشگر یا QApplication
     if args.check:
         config = AppConfig()
-        if args.excel:
-            config.values["excel_path"] = os.path.abspath(args.excel)
-        if args.sheet:
-            config.values["sheet_name"] = args.sheet
-        if args.pdf_folder:
-            config.values["pdf_folder"] = os.path.abspath(args.pdf_folder)
-        excel = str(config.get("excel_path") or find_default_excel(config) or "")
-        sheet = str(config.get("sheet_name") or SHEET_NAME_DEFAULT)
-        pdf_folder = str(config.get("pdf_folder") or default_pdf_folder(excel, config))
-        if not excel:
-            print("❌ مسیر فایل اکسل مشخص نشده است. از --excel استفاده کنید.")
-            return 2
-        return run_check(excel, sheet, pdf_folder)
+        _apply_args(config, args)
+        settings = config.db_settings()
+        settings["sheet_name"] = str(config.get("sheet_name") or SHEET_NAME_DEFAULT)
+        pdf_folder = str(config.get("pdf_folder") or default_pdf_folder(config))
+        return run_check(settings, pdf_folder)
 
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
@@ -3759,15 +4043,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     app.setOrganizationName("MehrKando")
 
     config = AppConfig()
-    if args.excel:
-        config.values["excel_path"] = os.path.abspath(args.excel)
-    if args.sheet:
-        config.values["sheet_name"] = args.sheet
-    if args.pdf_folder:
-        config.values["pdf_folder"] = os.path.abspath(args.pdf_folder)
-    if args.theme:
-        config.values["theme"] = args.theme
-
+    _apply_args(config, args)
     notes = NotesStore()
 
     window = MainWindow(config, notes)
@@ -4914,6 +5190,9 @@ class DashboardPage(QWidget):
         self.tiles["pdf"].set_values(
             fa(pdf_count), "قرارداد دارای فایل پیوست PDF", pdf_count / total,
         )
+        if data.total_contracts == 0:
+            for key in ("all", "progress", "deductions", "pdf"):
+                self.tiles[key].set_values("—", "داده‌ای برای نمایش نیست", None, badge="")
 
         progress = data.dist("progress")
         progress_labels = self._display_labels("progress", progress)
@@ -4936,7 +5215,8 @@ class DashboardPage(QWidget):
 
         flag_counts = data.flag_counts
         for flag_key, tile in self.flag_tiles.items():
-            tile.set_value(fa(flag_counts.get(flag_key, 0)))
+            count = flag_counts.get(flag_key, 0)
+            tile.set_value(fa(count) if data.total_contracts else "—")
         self.types_bar.set_data(data.top_types)
 
         self.type_pie.set_data([pretty_label(label) for label in types_dist.labels],
@@ -5151,6 +5431,22 @@ class ContractsPage(QWidget):
         self.bookmark_check.setChecked(False)
         self.bookmark_check.blockSignals(False)
         self._apply_view()
+        QTimer.singleShot(0, self._fit_columns)
+
+    def _fit_columns(self) -> None:
+        """پخش عرض ستون‌ها به نسبت عرض جدول تا متن‌ها کم‌تر بریده شوند."""
+        available = self.table.viewport().width()
+        if available <= 0:
+            return
+        specs = ContractTableModel.COLUMNS
+        total = sum(max(1, spec.width) for spec in specs)
+        scale = available / total if total else 1.0
+        for index, spec in enumerate(specs):
+            self.table.setColumnWidth(index, max(34, int(spec.width * scale)))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_columns)
 
     # ---- فیلتر ----
     def _active_key(self) -> str:
@@ -5382,31 +5678,57 @@ def _cell_width(widths: Optional[Sequence[str]], index: int) -> str:
 def _report_table(headers: Sequence[str], rows: Sequence[Sequence[Any]],
                   colors: Dict[str, str], widths: Optional[Sequence[str]] = None,
                   table_width: str = "100%") -> str:
+    """جدول گزارش؛ ستون‌ها معکوس چیده می‌شوند تا در RTL راست‌به‌چپ درست دیده شوند."""
     is_dark = QColor(colors["surface"]).lightness() < 128
     head_bg = colors["surface_3"] if is_dark else colors["brand_soft"]
     head_fg = colors["brand_2"] if is_dark else colors["brand_deep"]
+    order = list(range(len(headers)))[::-1]
     head_cells = "".join(
         f'<th bgcolor="{head_bg}" align="center"{_cell_width(widths, i)} '
         f'style="padding:7px; color:{head_fg};">'
-        f'{html_module.escape(str(h))}</th>'
-        for i, h in enumerate(headers)
+        f'{html_module.escape(str(headers[i]))}</th>'
+        for i in order
     )
     body = ""
     for row in rows:
         cells = "".join(
             f'<td align="right"{_cell_width(widths, i)} style="padding:6px 8px;'
             f' border-bottom:1px solid {colors["border_soft"]};">'
-            f'{html_module.escape(str(value))}</td>'
-            for i, value in enumerate(row)
+            f'{html_module.escape(str(row[i]))}</td>'
+            for i in order if i < len(row)
         )
         body += f"<tr>{cells}</tr>"
     colgroup = ""
     if widths:
-        colgroup = "<colgroup>" + "".join(f'<col width="{w}">' for w in widths) + "</colgroup>"
+        colgroup = "<colgroup>" + "".join(
+            f'<col width="{widths[i]}">' for i in order if i < len(widths)
+        ) + "</colgroup>"
     return (
         f'<table dir="rtl" width="{table_width}" cellspacing="0" cellpadding="0" border="0" '
         f'style="border-collapse:collapse; margin-bottom:14px;">{colgroup}'
         f"<tr>{head_cells}</tr>{body}</table>"
+    )
+
+
+def _report_grid(items: Sequence[Sequence[str]], colors: Dict[str, str],
+                 per_row: int = 3) -> str:
+    """شبکهٔ آمار گزارش: چند شاخص در هر ردیف با چیدمان راست‌به‌چپ."""
+    cell_bg = colors["surface_2"]
+    rows_html = ""
+    for start in range(0, len(items), per_row):
+        chunk = list(items[start:start + per_row])[::-1]
+        cells = "".join(
+            f'<td width="{int(100 / per_row)}%" align="right" bgcolor="{cell_bg}" '
+            f'style="padding:9px 12px;">'
+            f'<div style="color:{colors["ink_3"]}; font-size:8.5pt;">{html_module.escape(str(label))}</div>'
+            f'<div style="color:{colors["ink"]}; font-size:13pt; font-weight:bold;">{value}</div>'
+            f"</td>"
+            for label, value in chunk
+        )
+        rows_html += f'<tr><td width="6" bgcolor="{cell_bg}"></td>{cells}</tr>'
+    return (
+        f'<table dir="rtl" width="100%" cellspacing="3" cellpadding="0" border="0" '
+        f'style="border-collapse:separate; margin-bottom:14px;">{rows_html}</table>'
     )
 
 
@@ -5477,7 +5799,8 @@ def build_report_html(data: DashboardData, colors: Dict[str, str]) -> str:
             </div>
             <div style="color:{band_soft}; font-size:9pt; padding-top:4px;">
               تاریخ تهیه: {today_jalali()} &nbsp;•&nbsp; منبع داده: {html_module.escape(os.path.basename(data.excel_path) or '—')}
-              &nbsp;•&nbsp; آخرین تغییر فایل: {data.source_mtime_text}
+              &nbsp;•&nbsp; منبع: {html_module.escape(data.source_note or 'دیتابیس مرکزی')}
+              &nbsp;•&nbsp; آخرین بارگذاری: {data.source_mtime_text}
             </div>
           </td>
         </tr>
@@ -5487,11 +5810,11 @@ def build_report_html(data: DashboardData, colors: Dict[str, str]) -> str:
         <tr>{callout_rows}</tr>
       </table>
       <h3 style="color:{colors['brand_deep']}; margin:12px 0 6px 0;">شاخص‌های کلی</h3>
-      {_report_table(["شاخص", "مقدار"], overview, colors, ["470", "90"], table_width="560")}
+      {_report_grid(overview, colors, per_row=3)}
       <h3 style="color:{colors['brand_deep']}; margin:12px 0 6px 0;">قراردادهای نیازمند پیگیری</h3>
       {_report_table(
           ["نام شرکت", "شمارهٔ قرارداد", "موضوع", "منقضی", "موارد باز", "شرح موارد"],
-          shown, colors, ["20%", "13%", "27%", "8%", "8%", "24%"])}
+          shown, colors, ["18%", "11%", "22%", "7%", "7%", "35%"])}
       <div style="color:{colors['ink_3']}; margin-bottom:12px;">مجموع قراردادهای نیازمند پیگیری:
         {fa_num(len(follow_rows))}
         {f" — فقط {fa(len(shown))} مورد اول نمایش داده شده است." if len(follow_rows) > len(shown) else ""}
@@ -5631,8 +5954,11 @@ class PdfLibraryPage(QWidget):
 
         list_card = Card(colors, radius=16, padding=8)
         self.list_widget = QListWidget()
-        self.list_widget.setSpacing(2)
+        self.list_widget.setSpacing(0)
+        self.list_widget.setUniformItemSizes(True)
+        self.list_widget.setMouseTracking(True)
         self.list_widget.itemDoubleClicked.connect(self._open_item)
+        self._apply_list_style()
         list_card.body.addWidget(self.list_widget, 1)
         layout.addWidget(list_card, 1)
 
@@ -5648,9 +5974,21 @@ class PdfLibraryPage(QWidget):
         footer.addWidget(open_btn)
         layout.addLayout(footer)
 
+    def _apply_list_style(self) -> None:
+        c = self.colors
+        self.list_widget.setStyleSheet(
+            f"QListWidget {{ background: transparent; border: none; outline: none; }}"
+            f"QListWidget::item {{ padding: 5px 8px; border-radius: 8px;"
+            f" color: {c['ink']}; }}"
+            f"QListWidget::item:hover {{ background: {c['surface_2']}; }}"
+            f"QListWidget::item:selected {{ background: {c['brand_soft']};"
+            f" color: {c['brand_deep']}; }}"
+        )
+
     def set_theme_colors(self, colors: Dict[str, str]) -> None:
         self.colors = colors
         self.search_edit.set_icon_color(colors["ink_3"])
+        self._apply_list_style()
         for card in self.findChildren(Card):
             card.set_theme(colors)
 
@@ -5690,7 +6028,7 @@ class PdfLibraryPage(QWidget):
             item = QListWidgetItem(f"\u202a{name}\u202c")
             item.setData(Qt.UserRole, name)
             item.setIcon(make_icon("pdf", self.colors["danger"], 18))
-            item.setSizeHint(QSize(0, 38))
+            item.setSizeHint(QSize(0, 32))
             self.list_widget.addItem(item)
         if not shown:
             message = ("پوشه‌ای انتخاب نشده است." if not self.folder
@@ -5717,11 +6055,13 @@ class PdfLibraryPage(QWidget):
 # تنظیمات
 # ---------------------------------------------------------------------------
 class SettingsPage(QWidget):
-    """تنظیم مسیر اکسل/PDF، پوسته و بازخوانی خودکار."""
+    """تنظیم اتصال دیتابیس مرکزی، پوشهٔ PDF، پوسته و بازخوانی خودکار."""
 
     saveRequested = pyqtSignal(dict)
     reloadRequested = pyqtSignal()
     openDataFolderRequested = pyqtSignal()
+    testRequested = pyqtSignal()
+    detectRequested = pyqtSignal()
 
     def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -5748,58 +6088,107 @@ class SettingsPage(QWidget):
         left_column = QVBoxLayout()
         left_column.setSpacing(14)
 
-        # ---- منبع داده ----
+        # ---- اتصال دیتابیس ----
         source_card = Card(colors, radius=16, padding=18)
-        source_card.body.addWidget(_card_title("منبع داده", "مسیر اکسل و پوشهٔ فایل‌های PDF"))
+        source_card.body.addWidget(_card_title(
+            "اتصال دیتابیس",
+            "داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شود؛ نیازی به فایل اکسل نیست",
+        ))
         form = QGridLayout()
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(10)
-        form.addWidget(QLabel("فایل اکسل:"), 0, 0)
-        self.excel_edit = QLineEdit(str(config.get("excel_path") or ""))
-        self.excel_edit.setPlaceholderText("مسیر فایل F.O.C(Mehr).xlsx")
-        form.addWidget(self.excel_edit, 0, 1)
-        browse_excel = QPushButton("انتخاب…")
-        browse_excel.setIcon(make_icon("folder", colors["ink_2"], 15))
-        browse_excel.setCursor(Qt.PointingHandCursor)
-        browse_excel.clicked.connect(self._browse_excel)
-        form.addWidget(browse_excel, 0, 2)
-        network_btn = QPushButton("مسیر شبکه")
-        network_btn.setObjectName("Ghost")
-        network_btn.setToolTip(ORIGINAL_EXCEL_PATH)
-        network_btn.clicked.connect(lambda: self.excel_edit.setText(ORIGINAL_EXCEL_PATH))
-        form.addWidget(network_btn, 0, 3)
+        form.setVerticalSpacing(9)
 
-        form.addWidget(QLabel("نام شیت:"), 1, 0)
+        form.addWidget(QLabel("میزبان:"), 0, 0)
+        self.host_edit = QLineEdit(str(config.get("db_host") or "127.0.0.1"))
+        self.host_edit.setPlaceholderText("127.0.0.1")
+        form.addWidget(self.host_edit, 0, 1)
+        form.addWidget(QLabel("پورت:"), 0, 2)
+        self.port_spin = NumberStepper(colors)
+        self.port_spin.setRange(1, 65535)
+        self.port_spin.setValue(int(config.get("db_port") or 3306))
+        form.addWidget(self.port_spin, 0, 3)
+
+        form.addWidget(QLabel("دیتابیس:"), 1, 0)
+        self.db_edit = QLineEdit(str(config.get("db_name") or "master_data"))
+        self.db_edit.setPlaceholderText("master_data")
+        self.db_edit.setToolTip(
+            "دیتابیسی که «مدیریت دیتابیس مرکزی» ساخته است (پیش‌فرض: master_data)."
+        )
+        form.addWidget(self.db_edit, 1, 1)
+        form.addWidget(QLabel("کاربر:"), 1, 2)
+        self.user_edit = QLineEdit(str(config.get("db_user") or "master_app"))
+        self.user_edit.setPlaceholderText("master_app")
+        form.addWidget(self.user_edit, 1, 3)
+
+        form.addWidget(QLabel("رمز عبور:"), 2, 0)
+        self.password_edit = QLineEdit(str(config.get_password() or ""))
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setPlaceholderText("رمز کاربر دیتابیس")
+        form.addWidget(self.password_edit, 2, 1)
+        self.remember_check = CheckBox("ذخیرهٔ رمز")
+        self.remember_check.set_theme_colors(colors)
+        self.remember_check.setChecked(bool(config.get("db_remember_password")))
+        form.addWidget(self.remember_check, 2, 2, 1, 2)
+
+        form.addWidget(QLabel("شناسهٔ کتاب کار:"), 3, 0)
+        self.workbook_spin = NumberStepper(colors)
+        self.workbook_spin.setRange(1, 999999)
+        self.workbook_spin.setValue(int(config.get("db_workbook_id") or 1))
+        self.workbook_spin.setToolTip(
+            "شمارهٔ ردیف کتاب کار در دیتابیس (همان فایل اکسلی که با شناسهٔ ۱ بارگذاری شده است)."
+        )
+        form.addWidget(self.workbook_spin, 3, 1)
+        form.addWidget(QLabel("نام شیت:"), 3, 2)
         self.sheet_edit = QLineEdit(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
-        form.addWidget(self.sheet_edit, 1, 1)
+        self.sheet_edit.setPlaceholderText(SHEET_NAME_DEFAULT)
+        form.addWidget(self.sheet_edit, 3, 3)
 
-        form.addWidget(QLabel("پوشهٔ PDF:"), 2, 0)
+        form.addWidget(QLabel("پوشهٔ PDF:"), 4, 0)
         self.pdf_edit = QLineEdit(str(config.get("pdf_folder") or ""))
         self.pdf_edit.setPlaceholderText("پوشه‌ای که فایل‌های PDF قراردادها در آن است")
-        form.addWidget(self.pdf_edit, 2, 1)
+        form.addWidget(self.pdf_edit, 4, 1, 1, 2)
         browse_pdf = QPushButton("انتخاب…")
         browse_pdf.setIcon(make_icon("folder", colors["ink_2"], 15))
         browse_pdf.setCursor(Qt.PointingHandCursor)
         browse_pdf.clicked.connect(self._browse_pdf)
-        form.addWidget(browse_pdf, 2, 2)
-        pdf_network = QPushButton("مسیر شبکه")
-        pdf_network.setObjectName("Ghost")
-        pdf_network.setToolTip(ORIGINAL_PDF_FOLDER)
-        pdf_network.clicked.connect(lambda: self.pdf_edit.setText(ORIGINAL_PDF_FOLDER))
-        form.addWidget(pdf_network, 2, 3)
+        form.addWidget(browse_pdf, 4, 3)
         form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
         source_card.body.addLayout(form)
-        hint = _muted("داده‌ها فقط خوانده می‌شوند؛ این برنامه هیچ‌گاه فایل اکسل اصلی را تغییر نمی‌دهد.")
-        source_card.body.addWidget(hint)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
+        detect_btn = QPushButton("دریافت تنظیمات مدیر دیتابیس")
+        detect_btn.setObjectName("Ghost")
+        detect_btn.setIcon(make_icon("settings", colors["ink_2"], 15))
+        detect_btn.setToolTip(
+            "میزبان، پورت، نام دیتابیس، کاربر و رمز از تنظیمات امن «مدیریت دیتابیس مرکزی» خوانده می‌شود."
+        )
+        detect_btn.setCursor(Qt.PointingHandCursor)
+        detect_btn.clicked.connect(self.detectRequested.emit)
+        actions_row.addWidget(detect_btn)
+        test_btn = QPushButton("آزمایش اتصال")
+        test_btn.setObjectName("Ghost")
+        test_btn.setIcon(make_icon("external", colors["ink_2"], 15))
+        test_btn.setCursor(Qt.PointingHandCursor)
+        test_btn.clicked.connect(self.testRequested.emit)
+        actions_row.addWidget(test_btn)
+        actions_row.addStretch(1)
+        source_card.body.addLayout(actions_row)
+        source_card.body.addWidget(_muted(
+            "داده‌ها فقط خوانده می‌شوند و برنامه هیچ تغییری در دیتابیس یا فایل اصلی نمی‌دهد."
+        ))
         right_column.addWidget(source_card)
 
         # ---- فایل‌های برنامه ----
         storage_card = Card(colors, radius=16, padding=18)
         storage_card.body.addWidget(_card_title("فایل‌های برنامه", "تنظیمات، یادداشت‌ها و نسخه"))
-        self.config_path_label = QLabel(f"تنظیمات: {config.path}")
+        self.config_path_label = QLabel(f"تنظیمات: \u202a{config.path}\u202c")
         self.config_path_label.setObjectName("Muted")
         self.config_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.notes_path_label = QLabel(f"یادداشت‌ها: {data_dir() / NotesStore.FILENAME}")
+        self.notes_path_label = QLabel(
+            f"یادداشت‌ها: \u202a{data_dir() / NotesStore.FILENAME}\u202c"
+        )
         self.notes_path_label.setObjectName("Muted")
         self.notes_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         storage_card.body.addWidget(self.config_path_label)
@@ -5908,11 +6297,11 @@ class SettingsPage(QWidget):
         tips_card.body.addWidget(_card_title("نکته‌های کاربردی", "برای کار سریع‌تر با برنامه"))
         for kind, title, text in (
             ("refresh", "بازخوانی خودکار",
-             "اگر فایل اکسل تغییر کند، برنامه در فاصلهٔ تعیین‌شده دوباره آن را می‌خواند."),
+             "هر بار که کتاب کار تازه‌ای در دیتابیس بارگذاری شود، برنامه خودکار به‌روز می‌شود."),
             ("clock", "میان‌برها",
              "Ctrl+R بازخوانی، Ctrl+E خروجی اکسل، Ctrl+D تغییر پوسته و Ctrl+F جستجو."),
-            ("folder", "مسیر شبکه",
-             "برای استفاده از مسیر قبلی شبکه، دکمهٔ «مسیر شبکه» را بزنید؛ داده‌ها فقط خوانده می‌شوند."),
+            ("shield", "اتصال امن",
+             "میزبان، دیتابیس و کاربر از «مدیریت دیتابیس مرکزی» خوانده می‌شود؛ داده‌ها فقط خواندنی‌اند."),
         ):
             row = QHBoxLayout()
             row.setSpacing(10)
@@ -5952,31 +6341,54 @@ class SettingsPage(QWidget):
         save_bar.addWidget(save_btn)
         layout.addLayout(save_bar)
 
-    def _browse_excel(self) -> None:
-        start = self.excel_edit.text() or str(app_dir())
-        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
-        if path:
-            self.excel_edit.setText(path)
-            if not self.pdf_edit.text().strip():
-                guess = Path(path).parent / "PDF-MEHR"
-                if guess.is_dir():
-                    self.pdf_edit.setText(str(guess))
-
     def _browse_pdf(self) -> None:
         start = self.pdf_edit.text() or str(app_dir())
         folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
         if folder:
             self.pdf_edit.setText(folder)
 
-    def _emit_save(self) -> None:
-        self.saveRequested.emit({
-            "excel_path": self.excel_edit.text().strip(),
+    def connection_values(self) -> Dict[str, Any]:
+        """مقادیر فرم اتصال برای آزمایش/ذخیره."""
+        return {
+            "host": self.host_edit.text().strip() or "127.0.0.1",
+            "port": int(self.port_spin.value()),
+            "database": self.db_edit.text().strip() or "master_data",
+            "user": self.user_edit.text().strip() or "master_app",
+            "password": self.password_edit.text(),
+            "workbook_id": int(self.workbook_spin.value()),
             "sheet_name": self.sheet_edit.text().strip() or SHEET_NAME_DEFAULT,
+        }
+
+    def apply_connection(self, values: Dict[str, Any]) -> None:
+        """پر کردن فرم از تنظیمات خوانده‌شده (مدیریت دیتابیس مرکزی)."""
+        if values.get("host"):
+            self.host_edit.setText(str(values["host"]))
+        if values.get("port"):
+            self.port_spin.setValue(int(values["port"]))
+        if values.get("database"):
+            self.db_edit.setText(str(values["database"]))
+        if values.get("user"):
+            self.user_edit.setText(str(values["user"]))
+        if values.get("password"):
+            self.password_edit.setText(str(values["password"]))
+
+    def _emit_save(self) -> None:
+        values = self.connection_values()
+        values.update({
+            "db_host": values.pop("host"),
+            "db_port": values.pop("port"),
+            "db_name": values.pop("database"),
+            "db_user": values.pop("user"),
+            "db_password": values.pop("password"),
+            "db_workbook_id": values.pop("workbook_id"),
+            "db_remember_password": self.remember_check.isChecked(),
+            "sheet_name": values.pop("sheet_name"),
             "pdf_folder": self.pdf_edit.text().strip(),
             "theme": self.theme_combo.currentData(),
             "font_size": self.font_spin.value(),
             "auto_refresh_minutes": self.auto_spin.value(),
         })
+        self.saveRequested.emit(values)
 
     def update_data(self, data: DashboardData) -> None:
         """به‌روزرسانی کارت «وضعیت داده» پس از هر بارگذاری."""
@@ -6012,7 +6424,14 @@ class SettingsPage(QWidget):
             tile.set_colors(colors["brand"], colors["brand_soft"])
 
     def load_values(self, config: AppConfig) -> None:
-        self.excel_edit.setText(str(config.get("excel_path") or ""))
+        self.host_edit.setText(str(config.get("db_host") or "127.0.0.1"))
+        self.port_spin.setValue(int(config.get("db_port") or 3306))
+        self.db_edit.setText(str(config.get("db_name") or "master_data"))
+        self.user_edit.setText(str(config.get("db_user") or "master_app"))
+        if not self.password_edit.text():
+            self.password_edit.setText(str(config.get_password() or ""))
+        self.remember_check.setChecked(bool(config.get("db_remember_password")))
+        self.workbook_spin.setValue(int(config.get("db_workbook_id") or 1))
         self.sheet_edit.setText(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
         self.pdf_edit.setText(str(config.get("pdf_folder") or ""))
         theme_index = self.theme_combo.findData(str(config.get("theme") or "light"))
@@ -6049,9 +6468,9 @@ class HelpPage(QWidget):
         start_card = Card(colors, radius=16, padding=18)
         start_card.body.addWidget(_card_title("شروع سریع", "چهار گام تا اولین گزارش"))
         steps = [
-            "از صفحهٔ تنظیمات، فایل اکسل را انتخاب کنید یا فایل را کنار همین اسکریپت بگذارید.",
+            "از صفحهٔ تنظیمات، مشخصات اتصال دیتابیس مرکزی را وارد کنید (یا از مدیر دیتابیس بگیرید).",
             "پوشهٔ PDF را انتخاب کنید تا ستون «فایل» و پنل جزئیات فعال شود.",
-            "دکمهٔ بازخوانی یا Ctrl+R را بزنید تا داده‌ها دوباره خوانده شوند.",
+            "دکمهٔ بازخوانی یا Ctrl+R را بزنید تا داده‌ها از دیتابیس خوانده شوند.",
             "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
         ]
         for number, text in enumerate(steps, start=1):
@@ -6110,28 +6529,30 @@ class HelpPage(QWidget):
         for index, (web, desktop) in enumerate(rows):
             row_widget = QWidget()
             row_layout = QHBoxLayout(row_widget)
-            row_layout.setContentsMargins(2, 4, 2, 4)
+            row_layout.setContentsMargins(2, 5, 2, 5)
             row_layout.setSpacing(10)
             draw = IconWidget("check" if index < 8 else "close",
                               colors["success"] if index < 8 else colors["danger"], 15)
-            row_layout.addWidget(draw)
-            left = QLabel(web)
-            left.setObjectName("Muted")
-            left.setWordWrap(True)
-            left.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row_layout.addWidget(left, 1)
-            arrow = QLabel("←")
-            arrow.setStyleSheet(f"color: {colors['ink_3']};")
-            row_layout.addWidget(arrow)
-            right = QLabel(desktop)
-            right.setWordWrap(True)
-            right.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row_layout.addWidget(right, 1)
+            row_layout.addWidget(draw, 0, Qt.AlignTop)
+            text = QLabel(
+                f"<span style='color:{colors['ink']}; font-weight:600;'>"
+                f"{html_module.escape(desktop)}</span>"
+                f"<span style='color:{colors['ink_3']};'> &nbsp;←&nbsp; "
+                f"{html_module.escape(web)}</span>"
+            )
+            text.setWordWrap(True)
+            text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row_layout.addWidget(text, 1)
             mapping_card.body.addWidget(row_widget)
+            if index < len(rows) - 1:
+                line = QFrame()
+                line.setFixedHeight(1)
+                line.setStyleSheet(f"background: {colors['border_soft']};")
+                mapping_card.body.addWidget(line)
         mapping_card.body.addWidget(_card_title("یادداشت"))
         note = _muted(
             f"تنظیمات در mehr_qt_config.json و یادداشت‌ها در mehr_notes.json کنار برنامه ذخیره می‌شوند. "
-            f"برای اجرا: pip install PyQt5 openpyxl — نسخهٔ {APP_VERSION}"
+            f"پیش‌نیاز اجرا: pip install PyQt5 openpyxl mysql-connector-python — نسخهٔ {APP_VERSION}"
         )
         mapping_card.body.addWidget(note)
         self.layout.addWidget(mapping_card)
@@ -6288,6 +6709,7 @@ class Rail(QFrame):
     def __init__(self, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
         self.colors = colors
+        self.setObjectName("Rail")
         self.setFixedWidth(self.WIDTH)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 20, 0, 16)
@@ -6321,7 +6743,7 @@ class Rail(QFrame):
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
-        self.setStyleSheet(f"QFrame {{ background: {colors['rail']}; }}")
+        self.setStyleSheet(f"QFrame#Rail {{ background: {colors['rail']}; }}")
         self.logo.set_theme(colors)
         self.theme_button.set_icon_color(colors["rail_muted"])
         self.version_label.setStyleSheet(f"color: {colors['rail_muted']}; font-size: 7pt;")
@@ -6429,7 +6851,7 @@ class TopBar(QFrame):
 
 
 class DetailDrawer(QWidget):
-    """کشوی جزئیات قرارداد با یادداشت، پیگیری و نشان‌گذاری."""
+    """کشوی جزئیات قرارداد با مشخصات، وضعیت اسناد، فایل PDF و یادداشت‌ها."""
 
     closed = pyqtSignal()
     notesChanged = pyqtSignal(str)
@@ -6437,7 +6859,7 @@ class DetailDrawer(QWidget):
     revealRequested = pyqtSignal(str)
     bookmarkToggled = pyqtSignal(str)
 
-    WIDTH = 430
+    WIDTH = 440
 
     def __init__(self, colors: Dict[str, str], notes: NotesStore, parent=None) -> None:
         super().__init__(parent)
@@ -6447,95 +6869,107 @@ class DetailDrawer(QWidget):
         self._open = False
         self.setObjectName("Drawer")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"QWidget#Drawer {{ background: {colors['surface']};"
-            f"border-left: 1px solid {colors['border']}; }}"
-        )
+        self.setLayoutDirection(Qt.RightToLeft)
         self.setFixedWidth(self.WIDTH)
         self.hide()
+        self._apply_shell()
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        header = QHBoxLayout()
-        header.setSpacing(10)
-        self.avatar = Avatar("", 42)
-        header.addWidget(self.avatar)
+        # ---- سرصفحه ----
+        header = QWidget()
+        header.setObjectName("DrawerHead")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 16, 16, 12)
+        header_layout.setSpacing(10)
+        self.avatar = Avatar("", 40)
+        header_layout.addWidget(self.avatar)
         text_box = QVBoxLayout()
         text_box.setSpacing(1)
         self.name_label = QLabel("—")
-        self.name_label.setStyleSheet("font-size: 12pt; font-weight: 800;")
+        self.name_label.setStyleSheet("font-size: 11.5pt; font-weight: 800;")
+        self.name_label.setWordWrap(True)
         self.meta_label = QLabel("—")
         self.meta_label.setObjectName("Muted")
         text_box.addWidget(self.name_label)
         text_box.addWidget(self.meta_label)
-        header.addLayout(text_box, 1)
+        header_layout.addLayout(text_box, 1)
         self.bookmark_button = IconButton("", "bookmark", colors["ink_3"])
         self.bookmark_button.setObjectName("Ghost")
-        self.bookmark_button.setFixedSize(34, 34)
+        self.bookmark_button.setFixedSize(32, 32)
         self.bookmark_button.setToolTip("نشان‌گذاری")
         self.bookmark_button.setCursor(Qt.PointingHandCursor)
         self.bookmark_button.clicked.connect(self._toggle_bookmark)
-        header.addWidget(self.bookmark_button)
-        close_button = IconButton("", "close", colors["ink_3"])
-        close_button.setObjectName("Ghost")
-        close_button.setFixedSize(34, 34)
-        close_button.setCursor(Qt.PointingHandCursor)
-        close_button.clicked.connect(self.close_drawer)
-        header.addWidget(close_button)
-        layout.addLayout(header)
+        header_layout.addWidget(self.bookmark_button, 0, Qt.AlignTop)
+        self.close_button = IconButton("", "close", colors["ink_3"])
+        self.close_button.setObjectName("Ghost")
+        self.close_button.setFixedSize(32, 32)
+        self.close_button.setCursor(Qt.PointingHandCursor)
+        self.close_button.clicked.connect(self.close_drawer)
+        header_layout.addWidget(self.close_button, 0, Qt.AlignTop)
+        outer.addWidget(header)
 
-        self.chips = QHBoxLayout()
-        self.chips.setSpacing(5)
-        layout.addLayout(self.chips)
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setObjectName("DrawerLine")
+        outer.addWidget(divider)
 
+        # ---- بدنهٔ قابل اسکرول ----
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        layout.addWidget(self.scroll, 1)
+        outer.addWidget(self.scroll, 1)
         content = QWidget()
+        content.setObjectName("DrawerBody")
+        content.setLayoutDirection(Qt.RightToLeft)
         self.scroll.setWidget(content)
         body = QVBoxLayout(content)
-        body.setContentsMargins(0, 0, 6, 0)
-        body.setSpacing(12)
+        body.setContentsMargins(16, 12, 16, 18)
+        body.setSpacing(10)
 
-        self.info_grid = QGridLayout()
-        self.info_grid.setHorizontalSpacing(10)
-        self.info_grid.setVerticalSpacing(8)
-        body.addLayout(self.info_grid)
+        self.chips = QHBoxLayout()
+        self.chips.setSpacing(5)
+        body.addLayout(self.chips)
 
-        body.addWidget(_card_title("وضعیت‌ها"))
+        body.addWidget(self._section_title("مشخصات قرارداد"))
+        self.info_box = QVBoxLayout()
+        self.info_box.setSpacing(0)
+        body.addLayout(self.info_box)
+
+        body.addWidget(self._section_title("وضعیت اسناد اختتام"))
         self.flags_box = QVBoxLayout()
-        self.flags_box.setSpacing(4)
+        self.flags_box.setSpacing(0)
         body.addLayout(self.flags_box)
 
-        body.addWidget(_card_title("فایل قرارداد"))
-        pdf_row = QHBoxLayout()
+        body.addWidget(self._section_title("فایل قرارداد"))
+        pdf_card = QFrame()
+        pdf_card.setObjectName("MiniCard")
+        pdf_row = QHBoxLayout(pdf_card)
+        pdf_row.setContentsMargins(10, 8, 10, 8)
         pdf_row.setSpacing(8)
         self.pdf_label = QLabel("فایلی متصل نیست.")
-        self.pdf_label.setObjectName("Muted")
         self.pdf_label.setWordWrap(True)
+        self.pdf_label.setObjectName("Muted")
         pdf_row.addWidget(self.pdf_label, 1)
+        self.reveal_pdf_button = IconButton("", "folder", colors["ink_2"])
+        self.reveal_pdf_button.setObjectName("Ghost")
+        self.reveal_pdf_button.setFixedSize(30, 30)
+        self.reveal_pdf_button.setToolTip("نمایش در پوشه")
+        self.reveal_pdf_button.setCursor(Qt.PointingHandCursor)
+        self.reveal_pdf_button.clicked.connect(self._reveal_pdf)
+        pdf_row.addWidget(self.reveal_pdf_button)
         self.open_pdf_button = QPushButton("باز کردن")
         self.open_pdf_button.setObjectName("Ghost")
         self.open_pdf_button.setIcon(make_icon("external", colors["ink_2"], 14))
         self.open_pdf_button.setCursor(Qt.PointingHandCursor)
         self.open_pdf_button.clicked.connect(self._open_pdf)
         pdf_row.addWidget(self.open_pdf_button)
-        self.reveal_pdf_button = IconButton("", "folder", colors["ink_2"])
-        self.reveal_pdf_button.setObjectName("Ghost")
-        self.reveal_pdf_button.setFixedSize(34, 34)
-        self.reveal_pdf_button.setToolTip("نمایش در پوشه")
-        self.reveal_pdf_button.clicked.connect(self._reveal_pdf)
-        pdf_row.addWidget(self.reveal_pdf_button)
-        body.addLayout(pdf_row)
+        body.addWidget(pdf_card)
 
-        footer = QVBoxLayout()
-        footer.setSpacing(6)
-        layout.addLayout(footer)
-        footer.addWidget(_card_title("یادداشت و پیگیری"))
+        body.addWidget(self._section_title("یادداشت و پیگیری"))
         self.author_edit = QLineEdit()
         self.author_edit.setPlaceholderText("نام شما")
         self.follow_edit = QLineEdit()
@@ -6544,41 +6978,112 @@ class DetailDrawer(QWidget):
         input_row.setSpacing(8)
         input_row.addWidget(self.author_edit, 1)
         input_row.addWidget(self.follow_edit, 1)
-        footer.addLayout(input_row)
+        body.addLayout(input_row)
         self.note_edit = QPlainTextEdit()
         self.note_edit.setPlaceholderText("یادداشت این قرارداد…")
-        self.note_edit.setFixedHeight(58)
-        footer.addWidget(self.note_edit)
+        self.note_edit.setFixedHeight(56)
+        body.addWidget(self.note_edit)
         save_button = QPushButton("ثبت یادداشت")
         save_button.setObjectName("Primary")
         save_button.setIcon(make_icon("check", "#FFFFFF", 14))
         save_button.setCursor(Qt.PointingHandCursor)
         save_button.clicked.connect(self._save_note)
-        footer.addWidget(save_button)
+        body.addWidget(save_button)
 
         self.notes_box = QVBoxLayout()
         self.notes_box.setSpacing(6)
         body.addLayout(self.notes_box)
-        self.notes_empty = _muted("هنوز یادداشتی ثبت نشده است.")
+        self.notes_empty = QLabel("هنوز یادداشتی ثبت نشده است.")
+        self.notes_empty.setObjectName("Muted")
         body.addWidget(self.notes_empty)
         body.addStretch(1)
 
         self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(240)
+        self._anim.setDuration(220)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.finished.connect(self._on_anim_finished)
+
+    # ---- ظاهر ----
+    def _apply_shell(self) -> None:
+        c = self.colors
+        self.setStyleSheet(
+            f"QWidget#Drawer {{ background: {c['surface']};"
+            f" border-left: 1px solid {c['border']}; }}"
+            f"QWidget#DrawerHead {{ background: {c['surface']}; }}"
+            f"QWidget#DrawerBody {{ background: {c['surface']}; }}"
+            f"QFrame#DrawerLine {{ background: {c['border_soft']}; border: none; }}"
+            f"QFrame#MiniCard {{ background: {c['surface_2']}; border-radius: 10px; }}"
+        )
+
+    def _section_title(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"color: {self.colors['ink']}; font-size: 9.5pt; font-weight: 800;"
+            f"padding-top: 6px;"
+        )
+        return label
+
+    def _info_row(self, title: str, value: str, last: bool = False) -> QWidget:
+        c = self.colors
+        row = QFrame()
+        row.setObjectName("InfoRow")
+        border = "" if last else f"border-bottom: 1px solid {c['border_soft']};"
+        row.setStyleSheet(f"QFrame#InfoRow {{ {border} }}")
+        row.setLayoutDirection(Qt.RightToLeft)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(10)
+        key = QLabel(title)
+        key.setObjectName("Muted")
+        key.setFixedWidth(96)
+        key.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        key.setStyleSheet("font-size: 8pt;")
+        layout.addWidget(key, 0, Qt.AlignTop)
+        val = QLabel(value or "—")
+        val.setWordWrap(True)
+        val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        val.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        val.setMinimumWidth(0)
+        val.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        val.setStyleSheet("font-size: 9pt; font-weight: 600;")
+        layout.addWidget(val, 1)
+        return row
+
+    def _flag_row(self, label: str, state: bool, last: bool = False) -> QWidget:
+        c = self.colors
+        row = QFrame()
+        row.setObjectName("FlagRow")
+        border = "" if last else f"border-bottom: 1px solid {c['border_soft']};"
+        row.setStyleSheet(f"QFrame#FlagRow {{ {border} }}")
+        row.setLayoutDirection(Qt.RightToLeft)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 5, 0, 5)
+        layout.setSpacing(8)
+        chip = chip_label(
+            "ثبت شده" if state else "نیازمند اقدام",
+            c["success"] if state else c["warning"],
+            c["success_soft"] if state else c["warning_soft"],
+            radius=8, padding="2px 8px",
+        )
+        chip.setStyleSheet(chip.styleSheet() + "font-size: 7.6pt;")
+        layout.addWidget(chip, 0)
+        text = QLabel(label)
+        text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        text.setWordWrap(True)
+        text.setStyleSheet(
+            f"color: {c['ink'] if state else c['ink_2']}; font-size: 9pt;"
+        )
+        layout.addWidget(text, 1)
+        return row
 
     # ---- جای‌گیری ----
     def place(self) -> None:
         parent = self.parentWidget()
         if parent is None:
             return
-        x = parent.width() - self.WIDTH if self._open else parent.width()
-        self.setGeometry(x, 0, self.WIDTH, parent.height())
+        self.setGeometry(parent.width() - self.WIDTH, 0, self.WIDTH, parent.height())
 
     def open_drawer(self) -> None:
-        if self.record is None:
-            return
         self._open = True
         self.show()
         self.raise_()
@@ -6631,54 +7136,29 @@ class DetailDrawer(QWidget):
         self.open_pdf_button.setEnabled(bool(record.pdf_file))
         self.reveal_pdf_button.setEnabled(bool(record.pdf_file))
 
-        clear_layout(self.info_grid)
+        clear_layout(self.info_box)
         rows = [
-            ("شمارهٔ قرارداد", record.col3 or "—"),
-            ("موضوع", record.col4 or "—"),
-            ("نوع قرارداد", record.f_value or "—"),
-            ("کسورات اسناد اختتام", record.deductions or "—"),
-            ("پیشرفت کارکرد", pretty_label(record.progress_status) or "—"),
-            ("پیشرفت اختتام", pretty_label(record.completion_status) or "—"),
-            ("الحاقیه / زمان", record.annex_status or "—"),
-            ("وضعیت پکیج آزادسازی", record.as_status or "—"),
-            ("پیشرفت جدول", record.progress_table or "—"),
-            ("اختتام جدول", record.completion_table or "—"),
+            ("شمارهٔ قرارداد", record.col3),
+            ("موضوع", record.col4),
+            ("نوع قرارداد", record.f_value),
+            ("کسورات اسناد اختتام", record.deductions),
+            ("پیشرفت کارکرد", pretty_label(record.progress_status)),
+            ("پیشرفت اختتام", pretty_label(record.completion_status)),
+            ("الحاقیه / زمان", record.annex_status),
+            ("وضعیت پکیج آزادسازی", record.as_status),
+            ("پیشرفت جدول", record.progress_table),
+            ("اختتام جدول", record.completion_table),
             ("AW / AX / AY", f"{record.aw or '—'} / {record.ax or '—'} / {record.ay or '—'}"),
         ]
         for index, (title, value) in enumerate(rows):
-            key_label = QLabel(title)
-            key_label.setObjectName("Muted")
-            key_label.setStyleSheet("font-size: 8pt;")
-            key_label.setFixedWidth(104)
-            key_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
-            value_label = QLabel(str(value))
-            value_label.setWordWrap(True)
-            value_label.setMinimumWidth(0)
-            value_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            value_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
-            value_label.setContentsMargins(0, 0, 10, 0)
-            value_label.setStyleSheet("font-size: 9pt; font-weight: 600;")
-            self.info_grid.addWidget(key_label, index, 0, Qt.AlignTop)
-            self.info_grid.addWidget(value_label, index, 1)
-        self.info_grid.setColumnStretch(0, 0)
-        self.info_grid.setColumnStretch(1, 1)
+            self.info_box.addWidget(self._info_row(title, str(value or "—"),
+                                                   last=index == len(rows) - 1))
 
         clear_layout(self.flags_box)
-        for key, label, _column in FLAG_DEFS:
-            state = bool(record.flags.get(key))
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            icon = IconWidget("check" if state else "close",
-                              self.colors["success"] if state else self.colors["ink_3"], 15)
-            row.addWidget(icon)
-            text = QLabel(label)
-            text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            text.setStyleSheet(
-                f"color: {self.colors['ink'] if state else self.colors['ink_3']};"
-            )
-            row.addWidget(text, 1)
-            self.flags_box.addLayout(row)
+        for index, (key, label, _column) in enumerate(FLAG_DEFS):
+            self.flags_box.addWidget(self._flag_row(
+                label, bool(record.flags.get(key)), last=index == len(FLAG_DEFS) - 1
+            ))
 
         self._refresh_notes()
         self.author_edit.setText(str(self.notes.entry(record.key).get("last_author", "")))
@@ -6746,14 +7226,13 @@ class DetailDrawer(QWidget):
 
     def set_theme_colors(self, colors: Dict[str, str]) -> None:
         self.colors = colors
-        self.setStyleSheet(
-            f"QWidget#Drawer {{ background: {colors['surface']};"
-            f"border-left: 1px solid {colors['border']}; }}"
-        )
+        self._apply_shell()
+        self.bookmark_button.set_icon_color(colors["ink_3"])
+        self.close_button.set_icon_color(colors["ink_3"])
+        self.reveal_pdf_button.set_icon_color(colors["ink_2"])
+        self.open_pdf_button.setIcon(make_icon("external", colors["ink_2"], 14))
         for card in self.findChildren(Card):
             card.set_theme(colors)
-        self.bookmark_button.set_icon_color(colors["ink_3"])
-        self.reveal_pdf_button.set_icon_color(colors["ink_2"])
         if self.record is not None:
             self.set_record(self.record)
 
@@ -6890,7 +7369,6 @@ class MainWindow(QMainWindow):
         self.colors: Dict[str, str] = THEMES["light"]
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_app_icon())
-        self.setAcceptDrops(True)
         self.setMinimumSize(1120, 720)
         self._restore_geometry()
         self._build_ui()
@@ -6980,6 +7458,8 @@ class MainWindow(QMainWindow):
         self.settings.saveRequested.connect(self.save_settings)
         self.settings.reloadRequested.connect(self.load_data)
         self.settings.openDataFolderRequested.connect(self._open_data_folder)
+        self.settings.testRequested.connect(self.test_database)
+        self.settings.detectRequested.connect(self.detect_database_settings)
 
         self.show_page("dashboard")
         self.detail.place()
@@ -7010,10 +7490,9 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, k=key: self.show_page(k))
         menu.addSeparator()
         for label, slot in (
-            ("بازخوانی اکسل", self.load_data),
+            ("بازخوانی از دیتابیس", self.load_data),
             ("تغییر پوسته", self.toggle_theme),
-            ("انتخاب فایل اکسل", self.pick_excel_file),
-            ("تنظیمات", lambda: self.show_page("settings")),
+            ("تنظیمات اتصال", lambda: self.show_page("settings")),
             ("دربارهٔ برنامه", self.show_about),
             ("خروج", self.close),
         ):
@@ -7073,34 +7552,20 @@ class MainWindow(QMainWindow):
     # بارگذاری داده
     # ------------------------------------------------------------------
     def initial_load(self) -> None:
-        excel = str(self.config.get("excel_path") or "")
-        if not excel or not os.path.exists(excel):
-            found = find_default_excel(self.config)
-            if found:
-                self.config.set("excel_path", found, save=False)
-                self.config.save()
-                excel = found
-        if not excel or not os.path.exists(excel):
+        if not str(self.config.get("db_password") or "") and not str(self.config.get("db_host") or ""):
             self.show_page("settings")
-            self._notify("فایل اکسل پیدا نشد؛ مسیر را در تنظیمات انتخاب کنید", "alert")
-            self.settings.set_status("فایل اکسل پیدا نشد.")
-            return
         self.load_data(silent=True)
 
     def load_data(self, *_args, silent: bool = False) -> None:
         if self._loader_running():
             return
-        excel = str(self.config.get("excel_path") or "").strip()
-        if not excel:
+        if not str(self.config.get("db_host") or "").strip():
             self.show_page("settings")
             return
-        if not os.path.exists(excel):
-            self._on_load_failed(f"فایل اکسل پیدا نشد:\n{excel}", silent)
-            return
-        sheet = str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
+        settings = self.config.db_settings()
         pdf_folder = str(self.config.get("pdf_folder") or "")
         self._set_loading(True)
-        loader = ExcelLoader(excel, sheet, pdf_folder, self)
+        loader = DataLoader(settings, pdf_folder, self)
         loader.loaded.connect(lambda data, silent=silent: self._on_data_loaded(data, silent))
         loader.failed.connect(lambda message, silent=silent: self._on_load_failed(message, silent))
         loader.finished.connect(self._on_loader_finished)
@@ -7120,7 +7585,7 @@ class MainWindow(QMainWindow):
     def _set_loading(self, loading: bool) -> None:
         self.topbar.reload_button.setEnabled(not loading)
         if loading:
-            self.statusBar().showMessage("در حال خواندن فایل اکسل…", 0)
+            self.statusBar().showMessage("در حال خواندن داده از دیتابیس مرکزی…", 0)
 
     def _on_loader_finished(self) -> None:
         self._set_loading(False)
@@ -7134,10 +7599,12 @@ class MainWindow(QMainWindow):
         self.reports.update_data(data)
         self.pdfs.set_folder(data.pdf_folder)
         self.settings.load_values(self.config)
-        self.settings.set_loaded(data.loaded_at_text, data.total_contracts)
+        self.settings.set_loaded(data.excel_path, data.total_contracts)
         self.settings.update_data(data)
+        self.settings.set_status("متصل — " + (data.source_note or "دیتابیس مرکزی"))
         self.detail.setEnabled(bool(data.records))
-        self.status_source.setText(bidi(f"منبع: \u202a{data.excel_path}\u202c"))
+        source = data.source_note or "دیتابیس مرکزی"
+        self.status_source.setText(bidi(f"منبع: \u202a{data.excel_path}\u202c • {source}"))
         self.status_counts.setText(bidi(f"{fa(data.total_contracts)} قرارداد"))
         self.status_loaded.setText(f"بارگذاری: {data.loaded_at_text}")
         self.statusBar().showMessage(
@@ -7164,17 +7631,17 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("خطا در خواندن داده‌ها")
         box.setIcon(QMessageBox.Critical)
-        box.setText("خواندن فایل اکسل ممکن نشد.")
+        box.setText("خواندن داده از دیتابیس مرکزی ممکن نشد.")
         box.setInformativeText(message)
-        pick_button = box.addButton("انتخاب فایل اکسل", QMessageBox.AcceptRole)
-        settings_button = box.addButton("تنظیمات", QMessageBox.ActionRole)
+        settings_button = box.addButton("تنظیمات اتصال", QMessageBox.AcceptRole)
+        retry_button = box.addButton("تلاش دوباره", QMessageBox.ActionRole)
         box.addButton("بستن", QMessageBox.RejectRole)
         box.exec_()
         clicked = box.clickedButton()
-        if clicked is pick_button:
-            self.pick_excel_file()
-        elif clicked is settings_button:
+        if clicked is settings_button:
             self.show_page("settings")
+        elif clicked is retry_button:
+            self.load_data()
 
     def _setup_auto_timer(self) -> None:
         if not hasattr(self, "auto_timer"):
@@ -7186,35 +7653,51 @@ class MainWindow(QMainWindow):
             self.auto_timer.start(minutes * 60 * 1000)
 
     def _auto_refresh(self) -> None:
-        path = self.data.excel_path or str(self.config.get("excel_path") or "")
-        if not path or not os.path.exists(path):
-            return
         if self._loader_running():
             return
         try:
-            mtime = datetime.fromtimestamp(os.path.getmtime(path))
-        except OSError:
+            updated = fetch_workbook_updated_at(self.config.db_settings())
+        except Exception:
             return
-        if self.data.source_mtime is None or mtime > self.data.source_mtime:
-            self.statusBar().showMessage("تغییر فایل اکسل شناسایی شد؛ بازخوانی…", 4000)
+        if updated is None:
+            return
+        if self.data.source_mtime is None or updated > self.data.source_mtime:
+            self.statusBar().showMessage("نسخهٔ تازه‌تری از کتاب کار در دیتابیس ثبت شده؛ بازخوانی…", 4000)
             self.load_data(silent=True)
 
-    def pick_excel_file(self) -> None:
-        start = (str(self.config.get("excel_path") or "") or str(app_dir()))
-        if os.path.isfile(start):
-            start = os.path.dirname(start)
-        path, _ = QFileDialog.getOpenFileName(self, "انتخاب فایل اکسل", start, EXCEL_FILTER)
-        if not path:
+    # ------------------------------------------------------------------
+    # اتصال دیتابیس
+    # ------------------------------------------------------------------
+    def test_database(self) -> None:
+        values = self.settings.connection_values()
+        settings = dict(self.config.db_settings())
+        settings.update(values)
+        try:
+            info = fetch_workbook_blob(settings)
+        except ExcelDataError as exc:
+            self.settings.set_status("اتصال ناموفق — " + str(exc).splitlines()[0])
+            QMessageBox.warning(self, "آزمایش اتصال", str(exc))
             return
-        self.config.set("excel_path", path)
-        pdf_folder = str(self.config.get("pdf_folder") or "")
-        if not pdf_folder:
-            guess = default_pdf_folder(path, self.config)
-            if guess:
-                self.config.set("pdf_folder", guess, save=False)
-                self.config.save()
-        self.settings.load_values(self.config)
-        self.load_data()
+        size_kb = max(1, len(info["data"]) // 1024)
+        message = f"اتصال موفق — {info['filename']} ({fa(size_kb)} کیلوبایت)"
+        self.settings.set_status(message)
+        self._notify("اتصال به دیتابیس برقرار است", "check")
+
+    def detect_database_settings(self) -> None:
+        found = read_manager_settings()
+        if not found:
+            self.settings.set_status(
+                "تنظیمات «مدیر دیتابیس مرکزی» پیدا نشد؛ مقادیر را دستی وارد کنید."
+            )
+            return
+        password = read_manager_password()
+        self.settings.apply_connection({**found, "password": password})
+        if password:
+            self.settings.set_status("تنظیمات و رمز از مدیر دیتابیس خوانده شد.")
+        else:
+            self.settings.set_status(
+                "میزبان/دیتابیس/کاربر از مدیر دیتابیس خوانده شد — رمز را وارد کنید."
+            )
 
     def pick_pdf_folder(self) -> None:
         start = str(self.settings.pdf_edit.text() or app_dir())
@@ -7225,8 +7708,12 @@ class MainWindow(QMainWindow):
             self.load_data()
 
     def save_settings(self, values: Dict[str, Any]) -> None:
+        password = str(values.pop("db_password", "") or "")
+        remember = bool(values.pop("db_remember_password", True))
         for key, value in values.items():
             self.config.set(key, value, save=False)
+        self.config.set("db_remember_password", remember, save=False)
+        self.config.set_password(password, remember)
         self.config.save()
         theme = str(values.get("theme") or "light")
         font_size = int(values.get("font_size") or 10)
@@ -7518,25 +8005,6 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "detail"):
             self.detail.place()
-
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith((".xlsx", ".xlsm", ".xls")):
-                    event.acceptProposedAction()
-                    return
-        super().dragEnterEvent(event)
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith((".xlsx", ".xlsm", ".xls")):
-                self.config.set("excel_path", path)
-                self.settings.load_values(self.config)
-                self.load_data()
-                event.acceptProposedAction()
-                return
-        super().dropEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
