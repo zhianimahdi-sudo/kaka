@@ -3203,6 +3203,18 @@ def _truncate(text: str, limit: int = 70) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _mix(fg_hex: str, bg_hex: str, ratio: float) -> QColor:
+    """ترکیب دو رنگ برای ساخت پس‌زمینهٔ نرم چیپ در پوستهٔ تیره."""
+    fg = QColor(fg_hex)
+    bg = QColor(bg_hex)
+    ratio = max(0.0, min(1.0, ratio))
+    return QColor(
+        int(fg.red() * ratio + bg.red() * (1 - ratio)),
+        int(fg.green() * ratio + bg.green() * (1 - ratio)),
+        int(fg.blue() * ratio + bg.blue() * (1 - ratio)),
+    )
+
+
 CHIP_STYLES: Dict[str, Dict[str, Tuple[str, str]]] = {
     "annex": {
         "منقضی شده": ("#b91c1c", "#fde8e8"),
@@ -3243,18 +3255,18 @@ class ContractTableModel(QAbstractTableModel):
     """مدل جدول با فیلتر، جستجو و مرتب‌سازی داخلی."""
 
     COLUMNS: List[ColumnSpec] = [
-        ColumnSpec("ردیف", 46, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
-        ColumnSpec("نام شرکت", 144, lambda r, i: r.col2),
-        ColumnSpec("شماره قرارداد", 122, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
-        ColumnSpec("موضوع قرارداد", 180, lambda r, i: r.col4),
-        ColumnSpec("نوع قرارداد", 126, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
-        ColumnSpec("موارد باز", 78, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
-        ColumnSpec("کسورات اسناد اختتام", 150, lambda r, i: r.deductions),
-        ColumnSpec("پیشرفت کارکرد", 120, lambda r, i: r.progress_status, int(Qt.AlignCenter), "chip:progress"),
-        ColumnSpec("الحاقیه", 116, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
-        ColumnSpec("وضعیت پکیج", 96, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
-        ColumnSpec("فایل", 48, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
-        ColumnSpec("نشان", 38, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
+        ColumnSpec("ردیف", 48, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
+        ColumnSpec("نام شرکت", 158, lambda r, i: r.col2),
+        ColumnSpec("شماره قرارداد", 124, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
+        ColumnSpec("موضوع قرارداد", 190, lambda r, i: r.col4),
+        ColumnSpec("نوع قرارداد", 132, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
+        ColumnSpec("موارد باز", 82, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
+        ColumnSpec("کسورات اسناد اختتام", 152, lambda r, i: r.deductions),
+        ColumnSpec("پیشرفت کارکرد", 122, lambda r, i: r.progress_status, int(Qt.AlignCenter), "chip:progress"),
+        ColumnSpec("الحاقیه", 118, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
+        ColumnSpec("وضعیت پکیج", 112, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
+        ColumnSpec("فایل", 50, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
+        ColumnSpec("نشان", 40, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
     ]
 
     def __init__(self, notes: NotesStore, parent=None) -> None:
@@ -3551,10 +3563,16 @@ class ContractDelegate(QStyledItemDelegate):
             chip = QRectF(
                 rect.center().x() - width / 2, rect.center().y() - 9, width, 18,
             )
+            dark = QColor(colors["surface"]).lightness() < 128
+            chip_bg = _mix(colors["danger"], colors["surface"], 0.22) if dark \
+                else QColor(colors["danger_soft"])
+            chip_fg = QColor(colors["danger"])
+            if dark:
+                chip_fg = chip_fg.lighter(132)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(QColor(colors["danger_soft"])))
+            painter.setBrush(QBrush(chip_bg))
             painter.drawRoundedRect(chip, 6, 6)
-            painter.setPen(QPen(QColor(colors["danger"])))
+            painter.setPen(QPen(chip_fg))
             painter.drawText(chip, Qt.AlignCenter, "PDF")
             painter.restore()
             return
@@ -3562,10 +3580,17 @@ class ContractDelegate(QStyledItemDelegate):
         if role == "flags":
             count = int(index.data(Qt.UserRole + 2) or 0)
             label = text
+            dark = QColor(colors["surface"]).lightness() < 128
             if count:
-                fg, bg = QColor("#b45309"), QColor(colors["warning_soft"])
+                if dark:
+                    fg = QColor(colors["warning"]).lighter(135)
+                    bg = _mix(colors["warning"], colors["surface"], 0.24)
+                else:
+                    fg, bg = QColor("#b45309"), QColor(colors["warning_soft"])
             else:
-                fg, bg = QColor(colors["text_muted"]), QColor(colors["surface_soft"])
+                fg = QColor(colors["text_muted"])
+                bg = _mix(colors["text_muted"], colors["surface"], 0.12) if dark \
+                    else QColor(colors["surface_soft"])
             self._draw_chip(painter, rect, label, fg, bg, font)
             painter.restore()
             return
@@ -3585,9 +3610,8 @@ class ContractDelegate(QStyledItemDelegate):
             if fg_hex:
                 fg, bg = QColor(fg_hex), QColor(bg_hex)
                 if QColor(colors["surface"]).lightness() < 128:
-                    fg = QColor(fg_hex).lighter(150)
-                    bg = QColor(fg_hex)
-                    bg.setAlpha(46)
+                    fg = QColor(fg_hex).lighter(145)
+                    bg = _mix(fg_hex, colors["surface"], 0.24)
             else:
                 fg, bg = QColor(colors["primary_dark"]), QColor(colors["primary_soft"])
             self._draw_chip(painter, rect, text, fg, bg, font)
@@ -5433,16 +5457,27 @@ class ContractsPage(QWidget):
         self._apply_view()
         QTimer.singleShot(0, self._fit_columns)
 
+    MIN_WIDTHS = (48, 148, 114, 168, 122, 78, 132, 116, 112, 118, 50, 40)
+
     def _fit_columns(self) -> None:
-        """پخش عرض ستون‌ها به نسبت عرض جدول تا متن‌ها کم‌تر بریده شوند."""
+        """توزیع عرض جدول بین ستون‌ها؛ هیچ ستونی از حد خوانا کوچک‌تر نمی‌شود."""
         available = self.table.viewport().width()
         if available <= 0:
             return
         specs = ContractTableModel.COLUMNS
-        total = sum(max(1, spec.width) for spec in specs)
-        scale = available / total if total else 1.0
-        for index, spec in enumerate(specs):
-            self.table.setColumnWidth(index, max(34, int(spec.width * scale)))
+        minimums = [min(m, max(1, spec.width)) for m, spec in zip(self.MIN_WIDTHS, specs)]
+        min_total = sum(minimums)
+        if available <= min_total:
+            widths = minimums
+        else:
+            extra = available - min_total
+            weights = [max(0, spec.width - minimums[i]) for i, spec in enumerate(specs)]
+            weight_total = sum(weights) or 1
+            widths = [minimums[i] + int(extra * weights[i] / weight_total)
+                      for i in range(len(specs))]
+            widths[3] += available - sum(widths)
+        for index, width in enumerate(widths):
+            self.table.setColumnWidth(index, max(34, width))
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
