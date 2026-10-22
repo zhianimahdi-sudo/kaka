@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.4.1"
+APP_VERSION = "3.4.2"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1240,21 +1240,15 @@ SYSTEM_UPDATE_LAST_COLUMN = 36    # ستون AJ
 _SYSTEM_UPDATE_OK_WORDS = {"okk", "ok"}
 
 # علامت‌هایی که در ستون‌های وضعیت/کسورات «ثبت‌شده» حساب می‌شوند.
-# علاوه بر M (قرارداد فعلی)، خروجی‌های دیگر سامانه از این علامت‌ها استفاده می‌کنند.
-_STATUS_MARK_TOKENS = {
-    "m", "م", "✓", "✔", "x", "✗", "✘", "*", "1", "1.0", "true", "yes", "y",
-    "بله", "دارد", "ثبت", "ثبت شده", "انجام شده", "ok",
-}
+# مرجع، همان رفتار نسخهٔ اولیه است: فقط حرف M. حرف «م» و تیک هم پذیرفته می‌شوند،
+# اما عدد ۱ یا x عمداً شمرده نمی‌شوند تا شاخص‌ها اشتباه نشوند.
+_STATUS_MARK_TOKENS = {"m", "م", "✓", "✔"}
 
 
 def is_status_mark(value: Any) -> bool:
-    """آیا سلول یک علامت «ثبت‌شده» است (M، م، ✓، *، ۱، ...)؟"""
-    if value is None:
+    """آیا سلول علامت «ثبت‌شده» است؟ (فقط M / م / ✓)"""
+    if value is None or isinstance(value, (bool, int, float)):
         return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value == 1
     text = normalize_per(txt(value)).strip()
     if not text:
         return False
@@ -1687,9 +1681,11 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
                         value = "ok"
                 cell = sheet.cell(row=target_row, column=column)
                 if is_blank(value):
-                    if cell.value is None:
-                        continue
-                    value = None
+                    # مقدار خالی در فایل سامانه، دادهٔ موجود کتاب کار را پاک نمی‌کند
+                    # (همان رفتار نسخهٔ اولیه) تا اعداد داشبورد تغییر نکنند.
+                    continue
+                if cell.value == value:
+                    continue
                 cell.value = value
                 updated += 1
         # اکسل بعد از ذخیره، ستون‌های خالی انتهایی را حذف می‌کند و عرض شیت به ۵۶
@@ -1789,9 +1785,44 @@ _SOURCE_HEADER_HINTS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+GENERATED_WORKBOOK_MARK = "mehr-generated-from-file01"
+GENERATED_WORKBOOK_TITLE = "کتاب کار داخلی برنامه"
+
+
 def managed_workbook_path() -> Path:
     """مسیر کتاب کار داخلی برنامه (جایگزین فایل ۰۲ برای کاربر)."""
     return data_dir() / MANAGED_WORKBOOK_NAME
+
+
+def is_generated_workbook(path: str) -> bool:
+    """آیا این فایل را خودِ برنامه از فایل ۰۱ ساخته (و نه کتاب کار اصلی کاربر)؟"""
+    try:
+        probe = Path(str(path))
+        if not probe.exists():
+            return False
+        workbook = openpyxl.load_workbook(str(probe), read_only=True)
+    except Exception:
+        return False
+    try:
+        props = getattr(workbook, "properties", None)
+        keywords = str(getattr(props, "keywords", "") or "")
+        if GENERATED_WORKBOOK_MARK in keywords:
+            return True
+        for sheet in workbook.worksheets:
+            try:
+                first = next(sheet.iter_rows(min_row=1, max_row=1, max_col=1, values_only=True))
+            except Exception:
+                continue
+            text = str((first or [""])[0] or "")
+            if text.startswith(GENERATED_WORKBOOK_TITLE):
+                return True
+            break
+        return False
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
 
 
 def _header_column(rows: Sequence[Sequence[Any]], header_row: int,
@@ -1883,6 +1914,17 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
         return value
 
     workbook = openpyxl.Workbook()
+    try:
+        workbook.properties.keywords = GENERATED_WORKBOOK_MARK
+        workbook.properties.title = (
+            f"{GENERATED_WORKBOOK_TITLE} — ساخته‌شده از {Path(str(source_path)).name}"
+        )
+        workbook.properties.description = (
+            "این کتاب کار را برنامه از خروجی سامانه ساخت؛ کتاب کار اصلی نیست و "
+            "ستون‌های وضعیت را ندارد."
+        )
+    except Exception:
+        pass
     sheet = workbook.active
     sheet.title = (sheet_name or SHEET_NAME_DEFAULT)[:31]
     sheet.sheet_view.rightToLeft = True
@@ -2082,10 +2124,31 @@ def find_seed_workbook(source_path: str, extra_paths: Sequence[str] = ()) -> str
     """
     candidates: List[str] = []
 
+    managed = managed_workbook_path()
+
     def add(path: Any) -> None:
         text = str(path or "").strip()
         if text:
             candidates.append(text)
+
+    def usable(probe: Path) -> bool:
+        """کتاب کار واقعی کاربر: شیت colorcode دارد و ساختهٔ خود برنامه نیست."""
+        try:
+            if not probe.exists() or not probe.is_file():
+                return False
+            if probe.name.startswith("~$"):
+                return False
+            if probe.resolve() == managed.resolve():
+                return False
+            if probe.resolve() == Path(str(source_path)).expanduser().resolve():
+                return False
+            if not has_colorcode_sheet(str(probe)):
+                return False
+            if is_generated_workbook(str(probe)):
+                return False
+            return True
+        except Exception:
+            return False
 
     for item in extra_paths:
         add(item)
@@ -2099,11 +2162,7 @@ def find_seed_workbook(source_path: str, extra_paths: Sequence[str] = ()) -> str
             seen.add(key)
             try:
                 probe = Path(path).expanduser()
-                if not probe.exists() or not probe.is_file():
-                    continue
-                if probe.resolve() == Path(str(source_path)).expanduser().resolve():
-                    continue
-                if has_colorcode_sheet(str(probe)):
+                if usable(probe):
                     log_event(f"کتاب کار قبلی به‌عنوان پایه پیدا شد: {probe}")
                     return str(probe)
             except Exception:
@@ -2120,12 +2179,8 @@ def find_seed_workbook(source_path: str, extra_paths: Sequence[str] = ()) -> str
                 if not Path(folder).is_dir():
                     continue
                 for item in Path(folder).glob("*.xlsx"):
-                    if item.name.startswith("~$"):
-                        continue
                     try:
-                        if item.resolve() == Path(str(source_path)).expanduser().resolve():
-                            continue
-                        if has_colorcode_sheet(str(item)):
+                        if usable(item):
                             found.append((item.stat().st_mtime, str(item)))
                     except Exception:
                         continue
@@ -2143,49 +2198,115 @@ def find_seed_workbook(source_path: str, extra_paths: Sequence[str] = ()) -> str
 def update_managed_workbook(source_path: str,
                             sheet_name: str = SHEET_NAME_DEFAULT,
                             seed_path: str = "") -> Dict[str, Any]:
-    """کتاب کار داخلی برنامه را از فایل ۰۱ می‌سازد یا به‌روزرسانی می‌کند."""
+    """کتاب کار برنامه را از فایل ۰۱ به‌روزرسانی می‌کند.
+
+    قاعدهٔ اصلی: **کتاب کار اصلی کاربر (فایل ۰۲ / دیتابیس) هرگز با کتاب کار
+    ساخته‌شده از فایل ۰۱ جایگزین نمی‌شود**؛ چون فایل ۰۱ ستون‌های وضعیت، کسورات و
+    درصد پیشرفت را ندارد و اعداد داشبورد اشتباه می‌شوند.
+    """
     target = managed_workbook_path()
-    existing = target.exists() and target.stat().st_size > 0
-    if existing and not has_colorcode_sheet(str(target)):
-        existing = False
-    seed_blob = b"" if existing else _seed_workbook_blob(seed_path, source_path)
-    if not existing and seed_blob:
-        # کتاب کار قبلی کاربر پیدا شد؛ همان را پایه می‌گیریم تا ستون‌های دیگرش حفظ شود.
-        plan = plan_system_update(source_path, seed_blob, sheet_name=sheet_name)
-        new_blob, cells = apply_system_update(plan, seed_blob)
+    exists = target.exists() and target.stat().st_size > 0
+    has_sheet = exists and has_colorcode_sheet(str(target))
+    generated = has_sheet and is_generated_workbook(str(target))
+    seed_blob = _seed_workbook_blob(seed_path, source_path)
+    seed_used = ""
+
+    def replace_with(blob: bytes, source_name: str) -> Tuple[bytes, int, SystemUpdatePlan]:
+        plan_ = plan_system_update(source_path, blob, sheet_name=sheet_name)
+        new_blob_, cells_ = apply_system_update(plan_, blob)
         target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(new_blob_)
+        log_event(
+            f"کتاب کار داخلی از روی «{Path(source_name).name}» به‌روزرسانی شد: "
+            f"{plan_.matched_rows} ردیف، {cells_} سلول"
+        )
+        return new_blob_, cells_, plan_
+
+    if seed_blob:
+        # کتاب کار اصلی موجود است.
+        if not has_sheet or generated:
+            if exists and generated:
+                backup_workbook(target.read_bytes(), target.name)
+            _new_blob, cells, plan = replace_with(seed_blob, seed_path)
+            seed_used = str(seed_path)
+            return {
+                "created": True,
+                "replaced_generated": bool(generated),
+                "plan": plan,
+                "built": {},
+                "source_path": plan.source_path,
+                "updated_cells": cells,
+                "filtered_rows": plan.filtered_rows,
+                "matched_rows": plan.matched_rows,
+                "backup_path": "",
+                "output_path": str(target),
+                "seeded_from": seed_used,
+                "summary": preview_system_update(plan),
+            }
+        blob = target.read_bytes()
+        plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
+        backup = backup_workbook(blob, target.name)
+        new_blob, cells = apply_system_update(plan, blob)
         target.write_bytes(new_blob)
         log_event(
-            f"کتاب کار داخلی از روی «{Path(str(seed_path)).name}» ساخته و به‌روزرسانی شد: "
-            f"{plan.matched_rows} ردیف، {cells} سلول"
+            f"کتاب کار داخلی به‌روزرسانی شد: {plan.filtered_rows} ردیف «اجرا - مهر»، "
+            f"{cells} سلول → {target}"
         )
         return {
-            "created": True,
+            "created": False,
+            "replaced_generated": False,
             "plan": plan,
             "built": {},
             "source_path": plan.source_path,
             "updated_cells": cells,
             "filtered_rows": plan.filtered_rows,
             "matched_rows": plan.matched_rows,
-            "backup_path": "",
+            "backup_path": backup,
             "output_path": str(target),
-            "seeded_from": str(seed_path),
             "summary": preview_system_update(plan),
         }
-    if not existing:
+
+    if generated:
+        # کتاب کار ساخته‌شده از فایل ۰۱ و کتاب کار اصلی پیدا نشد؛ همان را درجا
+        # به‌روزرسانی می‌کنیم و صادقانه هشدار می‌دهیم که اعداد وضعیت ناقص است.
+        blob = target.read_bytes()
+        plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
+        backup = backup_workbook(blob, target.name)
+        new_blob, cells = apply_system_update(plan, blob)
+        target.write_bytes(new_blob)
+        log_event(
+            f"کتاب کار ساخته‌شده (بدون کتاب کار اصلی) درجا به‌روزرسانی شد: "
+            f"{plan.matched_rows} ردیف، {cells} سلول"
+        )
+        return {
+            "created": False,
+            "replaced_generated": True,
+            "no_source_workbook": True,
+            "plan": plan,
+            "built": {},
+            "source_path": plan.source_path,
+            "updated_cells": cells,
+            "filtered_rows": plan.filtered_rows,
+            "matched_rows": plan.matched_rows,
+            "backup_path": backup,
+            "output_path": str(target),
+            "summary": preview_system_update(plan),
+        }
+
+    if not has_sheet:
         built = build_workbook_from_system(source_path, sheet_name=sheet_name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(built["blob"])
         lines = [
-            f"کتاب کار داخلی برنامه ساخته شد ({fa(built['filtered_rows'])} قرارداد «اجرا - مهر»"
-            f" از {fa(built['total_rows'])} ردیف فایل سامانه).",
-            f"ستون‌های L تا AJ منتقل شد: {fa(built['updated_cells'])} مقدار.",
-            f"شیت «{built['source_sheet']}» — ردیف سرستون {fa(built['header_row'])}.",
+            "کتاب کار اصلی روی این سیستم پیدا نشد؛ کتاب کار از خود فایل ۰۱ ساخته شد "
+            "(شیت colorcode، فیلتر «اجرا - مهر»، ستون‌های L تا AJ).",
+            f"{fa(built['filtered_rows'])} قرارداد از {fa(built['total_rows'])} ردیف فایل سامانه.",
         ]
         if built["notes"]:
             lines.append("یادداشت: " + " ".join(built["notes"]))
         return {
             "created": True,
+            "no_source_workbook": True,
             "plan": None,
             "built": built,
             "source_path": str(source_path),
@@ -2197,17 +2318,15 @@ def update_managed_workbook(source_path: str,
             "output_path": str(target),
             "summary": "\n".join(lines),
         }
+
     blob = target.read_bytes()
     plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
     backup = backup_workbook(blob, target.name)
     new_blob, cells = apply_system_update(plan, blob)
     target.write_bytes(new_blob)
-    log_event(
-        f"کتاب کار داخلی به‌روزرسانی شد: {plan.filtered_rows} ردیف «اجرا - مهر»، "
-        f"{cells} سلول → {target}"
-    )
     return {
         "created": False,
+        "replaced_generated": False,
         "plan": plan,
         "built": {},
         "source_path": plan.source_path,
@@ -2744,7 +2863,6 @@ def parse_workbook_bytes(
     # ردیف ۲ (ایندکس ۱): درصد پیشرفت کل در ستون ۳۷
     progress_raw = raw_rows[1][36] if len(raw_rows) > 1 and len(raw_rows[1]) > 36 else None
     progress_number = num(progress_raw)
-    progress_from_source = progress_number is not None
     if progress_number is not None:
         progress_percent = round(progress_number * 100, 2)
         progress_percent_text = fa(f"{progress_percent:.2f}")
@@ -2779,13 +2897,6 @@ def parse_workbook_bytes(
             offset for offset in range(23)
             if 11 + offset < len(row) and is_status_mark(row[11 + offset])
         ]
-        if not marked_offsets:
-            # در بعضی خروجی‌های سامانه، ستون‌های کسورات به‌جای علامت M مبلغ دارند؛
-            # همان ستون‌های دارای مقدار «کسورات» حساب می‌شوند.
-            marked_offsets = [
-                offset for offset in range(23)
-                if 11 + offset < len(row) and has_amount(row[11 + offset])
-            ]
         deductions = " | ".join(
             deduction_headers[offset]
             for offset in marked_offsets
@@ -2833,76 +2944,22 @@ def parse_workbook_bytes(
                 matched_pdfs += 1
                 break
 
-    # ---- شاخص‌های مشتق‌شده (وقتی ستون‌های وضعیت/پیشرفت در منبع نیستند) ----
-    # خروجی سامانه (فایل ۰۱) ستون‌های «وضعیت پیشرفت»، «اختتام» و «الحاقیه» را ندارد؛
-    # در چنین حالتی شاخص‌ها از روی علامت‌های M ستون‌های وضعیت محاسبه می‌شوند تا
-    # داشبورد عدد صفر یا «بدون داده» نشان ندهد.
+    # ---- شمارش اسناد تکمیل‌شده (اطلاعات واقعی، بدون دست‌کاری شاخص‌ها) ----
+    # اعداد داشبورد فقط از خود کتاب کار خوانده می‌شوند؛ هیچ درصدي از روی علامت‌ها
+    # ساخته نمی‌شود تا با فایل اصلی کاربر اختلاف پیدا نکند.
     metric_note = ""
-    derived_percent: Optional[float] = None
     flags_done_counts: List[int] = [0] * (len(FLAG_DEFS) + 1)
     tracked_keys = [key for key, _label, _column in FLAG_DEFS]
     total_flags = max(1, len(tracked_keys))
-    filled_status = 0
     for record in records:
         done = sum(1 for key in tracked_keys if record.flags.get(key))
         flags_done_counts[min(done, total_flags)] += 1
-        if record.progress_status or record.completion_status:
-            continue
-        percent = round(done * 100 / total_flags, 2)
-        record.progress_status = _progress_bucket(percent)
-        if done >= total_flags:
-            record.completion_status = "انجام‌شده"
-            record.as_status = record.as_status or "انجام شده"
-        elif done:
-            record.completion_status = "در جریان"
-            record.as_status = record.as_status or "در جریان"
-        else:
-            record.completion_status = "شروع‌نشده"
-            record.as_status = record.as_status or "انجام نشده"
-        if not record.progress_table:
-            record.progress_table = fa(f"{percent:.0f}") + "٪"
-        filled_status += 1
 
-    any_mark = any(any(record.flags.values()) for record in records)
-    if filled_status and not any_mark:
-        # هیچ علامتی در فایل نیست؛ عدد صفر گمراه‌کننده است، پس تخمین نمی‌زنیم.
+    if records and not any(any(record.flags.values()) for record in records):
         metric_note = (
-            "در فایل فعلی هیچ علامت وضعیت (M/✓/…) نیست؛ تا وقتی وضعیت اسناد ثبت نشود "
-            "درصد پیشرفت و کارت‌های وضعیت خالی می‌مانند."
+            "در داده‌های فعلی هیچ علامت وضعیت (M) نیست؛ کارت‌های وضعیت صفر می‌مانند."
         )
-    elif filled_status:
-        percentages = [
-            round(sum(1 for key in tracked_keys if record.flags.get(key))
-                  * 100 / total_flags, 2)
-            for record in records
-        ]
-        derived_percent = round(sum(percentages) / max(1, len(percentages)), 2)
-        metric_note = (
-            "ستون‌های پیشرفت و اختتام در منبع نبود؛ شاخص‌ها از روی علامت‌های وضعیت "
-            "(M) محاسبه شده‌اند."
-        )
-        log_event(
-            "شاخص‌های مشتق‌شده فعال شد — "
-            f"{filled_status} ردیف، میانگین {derived_percent:.2f}٪"
-        )
-
-    if not progress_from_source and derived_percent is not None:
-        progress_percent = derived_percent
-        progress_percent_text = fa(f"{progress_percent:.2f}")
-        if not progress_raw_text:
-            progress_raw_text = f"میانگین اسناد تکمیل‌شده از {fa(total_flags)} سند"
-    elif not progress_from_source and not progress_percent:
-        # درصد کلی در کتاب کار نیست ولی کدهای وضعیت هر ردیف موجودند؛ تخمین از همان‌ها.
-        midpoints = {
-            "0%": 0.0, "کمتر از %75": 40.0, "100٪ - 75٪": 87.5,
-            "125%-100%": 100.0, "بيشتر از %125": 100.0,
-        }
-        samples = [midpoints[rec.progress_status] for rec in records
-                   if rec.progress_status in midpoints]
-        if samples:
-            progress_percent = round(sum(samples) / len(samples), 2)
-            progress_percent_text = fa(f"{progress_percent:.2f}")
-            progress_raw_text = progress_raw_text or "تخمین از وضعیت پیشرفت ردیف‌ها"
+        log_event("هیچ علامت وضعیت M در داده‌ها پیدا نشد")
 
     flags_done_labels = [f"{fa(index)} سند" for index in range(total_flags + 1)]
 
@@ -2931,7 +2988,7 @@ def parse_workbook_bytes(
     if annex_values:
         annex_labels, annex_count_values = value_counts(annex_values)
     else:
-        annex_labels, annex_count_values = [], []
+        annex_labels, annex_count_values = ["داده‌ای موجود نیست"], [1]
 
     # ۱۰ نوع قرارداد پرتکرار
     type_total = max(1, len([rec for rec in records if rec.f_value]))
@@ -7515,9 +7572,9 @@ class DashboardPage(QWidget):
             for key in ("all", "progress", "deductions", "pdf"):
                 self.tiles[key].set_values("—", "داده‌ای برای نمایش نیست", None, badge="")
 
-        if getattr(data, "metric_note", ""):
+        if data.records and data.progress_percent_text == "—":
             self.progress_card.subtitle_label.setText(
-                "از روی علامت‌های وضعیت (M) محاسبه شد — برای فیلتر کلیک کنید"
+                "درصد پیشرفت در کتاب کار فعلی نیست — «کتاب کار اصلی (۰۲)» را مشخص کنید"
             )
         else:
             self.progress_card.subtitle_label.setText(
@@ -7530,31 +7587,11 @@ class DashboardPage(QWidget):
         self.legend.set_data(progress_labels, progress.values, CHART_COLORS["progress"])
 
         annex = data.dist("annex")
-        if not annex.values or not any(annex.values):
-            # ستون الحاقیه در منبع نیست؛ به‌جای «بدون داده» تعداد اسناد تکمیل‌شده
-            done_dist = data.dist("flags_done")
-            annex_labels = [pretty_label(label) for label in done_dist.labels]
-            self.annex_card.title_label.setText("تعداد اسناد تکمیل‌شده")
-            self.annex_card.subtitle_label.setText(
-                "از ۸ سند اختتام — برای فیلتر کلیک کنید"
-            )
-            self._annex_derived = True
-            self._annex_done_labels = list(annex_labels)
-            self._chart_raw["annex"] = {label: raw for label, raw
-                                        in zip(annex_labels, done_dist.labels)}
-            self.annex_donut.set_data(annex_labels, done_dist.values,
-                                      "اسناد", CHART_COLORS["annex"])
-            self.annex_legend.set_data(annex_labels, done_dist.values, CHART_COLORS["annex"])
-        else:
-            self._annex_derived = False
-            annex_labels = self._display_labels("annex", annex)
-            self.annex_card.title_label.setText("وضعیت الحاقیه")
-            self.annex_card.subtitle_label.setText(
-                "توزیع زمان الحاقیه — برای فیلتر جدول کلیک کنید"
-            )
-            self.annex_donut.set_data(annex_labels, annex.values,
-                                      "الحاقیه", CHART_COLORS["annex"])
-            self.annex_legend.set_data(annex_labels, annex.values, CHART_COLORS["annex"])
+        self._annex_derived = False
+        annex_labels = self._display_labels("annex", annex)
+        self.annex_donut.set_data(annex_labels, annex.values,
+                                  "الحاقیه", CHART_COLORS["annex"])
+        self.annex_legend.set_data(annex_labels, annex.values, CHART_COLORS["annex"])
 
         completion = data.dist("completion")
         completion_labels = self._display_labels("completion", completion)
@@ -8457,6 +8494,7 @@ class SettingsPage(QWidget):
     localRunRequested = pyqtSignal(str)
     systemUpdateRequested = pyqtSignal(str)
     diagnoseRequested = pyqtSignal(str)
+    sourceWorkbookRequested = pyqtSignal()
 
     def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -8643,6 +8681,15 @@ class SettingsPage(QWidget):
             "در فایل پیدا کرده — برای وقتی آمار صفر می‌ماند."
         )
         self.diagnose_button.clicked.connect(self._emit_diagnose)
+        self.source_book_button = QPushButton("کتاب کار اصلی (۰۲)")
+        self.source_book_button.setObjectName("Ghost")
+        self.source_book_button.setCursor(Qt.PointingHandCursor)
+        self.source_book_button.setToolTip(
+            "فایل اصلی خودتان (همان اکسلی که شیت colorcode دارد) را یک بار مشخص کنید؛ "
+            "به‌روزرسانی‌های بعدی روی همان انجام می‌شود و اعداد داشبورد مثل قبل می‌مانند."
+        )
+        self.source_book_button.clicked.connect(self.sourceWorkbookRequested.emit)
+        import_row.addWidget(self.source_book_button, 0)
         import_row.addWidget(self.update_button, 0)
         import_row.addWidget(self.import_button, 0)
         import_row.addWidget(self.local_button, 0)
@@ -10212,6 +10259,7 @@ class MainWindow(QMainWindow):
         self.settings.importRequested.connect(self.import_excel)
         self.settings.systemUpdateRequested.connect(self.start_system_update)
         self.settings.diagnoseRequested.connect(self.show_diagnosis)
+        self.settings.sourceWorkbookRequested.connect(self.pick_source_workbook)
         self.settings.localRunRequested.connect(self.open_local_excel)
         self.dashboard.importRequested.connect(self.import_excel_dialog)
         self.dashboard.localRunRequested.connect(self.open_local_excel_dialog)
@@ -10653,6 +10701,7 @@ class MainWindow(QMainWindow):
         seed = find_seed_workbook(
             source_path,
             extra_paths=(
+                self.config.get("source_workbook_path"),
                 self.config.get("local_excel_path"),
                 self.config.get("last_excel_path"),
                 self.settings.excel_edit.text().strip(),
@@ -10713,6 +10762,17 @@ class MainWindow(QMainWindow):
             self.load_data()
         lines: List[str] = []
         seeded_from = str(result.get("seeded_from") or "")
+        if result.get("no_source_workbook"):
+            lines.append(
+                "کتاب کار اصلی شما (همان فایلی که شیت colorcode دارد و اعداد داشبورد از "
+                "آن می‌آمد) روی این سیستم پیدا نشد؛ بنابراین کتاب کار از خود فایل ۰۱ ساخته "
+                "شد و ستون‌های وضعیت/پیشرفت در آن نیست."
+            )
+            lines.append(
+                "برای اینکه اعداد دقیقاً مثل قبل شود: دکمهٔ «کتاب کار اصلی (۰۲)» را بزنید و "
+                "یک بار همان فایل را بدهید (مثلاً \u202aF.O.C(Mehr).xlsx\u202c یا فایل ۰۲). "
+                "از آن به بعد به‌روزرسانی‌ها روی همان انجام می‌شود."
+            )
         if created:
             lines.append(
                 "برای همین فایل ۰۱، کتاب کار داخلی برنامه ساخته شد: فیلتر «اجرا - مهر» "
@@ -10766,6 +10826,53 @@ class MainWindow(QMainWindow):
         box.setInformativeText("\n".join(lines))
         box.addButton("باشه", QMessageBox.AcceptRole)
         box.exec_()
+
+    @guarded("pick_source_workbook")
+    def pick_source_workbook(self) -> None:
+        """کتاب کار اصلی کاربر (فایل ۰۲ / colorcode) را ثبت می‌کند."""
+        start = str(
+            self.config.get("source_workbook_path")
+            or self.config.get("local_excel_path")
+            or self.config.get("last_excel_path")
+            or app_dir()
+        )
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "انتخاب کتاب کار اصلی (دارای شیت colorcode)", start,
+            "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+        )
+        if not path:
+            return
+        if not has_colorcode_sheet(path):
+            QMessageBox.warning(
+                self, "کتاب کار اصلی",
+                "این فایل شیت «colorcode» ندارد.\n"
+                "فایل اصلی خودتان (مثل \u202aF.O.C(Mehr).xlsx\u202c) یا فایل ۰۲ را انتخاب کنید.",
+            )
+            return
+        self.config.set("source_workbook_path", path, save=False)
+        self.config.set("local_excel_path", path, save=False)
+        self.config.set("data_source", "local", save=False)
+        self.config.save()
+        try:
+            data = read_local_workbook(
+                path, sheet_name=str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
+            )
+            summary = (
+                f"{fa(data.total_contracts)} قرارداد — پیشرفت "
+                f"{data.progress_percent_text}٪"
+            )
+        except Exception as exc:
+            summary = f"خواندن فایل ممکن نشد: {exc}"
+        self._notify("کتاب کار اصلی ثبت شد", "check")
+        self.settings.set_status(f"کتاب کار اصلی: {Path(path).name}")
+        box = QMessageBox(self)
+        box.setWindowTitle("کتاب کار اصلی ثبت شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("از این به بعد به‌روزرسانی فایل ۰۱ روی همین کتاب کار انجام می‌شود.")
+        box.setInformativeText(f"{Path(path).name}\n{summary}")
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+        self.load_data()
 
     @guarded("show_diagnosis")
     def show_diagnosis(self, path: str) -> None:
