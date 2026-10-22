@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.6"
+APP_VERSION = "3.5.7"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1595,6 +1595,11 @@ def is_status_mark(value: Any) -> bool:
 
 FLAG_COLUMNS_ONE_BASED = {column + 1 for _key, _label, column in FLAG_DEFS}
 
+# ناحیهٔ ستون‌های «سند» در شیت داشبورد (colorcode): ستون L تا AH.
+# این ستون‌ها در کتاب کار با OK/M پر می‌شوند و هرگز نباید عدد ۰/۱ بگیرند.
+DASHBOARD_DOC_FIRST_COLUMN = 12
+DASHBOARD_DOC_LAST_COLUMN = 34
+
 
 def status_mark_value(value: Any) -> Any:
     """مقدار ستون وضعیت را به «علامت» تبدیل می‌کند: ۱ → M، ۰ → خالی.
@@ -1621,6 +1626,38 @@ def is_dashboard_sheet_name(name: str) -> bool:
     """آیا این شیت همان شیت داشبورد است (colorcode)؟"""
     text = normalize_per(txt(name)).strip().lower()
     return "colorcode" in text or "color code" in text or "کالرکد" in text
+
+
+def repair_dashboard_marks(workbook) -> int:
+    """عددهای ۰/۱ جاافتاده در ستون‌های سند شیت داشبورد را به علامت تبدیل می‌کند.
+
+    نسخه‌های قبل هنگام به‌روزرسانی، شمارش‌های ۰/۱ فایل سامانه را عیناً در
+    ستون‌های وضعیت می‌نوشتند و کارت‌ها صفر می‌شدند. این تابع همان آسیب را در
+    هر شیت داشبورد (colorcode) ترمیم می‌کند: ۱ → M و ۰ → خالی.
+    """
+    fixed = 0
+    for name in list(workbook.sheetnames):
+        if not is_dashboard_sheet_name(str(name)):
+            continue
+        sheet = workbook[name]
+        last_row = min(int(sheet.max_row or 0), 20000)
+        for row_number in range(4, last_row + 1):
+            for column in range(DASHBOARD_DOC_FIRST_COLUMN,
+                                DASHBOARD_DOC_LAST_COLUMN + 1):
+                try:
+                    cell = sheet.cell(row=row_number, column=column)
+                    current = getattr(cell, "value", None)
+                    if isinstance(current, str) and current.startswith("="):
+                        continue
+                    if isinstance(current, bool) or not isinstance(current, (int, float)):
+                        continue
+                    if float(current) not in (0.0, 1.0):
+                        continue
+                    cell.value = status_mark_value(current)
+                    fixed += 1
+                except AttributeError:
+                    continue
+    return fixed
 
 
 def has_amount(value: Any) -> bool:
@@ -2124,6 +2161,10 @@ def _sheet_system_scan(workbook, sheet_name: str, source_keys: set) -> Dict[str,
         score += min(60, best_hits)
         if contract_col < 0:
             score += 15  # ستون از روی داده پیدا شد
+    if is_dashboard_sheet_name(sheet_name):
+        # شیت colorcode کتاب کار نهایی است، نه جای پیست خروجی سامانه؛
+        # نوشتن عددهای ۰/۱ روی آن، علامت‌های OK/M را خراب می‌کند.
+        score -= 80
     if score <= 0 or (contract_col < 0 and best_hits == 0):
         score = -1
     info["score"] = score
@@ -2336,11 +2377,15 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
         written = 0
         formula_cells = 0
         merged_cells = 0
+        cleaned = 0
         for target_row, values in plan.rows:
             for offset, value in enumerate(values):
                 column = plan.first_column + offset
-                if dashboard_target and column in FLAG_COLUMNS_ONE_BASED:
-                    value = status_mark_value(value)
+                if dashboard_target:
+                    if column > DASHBOARD_DOC_LAST_COLUMN:
+                        continue  # ستون‌های جمع/درصد جای دیگری در شیت داشبورد دارند
+                    if column >= DASHBOARD_DOC_FIRST_COLUMN:
+                        value = status_mark_value(value)
                 cell = sheet.cell(row=int(target_row), column=int(column))
                 current = getattr(cell, "value", None)
                 if isinstance(current, str) and current.startswith("="):
@@ -2356,6 +2401,12 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
                     merged_cells += 1  # سلول ادغام‌شده در اکسل قابل نوشتن نیست
                     continue
                 written += 1
+        # آسیب نسخه‌های قبل (۰/۱ در ستون‌های وضعیت) در همهٔ شیت‌های داشبورد
+        # ترمیم می‌شود؛ حتی وقتی مقصد پیست شیت دیگری باشد.
+        try:
+            cleaned = repair_dashboard_marks(workbook)
+        except Exception as exc:
+            log_event(f"ترمیم علامت‌های وضعیت ممکن نشد: {type(exc).__name__}: {exc}")
         try:
             workbook.calculation.fullCalcOnLoad = True
         except Exception:
@@ -2373,6 +2424,7 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
         "written_cells": written,
         "formula_cells": formula_cells,
         "merged_cells": merged_cells,
+        "cleaned_marks": cleaned,
         "skipped_formulas_sheet": plan.sheet_name,
     }
 
@@ -2396,8 +2448,11 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
                     value = value.strip()
                     if value.lower() in _SYSTEM_UPDATE_OK_WORDS:
                         value = "ok"
-                if is_dashboard_sheet_name(plan.sheet_name) and column in FLAG_COLUMNS_ONE_BASED:
-                    value = status_mark_value(value)
+                if is_dashboard_sheet_name(plan.sheet_name):
+                    if column > DASHBOARD_DOC_LAST_COLUMN:
+                        continue
+                    if column >= DASHBOARD_DOC_FIRST_COLUMN:
+                        value = status_mark_value(value)
                 cell = sheet.cell(row=target_row, column=column)
                 if is_blank(value):
                     # مقدار خالی در فایل سامانه، دادهٔ موجود کتاب کار را پاک نمی‌کند
@@ -3045,7 +3100,7 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
             value = cell(row, column - 1)
             if isinstance(value, str) and value.lower() in _SYSTEM_UPDATE_OK_WORDS:
                 value = "ok"
-            if column in FLAG_COLUMNS_ONE_BASED:
+            if DASHBOARD_DOC_FIRST_COLUMN <= column <= DASHBOARD_DOC_LAST_COLUMN:
                 value = status_mark_value(value)
             if value is None:
                 continue
@@ -7120,6 +7175,7 @@ class SystemCopyWorker(QThread):
                 "base_source": base.get("base_source"),
                 "base_filename": base.get("filename"),
                 "recalculated": recalculated,
+                "cleaned_marks": info.get("cleaned_marks", 0),
                 "healthy": healthy,
                 "imported": imported,
             })
@@ -12875,6 +12931,12 @@ class MainWindow(QMainWindow):
         if result.get("formula_cells"):
             lines.append(
                 f"سلول‌های فرمولی دست‌نخورده: {fa(int(result['formula_cells']))}"
+            )
+        if result.get("cleaned_marks"):
+            lines.append(
+                "ترمیم وضعیت‌ها: "
+                f"{fa(int(result['cleaned_marks']))} سلول که عدد ۰/۱ داشتند به "
+                "علامت M/خالی تبدیل شد"
             )
         lines += [
             "",
