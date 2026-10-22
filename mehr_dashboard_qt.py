@@ -47,6 +47,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import re
 import sys
 import tempfile
@@ -167,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.4"
+APP_VERSION = "3.5.5"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -2160,6 +2161,59 @@ def count_workbook_contracts(path: str, sheet_name: str = "") -> int:
     finally:
         try:
             book.close()
+        except Exception:
+            pass
+
+
+def recalculate_with_excel(path: str) -> bool:
+    """فایل را با خودِ اکسل باز، محاسبه و ذخیره می‌کند (فقط ویندوز).
+
+    اگر اکسل نصب نباشد یا COM در دسترس نباشد، False برمی‌گردد و برنامه به
+    روش قبلی (باز کردن دستی فایل و Ctrl+S) برمی‌گردد.
+    """
+    if os.name != "nt":
+        return False
+    source = Path(str(path)).expanduser()
+    if not source.exists():
+        return False
+    quoted = str(source).replace("'", "''")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$excel = New-Object -ComObject Excel.Application\n"
+        "$excel.Visible = $false\n"
+        "$excel.DisplayAlerts = $false\n"
+        "$excel.AskToUpdateLinks = $false\n"
+        f"$wb = $excel.Workbooks.Open('{quoted}', 0, $false)\n"
+        "$excel.CalculateFullRebuild()\n"
+        "$wb.Save()\n"
+        "$wb.Close($false)\n"
+        "$excel.Quit()\n"
+    )
+    script_path = data_dir() / "recalc_excel.ps1"
+    try:
+        script_path.write_text(script, encoding="utf-8-sig")
+        before = source.stat().st_mtime
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+            capture_output=True, timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if completed.returncode != 0:
+            log_event(
+                "محاسبهٔ خودکار با اکسل انجام نشد: "
+                + (completed.stderr or b"").decode("utf-8", "replace")[-400:]
+            )
+            return False
+        changed = source.stat().st_mtime > before
+        log_event(f"فایل با اکسل بازمحاسبه و ذخیره شد: {source.name} (تغییر: {changed})")
+        return True
+    except Exception as exc:
+        log_event(f"محاسبهٔ خودکار با اکسل ممکن نشد: {type(exc).__name__}: {exc}")
+        return False
+    finally:
+        try:
+            script_path.unlink()
         except Exception:
             pass
 
@@ -6917,11 +6971,12 @@ class SystemCopyWorker(QThread):
     sheet_needed = pyqtSignal(dict)
 
     def __init__(self, settings: Dict[str, Any], source_path: str, parent=None,
-                 forced_sheet: str = "") -> None:
+                 forced_sheet: str = "", auto_import: bool = True) -> None:
         super().__init__(parent)
         self.settings = dict(settings)
         self.source_path = str(source_path)
         self.forced_sheet = str(forced_sheet or "")
+        self.auto_import = bool(auto_import)
 
     def run(self) -> None:
         try:
@@ -6989,6 +7044,33 @@ class SystemCopyWorker(QThread):
                 f"{plan.matched_rows} ردیف، {info['written_cells']} سلول، "
                 f"{info['formula_cells']} سلول فرمولی دست‌نخورده"
             )
+            recalculated = False
+            healthy = False
+            imported: Dict[str, Any] = {}
+            if self.auto_import:
+                recalculated = recalculate_with_excel(info["output_path"])
+                try:
+                    health = workbook_health(Path(info["output_path"]).read_bytes())
+                    healthy = not health.get("damaged")
+                except Exception:
+                    healthy = False
+                log_event(
+                    f"نسخهٔ به‌روز: محاسبه با اکسل={recalculated}، سالم={healthy}"
+                )
+                if recalculated and healthy and str(self.settings.get("host") or "").strip():
+                    try:
+                        imported = import_workbook_to_database(
+                            self.settings, info["output_path"],
+                            sheet_name=str(self.settings.get("sheet_name") or ""),
+                            workbook_id=int(self.settings.get("workbook_id") or 1),
+                        )
+                        log_event(
+                            "نسخهٔ به‌روز خودکار در دیتابیس ذخیره شد: "
+                            f"{imported.get('data_rows')} ردیف"
+                        )
+                    except Exception as exc:
+                        log_event(f"ذخیرهٔ خودکار نسخهٔ به‌روز در دیتابیس ناموفق بود: {exc}")
+                        imported = {"error": str(exc)}
             self.done.emit({
                 "plan": plan,
                 "output_path": info["output_path"],
@@ -6997,6 +7079,9 @@ class SystemCopyWorker(QThread):
                 "sheet": target_sheet,
                 "base_source": base.get("base_source"),
                 "base_filename": base.get("filename"),
+                "recalculated": recalculated,
+                "healthy": healthy,
+                "imported": imported,
             })
         except ExcelDataError as exc:
             self.failed.emit(str(exc))
@@ -9953,8 +10038,8 @@ class SettingsPage(QWidget):
         # ---- بارگذاری فایل اکسل ----
         import_card = Card(colors, radius=16, padding=18)
         import_card.body.addWidget(_card_title(
-            "بارگذاری فایل اکسل",
-            "اگر دیتابیس خالی است یا می‌خواهید داده‌ها را از ابتدا بارگذاری کنید",
+            "بارگذاری فایل ۰۱ (خروجی سامانه)",
+            "همین یک دکمه: انتخاب فایل، به‌روزرسانی کتاب کار، ذخیرهٔ خودکار در دیتابیس",
         ))
         excel_row = QHBoxLayout()
         excel_row.setSpacing(8)
@@ -9982,14 +10067,15 @@ class SettingsPage(QWidget):
             "فایل اکسل را مستقیم از دیسک می‌خواند؛ به MySQL نیازی نیست."
         )
         self.local_button.clicked.connect(self._emit_local)
-        self.update_button = QPushButton("به‌روزرسانی دیتابیس از فایل ۰۱ سامانه")
+        self.update_button = QPushButton("بارگذاری فایل ۰۱ و به‌روزرسانی")
         self.update_button.setObjectName("Primary")
         self.update_button.setIcon(make_icon("refresh", colors["on_brand"], 15))
         self.update_button.setCursor(Qt.PointingHandCursor)
         self.update_button.setToolTip(
-            "فقط فایل خام سامانه (Contract-Info-Report) را می‌خواند، ردیف‌های "
-            "«اجرا - مهر» ستون Sub Project را نگه می‌دارد، ستون‌های L تا AJ را به‌ترتیب "
-            "منتقل می‌کند و کتاب کار را خودش می‌سازد/به‌روز می‌کند — فایل ۰۲ لازم نیست."
+            "همین یک دکمه کافی است: فایل خروجی سامانه (Contract-Info-Report) را "
+            "انتخاب می‌کنید؛ برنامه ردیف‌های «اجرا - مهر» را جدا می‌کند، ستون‌های "
+            "L تا AJ را روی کتاب کار می‌نویسد، فایل را با اکسل بازمحاسبه می‌کند و "
+            "خودکار در دیتابیس ذخیره می‌کند و داشبورد را بازخوانی می‌کند."
         )
         self.update_button.clicked.connect(self._emit_system_update)
         import_row = QHBoxLayout()
@@ -10010,24 +10096,18 @@ class SettingsPage(QWidget):
             "به‌روزرسانی‌های بعدی روی همان انجام می‌شود و اعداد داشبورد مثل قبل می‌مانند."
         )
         self.source_book_button.clicked.connect(self.sourceWorkbookRequested.emit)
-        import_row.addWidget(self.source_book_button, 0)
         import_row.addWidget(self.update_button, 0)
-        import_row.addWidget(self.import_button, 0)
-        import_row.addWidget(self.local_button, 0)
-        import_row.addWidget(self.diagnose_button, 0)
         import_row.addStretch(1)
         import_card.body.addLayout(import_row)
         import_card.body.addWidget(_muted(
-            "دیتابیس و جدول‌های لازم خودکار ساخته می‌شوند و فایل به‌عنوان کتاب کار "
-            "شمارهٔ ۱ ذخیره می‌شود. اگر کاربر MySQL شما رمز ندارد، فیلد رمز را "
-            "خالی بگذارید؛ رمز اجباری نیست."
+            "همین یک دکمه کافی است: فایل ۰۱ (خروجی سامانه) را انتخاب کنید. برنامه "
+            "خودش فیلتر «اجرا - مهر» را می‌زند، ستون‌های L تا AJ را روی کتاب کار "
+            "می‌نویسد، با اکسل بازمحاسبه می‌کند، در دیتابیس ذخیره می‌کند و داشبورد "
+            "را بازخوانی می‌کند — بدون فایل دوم و بدون مرحلهٔ دستی."
         ))
         import_card.body.addWidget(_muted(
-            "روش کار همین است: فایل ۰۱ را از سامانه بگیرید و فقط همین فایل را بدهید. "
-            "برنامه خودش فیلتر «اجرا - مهر» و انتقال ستون‌های L تا AJ را انجام می‌دهد؛ "
-            "اگر دیتابیس در دسترس باشد همان کتاب کار دیتابیس به‌روز می‌شود و اگر نباشد "
-            "کتاب کار داخلی برنامه ساخته/به‌روزرسانی می‌شود (پشتیبان در پوشهٔ backups). "
-            "هیچ فایل دومی لازم نیست."
+            "دیتابیس و جدول‌ها خودکار ساخته می‌شوند. اگر MySQL در دسترس نبود، "
+            "همان نسخهٔ به‌روز محلی خوانده می‌شود تا داشبورد خالی نماند."
         ))
         right_column.addWidget(import_card)
 
@@ -12271,7 +12351,6 @@ class MainWindow(QMainWindow):
         if path:
             self.import_excel(path)
 
-    @guarded("import_excel")
     # ------------------------------------------------------------------
     # به‌روزرسانی از فایل سامانه (فایل ۰۱)
     # ------------------------------------------------------------------
@@ -12726,6 +12805,13 @@ class MainWindow(QMainWindow):
         plan: SystemUpdatePlan = result["plan"]
         self._pending_system_source = ""
         output = str(result.get("output_path") or "")
+        imported = result.get("imported") or {}
+        if imported and not imported.get("error"):
+            self._on_auto_update_done(result, imported)
+            return
+        if result.get("recalculated") and result.get("healthy") and output:
+            self._on_local_copy_ready(result, imported)
+            return
         self.settings.set_status(
             f"نسخهٔ به‌روز ساخته شد — {fa(int(result.get('written_cells') or 0))} سلول"
         )
@@ -12771,6 +12857,82 @@ class MainWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(output))
             except Exception:
                 pass
+
+    def _on_local_copy_ready(self, result: Dict[str, Any],
+                             imported: Dict[str, Any]) -> None:
+        """نسخهٔ به‌روز با اکسل محاسبه شد؛ بدون دیتابیس هم داشبورد به‌روز می‌شود."""
+        plan: SystemUpdatePlan = result["plan"]
+        output = str(result.get("output_path") or "")
+        self.config.set("data_source", "local", save=False)
+        self.config.set("local_excel_path", output, save=False)
+        self.config.set("last_excel_path", output, save=False)
+        self.config.save()
+        self.settings.excel_edit.setText(output)
+        self.settings.set_status(
+            f"به‌روزرسانی انجام شد — {fa(int(result.get('written_cells') or 0))} سلول"
+        )
+        self._notify("کتاب کار به‌روز شد؛ داشبورد بازخوانی می‌شود", "check")
+        self.load_data()
+        lines = [
+            f"فایل سامانه: {Path(plan.source_path).name}",
+            f"ردیف‌های «اجرا - مهر»: {fa(plan.filtered_rows)} — "
+            f"تطبیق‌شده: {fa(plan.matched_rows)} ({plan.method})",
+            f"سلول‌های نوشته‌شده: {fa(int(result.get('written_cells') or 0))}",
+            "",
+            "فایل با خودِ اکسل بازمحاسبه و ذخیره شد و داشبورد از همان نسخه "
+            "خوانده می‌شود؛ کتاب کار اصلی شما دست‌نخورده است.",
+        ]
+        if imported.get("error"):
+            lines.append("")
+            lines.append(
+                "دیتابیس در دسترس نبود، برای همین نسخهٔ محلی استفاده شد:\n"
+                + str(imported["error"]).splitlines()[0][:200]
+            )
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی انجام شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("فایل ۰۱ روی کتاب کار اعمال شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
+    def _on_auto_update_done(self, result: Dict[str, Any],
+                             imported: Dict[str, Any]) -> None:
+        """دیتابیس خودکار به‌روز شد؛ همین‌جا داشبورد هم بازخوانی می‌شود."""
+        plan: SystemUpdatePlan = result["plan"]
+        self.config.set("data_source", "database", save=False)
+        self.config.set(
+            "last_excel_path", str(result.get("output_path") or ""), save=False
+        )
+        self.config.save()
+        rows = int(imported.get("data_rows") or 0)
+        cells = int(result.get("written_cells") or 0)
+        self.settings.set_status(
+            f"به‌روزرسانی انجام شد — {fa(rows)} ردیف در دیتابیس، {fa(cells)} سلول"
+        )
+        self._notify("دیتابیس و داشبورد به‌روز شدند", "check")
+        self.statusBar().showMessage(
+            f"به‌روزرسانی خودکار انجام شد — {fa(plan.matched_rows)} ردیف تطبیق، "
+            f"{fa(cells)} سلول", 12000,
+        )
+        self.load_data()
+        lines = [
+            f"فایل سامانه: {Path(plan.source_path).name}",
+            f"ردیف‌های «اجرا - مهر»: {fa(plan.filtered_rows)} — "
+            f"تطبیق‌شده: {fa(plan.matched_rows)} ({plan.method})",
+            f"سلول‌های نوشته‌شده: {fa(cells)}",
+            f"ردیف‌های ذخیره‌شده در دیتابیس: {fa(rows)}",
+            "",
+            "فایل با خودِ اکسل بازمحاسبه و ذخیره شد، بعد در دیتابیس بارگذاری شد؛ "
+            "داشبورد در حال بازخوانی است. کتاب کار اصلی شما هم دست‌نخورده مانده است.",
+        ]
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی کامل شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("فایل ۰۱ روی کتاب کار اعمال و در دیتابیس ذخیره شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
 
     @guarded("_on_system_update_done")
     def _on_system_update_done(self, result: Dict[str, Any]) -> None:
@@ -12864,6 +13026,7 @@ class MainWindow(QMainWindow):
         box.addButton("باشه", QMessageBox.AcceptRole)
         box.exec_()
 
+    @guarded("import_excel")
     def import_excel(self, path: str) -> None:
         if self._import_worker_running():
             self._notify("یک بارگذاری در حال اجراست؛ کمی صبر کنید", "clock")
