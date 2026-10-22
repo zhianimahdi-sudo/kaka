@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.3.1"
+APP_VERSION = "3.3.2"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1280,7 +1280,14 @@ def _open_rows(path: str) -> Tuple[List[str], str, List[List[Any]]]:
     """فهرست شیت‌ها، شیت انتخاب‌شده و همهٔ ردیف‌های آن را برمی‌گرداند."""
     if openpyxl is None:
         raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
-    workbook = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+    try:
+        workbook = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+    except Exception as exc:
+        raise ExcelDataError(
+            f"فایل «{Path(str(path)).name}» به‌عنوان اکسل (.xlsx) باز نشد:\n{exc}\n"
+            "اگر فایل از سامانه به‌صورت .xls یا .csv گرفته شده، اول در اکسل با فرمت "
+            ".xlsx ذخیره کنید."
+        ) from exc
     try:
         names = [str(name) for name in workbook.sheetnames]
         chosen = ""
@@ -1290,12 +1297,24 @@ def _open_rows(path: str) -> Tuple[List[str], str, List[List[Any]]]:
                 chosen = name
                 break
         if not chosen:
-            best = -1
+            # بین چند شیت (مثل «Sheet 1» و «Sheet1 (2)») شیتی انتخاب می‌شود که
+            # ردیف‌های «اجرا - مهر» دارد؛ وگرنه بزرگ‌ترین شیت.
+            best_hits, best_size, fallback = -1, -1, ""
             for name in names:
                 sheet = workbook[name]
                 size = int(sheet.max_row or 0) * int(sheet.max_column or 0)
-                if size > best:
-                    best, chosen = size, name
+                if size > best_size:
+                    best_size, fallback = size, name
+                hits = 0
+                for index, row in enumerate(sheet.iter_rows(values_only=True)):
+                    if index > 300:
+                        break
+                    if any(_matches_sub_project(value) for value in row):
+                        hits += 1
+                if hits and hits > best_hits:
+                    best_hits, chosen = hits, name
+            if not chosen:
+                chosen = fallback
         if not chosen and names:
             chosen = names[0]
         if not chosen:
@@ -1496,20 +1515,25 @@ def plan_system_update(source_path: str, target_blob: bytes,
             contract_col = guess
             notes.append("ستون شمارهٔ قرارداد از روی داده‌ها شناسایی شد.")
 
-    mapping: List[Tuple[int, List[Any]]] = []
-    unmatched: List[str] = []
+    # ۱) تطبیق با شمارهٔ قرارداد
+    contract_mapping: List[Tuple[int, List[Any]]] = []
+    contract_unmatched: List[str] = []
     for row in filtered:
         key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
         target_row = target_rows.get(key) if key else None
         if target_row:
-            mapping.append((target_row, list(row[first_column - 1:last_column])))
+            contract_mapping.append((target_row, list(row[first_column - 1:last_column])))
         else:
-            unmatched.append(txt(row[contract_col] if contract_col < len(row) else "") or "—")
+            contract_unmatched.append(
+                txt(row[contract_col] if contract_col < len(row) else "") or "—"
+            )
 
-    method = "شمارهٔ قرارداد"
-    if len(mapping) < max(1, int(len(filtered) * 0.5)) and target_name_rows:
+    # ۲) تطبیق با نام شرکت (اگر ستون نام در فایل سامانه باشد)
+    name_mapping: List[Tuple[int, List[Any]]] = []
+    name_unmatched: List[str] = []
+    if target_name_rows and filtered:
         name_col, name_hits = -1, 0
-        for column in range(len(filtered[0]) if filtered else 0):
+        for column in range(len(filtered[0])):
             hits = sum(
                 1 for row in filtered
                 if column < len(row)
@@ -1518,38 +1542,70 @@ def plan_system_update(source_path: str, target_blob: bytes,
             if hits > name_hits:
                 name_col, name_hits = column, hits
         if name_col >= 0 and name_hits >= max(3, int(len(filtered) * 0.5)):
-            named: List[Tuple[int, List[Any]]] = []
-            still_unmatched: List[str] = []
             for row in filtered:
                 key = normalize_lookup_key(txt(row[name_col] if name_col < len(row) else ""))
                 target_row = target_name_rows.get(key) if key else None
                 if target_row:
-                    named.append((target_row, list(row[first_column - 1:last_column])))
+                    name_mapping.append((target_row, list(row[first_column - 1:last_column])))
                 else:
-                    still_unmatched.append(
+                    name_unmatched.append(
                         txt(row[contract_col] if contract_col < len(row) else "") or "—"
                     )
-            if len(named) > len(mapping):
-                mapping, unmatched = named, still_unmatched
-                method = "نام شرکت"
-                notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
 
-    if len(mapping) < max(1, int(len(filtered) * 0.5)) and len(filtered) == len(data_rows):
-        mapping = [
-            (data_rows[order], list(row[first_column - 1:last_column]))
-            for order, row in enumerate(filtered)
-        ]
-        unmatched = []
+    # ۳) چسباندن بلوکی به‌همان روش دستی: L..AJ از بالا تا انتها، به‌ترتیب ردیف‌ها
+    order_rows = min(len(filtered), len(data_rows))
+    order_mapping: List[Tuple[int, List[Any]]] = [
+        (data_rows[order], list(row[first_column - 1:last_column]))
+        for order, row in enumerate(filtered[:order_rows])
+    ]
+
+    filtered_count = max(1, len(filtered))
+    contract_ratio = len(contract_mapping) / filtered_count
+    name_ratio = len(name_mapping) / filtered_count
+    equal_rows = len(filtered) == len(data_rows)
+
+    mapping: List[Tuple[int, List[Any]]] = []
+    unmatched: List[str] = []
+    method = "شمارهٔ قرارداد"
+    if contract_ratio >= 0.9:
+        mapping, unmatched = contract_mapping, contract_unmatched
+    elif name_ratio >= 0.9:
+        mapping, unmatched = name_mapping, name_unmatched
+        method = "نام شرکت"
+        notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
+    elif equal_rows and order_mapping:
+        mapping = order_mapping
         method = "ترتیب ردیف‌ها"
         notes.append(
-            "تطبیق با شمارهٔ قرارداد کافی نبود؛ چون تعداد ردیف‌ها برابر است، "
-            "به‌ترتیب ردیف‌ها به‌روزرسانی شد."
+            "مثل روش دستی، ستون‌های L تا AJ به‌ترتیب ردیف‌ها روی شیت مقصد نوشته می‌شود "
+            "(تعداد ردیف‌های «اجرا - مهر» و شیت مقصد برابر است)."
+        )
+    elif contract_ratio >= 0.5:
+        mapping, unmatched = contract_mapping, contract_unmatched
+    elif name_ratio >= 0.5:
+        mapping, unmatched = name_mapping, name_unmatched
+        method = "نام شرکت"
+        notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
+    elif order_mapping:
+        mapping = order_mapping
+        method = "ترتیب ردیف‌ها"
+        notes.append(
+            f"تعداد ردیف‌ها برابر نبود (فایل سامانه: {fa(len(filtered))}، شیت مقصد: "
+            f"{fa(len(data_rows))})؛ {fa(len(order_mapping))} ردیف اول به‌ترتیب نوشته شد."
+        )
+    if not filtered:
+        raise ExcelDataError(
+            "در فایل سامانه هیچ ردیفی با «اجرا - مهر» پیدا نشد.\n"
+            f"شیت خوانده‌شده: «{source_sheet}» — ستون زیرپروژه: "
+            f"{(get_column_letter(sub_col + 1) if get_column_letter else 'F')} "
+            f"(ردیف سرستون {fa(header_row + 1)}).\n"
+            "اگر ستون Sub Project جای دیگری است، سرستون‌ها را بررسی کنید."
         )
     if not mapping:
         raise ExcelDataError(
             "هیچ ردیفی از فایل سامانه با کتاب کار دیتابیس تطبیق پیدا نکرد.\n"
             f"ردیف‌های «اجرا - مهر»: {fa(len(filtered))} — شماره‌های نمونه: "
-            + "، ".join(unmatched[:5])
+            + "، ".join((contract_unmatched or name_unmatched or [])[:5])
         )
 
     return SystemUpdatePlan(
@@ -7886,20 +7942,21 @@ class SettingsPage(QWidget):
             "فایل اکسل را مستقیم از دیسک می‌خواند؛ به MySQL نیازی نیست."
         )
         self.local_button.clicked.connect(self._emit_local)
-        self.update_button = QPushButton("به‌روزرسانی از فایل سامانه (01)")
-        self.update_button.setObjectName("Soft")
-        self.update_button.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        self.update_button = QPushButton("به‌روزرسانی دیتابیس از فایل ۰۱ سامانه")
+        self.update_button.setObjectName("Primary")
+        self.update_button.setIcon(make_icon("refresh", colors["on_brand"], 15))
         self.update_button.setCursor(Qt.PointingHandCursor)
         self.update_button.setToolTip(
-            "فایل خام سامانه را می‌خواند، فقط ردیف‌های «اجرا - مهر» ستون Sub Project را "
-            "نگه می‌دارد و ستون‌های L تا AJ را روی کتاب کار دیتابیس اعمال می‌کند."
+            "فایل خام سامانه (Contract-Info-Report) را می‌خواند، فقط ردیف‌های "
+            "«اجرا - مهر» ستون Sub Project را نگه می‌دارد، ستون‌های L تا AJ را به‌ترتیب "
+            "روی شیت colorcode می‌نویسد و همان را در دیتابیس ذخیره می‌کند."
         )
         self.update_button.clicked.connect(self._emit_system_update)
         import_row = QHBoxLayout()
         import_row.setSpacing(8)
+        import_row.addWidget(self.update_button, 0)
         import_row.addWidget(self.import_button, 0)
         import_row.addWidget(self.local_button, 0)
-        import_row.addWidget(self.update_button, 0)
         import_row.addStretch(1)
         import_card.body.addLayout(import_row)
         import_card.body.addWidget(_muted(
@@ -7908,9 +7965,10 @@ class SettingsPage(QWidget):
             "خالی بگذارید؛ رمز اجباری نیست."
         ))
         import_card.body.addWidget(_muted(
-            "«به‌روزرسانی از فایل سامانه (01)» فایل خام سامانه را می‌خواند، فقط ردیف‌های "
-            "«اجرا - مهر» را نگه می‌دارد و ستون‌های L تا AJ را روی کتاب کار فعلی دیتابیس "
-            "اعمال می‌کند؛ قبل از نوشتن، یک نسخهٔ پشتیبان هم ذخیره می‌شود."
+            "روش کار همین است: فایل ۰۱ را از سامانه بگیرید و فقط همین فایل را بدهید. "
+            "برنامه خودش ستون Sub Project را به «اجرا - مهر» فیلتر می‌کند، ستون‌های "
+            "L تا AJ را به‌ترتیب روی شیت colorcode می‌نویسد و همان کتاب کار را در "
+            "دیتابیس ذخیره می‌کند (قبل از نوشتن، نسخهٔ پشتیبان در پوشهٔ backups)."
         ))
         right_column.addWidget(import_card)
 
@@ -9638,7 +9696,9 @@ class MainWindow(QMainWindow):
         self.settings.load_values(self.config)
         self.settings.set_loaded(data.excel_path, data.total_contracts)
         self.settings.update_data(data)
-        self.settings.set_status("متصل — " + (data.source_note or "دیتابیس مرکزی"))
+        source_text = data.source_note or "دیتابیس مرکزی"
+        prefix = "" if str(source_text).startswith("فایل محلی") else "متصل — "
+        self.settings.set_status(prefix + source_text)
         self.detail.setEnabled(bool(data.records))
         source = data.source_note or "دیتابیس مرکزی"
         self.status_source.setText(bidi(f"منبع: \u202a{data.excel_path}\u202c • {source}"))
@@ -9851,6 +9911,10 @@ class MainWindow(QMainWindow):
         target = str(self.config.get("local_excel_path") or "").strip()
         if not target or not Path(target).exists():
             target = str(self.settings.excel_edit.text().strip() or "")
+        if not target or not Path(target).exists():
+            default_target = str(ORIGINAL_EXCEL_PATH)
+            if Path(default_target).exists():
+                target = default_target
         if not target or not Path(target).exists() or not has_colorcode_sheet(target):
             start = str(self.config.get("last_excel_path") or app_dir())
             target, _selected = QFileDialog.getOpenFileName(
@@ -9953,8 +10017,15 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("تأیید به‌روزرسانی از فایل سامانه")
         box.setIcon(QMessageBox.Question)
-        box.setText("این تغییرات روی کتاب کار دیتابیس اعمال می‌شود:")
-        box.setInformativeText(preview_system_update(plan))
+        box.setText(
+            "دیتابیس با همین فایل ۰۱ به‌روزرسانی می‌شود — همان کاری که دستی انجام "
+            "می‌دادید، خودکار: فیلتر ستون Sub Project («اجرا - مهر»)، سپس نوشتن "
+            "ستون‌های L تا AJ در شیت colorcode و بارگذاری دوبارهٔ همان شیت در دیتابیس."
+        )
+        note = str(getattr(self, "_system_update_note", "") or "")
+        self._system_update_note = ""
+        preview = preview_system_update(plan)
+        box.setInformativeText((note + "\n\n" + preview) if note else preview)
         apply_btn = box.addButton("اعمال و به‌روزرسانی", QMessageBox.AcceptRole)
         box.addButton("لغو", QMessageBox.RejectRole)
         box.exec_()
@@ -10041,15 +10112,11 @@ class MainWindow(QMainWindow):
             return
         if Path(path).exists() and not has_colorcode_sheet(path):
             sheets = workbook_sheet_names(path)
-            if ask_confirm(
-                self, "این فایل شیت colorcode ندارد",
-                "فایل انتخاب‌شده به‌نظر «فایل خام سامانه» است و شیت colorcode ندارد "
-                f"(شیت‌ها: {'، '.join(sheets) or '—'}).\n\n"
-                "می‌خواهید همین فایل را به‌عنوان به‌روزرسانی روی کتاب کار فعلی "
-                "اعمال کنم؟ (فیلتر «اجرا - مهر» و ستون‌های L تا AJ خودکار انجام می‌شود)",
-                "بله، به‌روزرسانی کن",
-            ):
-                self.start_system_update(path)
+            self._system_update_note = (
+                "این فایل شیت colorcode ندارد، پس به‌عنوان «فایل ۰۱ سامانه» خوانده "
+                f"می‌شود (شیت‌ها: {'، '.join(sheets) or '—'})."
+            )
+            self.start_system_update(path)
             return
         self.show_page("settings")
         values = self.settings.connection_values()
