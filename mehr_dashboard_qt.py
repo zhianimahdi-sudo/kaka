@@ -30,13 +30,17 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import faulthandler
+import functools
 import html as html_module
 import io
 import json
 import math
 import os
+import platform
 import re
 import sys
+import threading
 import traceback
 from collections import Counter
 from dataclasses import dataclass
@@ -69,6 +73,7 @@ try:
         QBrush,
         QColor,
         QConicalGradient,
+        QRadialGradient,
         QDesktopServices,
         QFont,
         QFontDatabase,
@@ -144,7 +149,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -192,15 +197,15 @@ FILTER_CHOICES: List[Tuple[str, str]] = [
 # رنگ نمودارها، مطابق پالت نسخهٔ وب
 CHART_COLORS: Dict[str, List[str]] = {
     "type": [
-        "#0E7A6A", "#18A492", "#3FBFAA", "#7FD8C8", "#B4E8DE",
-        "#C58A2E", "#E0A94A", "#2A63A6", "#7A6BB0", "#9B4A3F",
+        "#5A4FE0", "#8E7BFF", "#B3A6FF", "#D9D2FF", "#7C6CF0",
+        "#E3A33C", "#F3C570", "#3B72D9", "#0F9D76", "#C4634F",
     ],
-    "status": ["#0E7A6A", "#31C0AA", "#7FD8C8", "#C58A2E", "#9AA8A3"],
-    "progress": ["#BF3B32", "#E0A94A", "#2FA98F", "#0E7A6A", "#2A63A6"],
-    "completion": ["#BF3B32", "#E0A94A", "#2FA98F", "#0E7A6A"],
+    "status": ["#5A4FE0", "#8E7BFF", "#C3B9FF", "#E3A33C", "#2FB59B"],
+    "progress": ["#D9484F", "#E3A33C", "#E8C96A", "#8E7BFF", "#5A4FE0"],
+    "completion": ["#D9484F", "#E3A33C", "#8E7BFF", "#5A4FE0"],
     "annex": [
-        "#7A6BB0", "#167E5C", "#2A63A6", "#C58A2E",
-        "#BF3B32", "#B06A8E", "#4C6EA8", "#18A492",
+        "#5A4FE0", "#0F9D76", "#3B72D9", "#E3A33C",
+        "#D9484F", "#B06A9E", "#7C6CF0", "#2FB59B",
     ],
 }
 
@@ -694,6 +699,27 @@ class AppConfig:
         }
 
 
+LOG_FILENAME = "mehr_error.log"
+
+
+def log_path() -> Path:
+    """مسیر فایل لاگ برنامه."""
+    try:
+        return data_dir() / LOG_FILENAME
+    except Exception:
+        return Path.home() / LOG_FILENAME
+
+
+def log_event(message: str) -> None:
+    """ثبت یک رویداد یا خطا در فایل لاگ (برای عیب‌یابی)."""
+    try:
+        with open(log_path(), "a", encoding="utf-8") as handle:
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            handle.write(f"[{stamp}] {str(message).rstrip()}\n")
+    except Exception:
+        pass
+
+
 def default_pdf_folder(config: Optional[AppConfig] = None) -> str:
     if config is not None:
         saved = str(config.get("pdf_folder") or "").strip()
@@ -717,20 +743,26 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8):
             "کتابخانهٔ mysql-connector-python نصب نیست.\n"
             "دستور نصب: pip install mysql-connector-python"
         )
+    host = settings.get("host") or "127.0.0.1"
+    port = int(settings.get("port") or 3306)
+    database = settings.get("database") or "master_data"
+    user = settings.get("user") or "master_app"
+    log_event(f"اتصال به MySQL: {host}:{port}/{database} کاربر={user}")
     try:
-        return mysql_connector.connect(
-            host=settings.get("host") or "127.0.0.1",
-            port=int(settings.get("port") or 3306),
-            user=settings.get("user") or "master_app",
+        connection = mysql_connector.connect(
+            host=host,
+            port=port,
+            user=user,
             password=settings.get("password") or "",
-            database=settings.get("database") or "master_data",
+            database=database,
             charset="utf8mb4",
             connection_timeout=timeout,
             autocommit=False,
         )
+        log_event("اتصال به MySQL برقرار شد")
+        return connection
     except Exception as exc:
-        host = settings.get("host") or "127.0.0.1"
-        port = settings.get("port") or 3306
+        log_event(f"خطای اتصال به MySQL: {type(exc).__name__}: {exc}")
         raise DatabaseError(
             f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{exc}"
         ) from exc
@@ -768,6 +800,9 @@ def fetch_workbook_blob(settings: Dict[str, Any]) -> Dict[str, Any]:
                 blob = blob.tobytes()
             elif not isinstance(blob, (bytes, bytearray)):
                 blob = bytes(blob)
+            log_event(
+                f"کتاب کار {workbook_id}: {meta[0]} — {len(blob)} بایت در دیتابیس یافت شد"
+            )
             return {
                 "filename": str(meta[0] or f"workbook-{workbook_id}.xlsx"),
                 "size": int(meta[1] or len(blob)),
@@ -822,6 +857,10 @@ def _parse_imported_at(value: Any) -> Optional[datetime]:
 
 def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> DashboardData:
     """اتصال به دیتابیس مرکزی، خواندن کتاب کار و ساخت داده‌های داشبورد."""
+    log_event(
+        f"خواندن داده از دیتابیس {settings.get('database')} "
+        f"(workbook_id={settings.get('workbook_id')})"
+    )
     info = fetch_workbook_blob(settings)
     note = "دیتابیس {} • شناسهٔ {}".format(
         settings.get("database") or "master_data", fa(int(settings.get("workbook_id") or 1))
@@ -1291,6 +1330,10 @@ def parse_workbook_bytes(
         "تعداد موارد باز", "کسورات اسناد اختتام", "نوع قرارداد",
         "پیشرفت کارکرد", "وضعیت پکیج آزادسازی", "الحاقیه",
     ]
+    log_event(
+        f"پارس شد: {workbook_name} / شیت {target} — "
+        f"{len(records)} قرارداد، پیشرفت {progress_percent_text}٪"
+    )
 
     return DashboardData(
         source_name=workbook_name,
@@ -1393,97 +1436,97 @@ def empty_dashboard(message: str = "") -> DashboardData:
 THEMES: Dict[str, Dict[str, str]] = {
     "light": {
         "name": "روشن",
-        "bg": "#F1F5F4",
-        "bg_2": "#E8F0EE",
+        "bg": "#F2F3FA",
+        "bg_2": "#E9EBF5",
         "surface": "#FFFFFF",
-        "surface_2": "#F7FAF9",
-        "surface_3": "#EDF3F1",
-        "surface_inv": "#0E1F1B",
-        "border": "#E2EAE8",
-        "border_soft": "#EDF2F0",
-        "ink": "#0F1F1B",
-        "ink_2": "#42564F",
-        "ink_3": "#7A8C86",
-        "brand": "#0E7A6A",
-        "brand_2": "#18A492",
-        "brand_deep": "#0A5A4F",
-        "brand_soft": "#E1F2EE",
-        "brand_tint": "#F0F8F6",
+        "surface_2": "#F8F9FE",
+        "surface_3": "#EFF1FA",
+        "surface_inv": "#141830",
+        "border": "#E3E6F3",
+        "border_soft": "#EEF0F9",
+        "ink": "#12162B",
+        "ink_2": "#464E6B",
+        "ink_3": "#7B84A3",
+        "brand": "#5A4FE0",
+        "brand_2": "#7A6CF6",
+        "brand_deep": "#3E34B8",
+        "brand_soft": "#ECEAFF",
+        "brand_tint": "#F6F5FF",
         "on_brand": "#FFFFFF",
-        "accent": "#C58A2E",
-        "accent_2": "#E3AD55",
-        "accent_soft": "#FBF1DE",
-        "danger": "#BF3B32",
-        "danger_soft": "#FBEAE8",
-        "warning": "#AE6813",
-        "warning_soft": "#FCF1DF",
-        "success": "#167E5C",
-        "success_soft": "#E3F4EB",
-        "info": "#2A63A6",
-        "info_soft": "#E8F0FA",
-        "selection": "#DCEFEC",
-        "row_alt": "#FAFCFB",
-        "chart_grid": "#E6EDEB",
-        "shadow": "#0B2A23",
-        "rail": "#0E211C",
-        "rail_2": "#13291F",
-        "rail_ink": "#DCEBE6",
-        "rail_muted": "#7E9C93",
-        "rail_active": "#1C3B33",
-        "scrim": "rgba(6, 20, 17, 0.45)",
-        "hero_1": "#0C5F52",
-        "hero_2": "#0E7A6A",
-        "hero_3": "#12A08C",
-        "hero_ink": "#EAFBF6",
-        "hero_muted": "#A8D8CD",
+        "accent": "#E3A33C",
+        "accent_2": "#F3C570",
+        "accent_soft": "#FCF3E2",
+        "danger": "#D9484F",
+        "danger_soft": "#FDEBEC",
+        "warning": "#B2700F",
+        "warning_soft": "#FCF2DF",
+        "success": "#0F9D76",
+        "success_soft": "#E4F6EF",
+        "info": "#3B72D9",
+        "info_soft": "#EAF1FD",
+        "selection": "#E9E7FF",
+        "row_alt": "#FAFBFF",
+        "chart_grid": "#E8EAF5",
+        "shadow": "#1A1B3A",
+        "rail": "#0D1024",
+        "rail_2": "#141833",
+        "rail_ink": "#E9EBF9",
+        "rail_muted": "#8B93B5",
+        "rail_active": "#232A4E",
+        "scrim": "rgba(10, 12, 28, 0.52)",
+        "hero_1": "#241E6E",
+        "hero_2": "#4B3FCB",
+        "hero_3": "#7F5CE8",
+        "hero_ink": "#F5F3FF",
+        "hero_muted": "#CDC8FA",
         "paper": "#FFFFFF",
     },
     "dark": {
         "name": "تیره",
-        "bg": "#0A1210",
-        "bg_2": "#0D1A16",
-        "surface": "#111C19",
-        "surface_2": "#16241F",
-        "surface_3": "#1B2D27",
-        "surface_inv": "#EAF3EF",
-        "border": "#253832",
-        "border_soft": "#1B2B26",
-        "ink": "#EAF3EF",
-        "ink_2": "#B4C6C0",
-        "ink_3": "#83988F",
-        "brand": "#31C0AA",
-        "brand_2": "#5BDCC6",
-        "brand_deep": "#1B8C7C",
-        "brand_soft": "#15342D",
-        "brand_tint": "#122620",
-        "on_brand": "#04211C",
-        "accent": "#E0A94A",
-        "accent_2": "#F2C777",
-        "accent_soft": "#33280F",
-        "danger": "#F0796E",
-        "danger_soft": "#3A1E1B",
-        "warning": "#E9B45B",
+        "bg": "#07080F",
+        "bg_2": "#0C0E19",
+        "surface": "#111321",
+        "surface_2": "#161A2A",
+        "surface_3": "#1D2234",
+        "surface_inv": "#EFF1FB",
+        "border": "#262B42",
+        "border_soft": "#1C2136",
+        "ink": "#EDEFFA",
+        "ink_2": "#B3BAD3",
+        "ink_3": "#7F88A6",
+        "brand": "#8C86FF",
+        "brand_2": "#A79FFF",
+        "brand_deep": "#C6C1FF",
+        "brand_soft": "#1F1C44",
+        "brand_tint": "#17163A",
+        "on_brand": "#0C0A22",
+        "accent": "#E9B45B",
+        "accent_2": "#F4CC86",
+        "accent_soft": "#33270F",
+        "danger": "#F0797F",
+        "danger_soft": "#3A1D22",
+        "warning": "#EBB55F",
         "warning_soft": "#392C16",
-        "success": "#4BD3A3",
-        "success_soft": "#133227",
-        "info": "#7FB6F0",
-        "info_soft": "#152B42",
-        "selection": "#1C3F38",
-        "row_alt": "#14211D",
-        "chart_grid": "#22332E",
+        "success": "#45D3A8",
+        "success_soft": "#12322A",
+        "info": "#82B4F5",
+        "info_soft": "#152840",
+        "selection": "#24244A",
+        "row_alt": "#131627",
+        "chart_grid": "#232840",
         "shadow": "#000000",
-        "rail": "#070E0C",
-        "rail_2": "#0C1714",
-        "rail_ink": "#DDEBE6",
-        "rail_muted": "#769389",
-        "rail_active": "#16302A",
-        "scrim": "rgba(0, 0, 0, 0.58)",
-        "hero_1": "#0B3A32",
-        "hero_2": "#0D5346",
-        "hero_3": "#127A68",
-        "hero_ink": "#EAFBF6",
-        "hero_muted": "#9CCFC3",
-        "paper": "#0F1A17",
+        "rail": "#05060D",
+        "rail_2": "#0A0D1B",
+        "rail_ink": "#E5E8F8",
+        "rail_muted": "#7B84A6",
+        "rail_active": "#1B2138",
+        "scrim": "rgba(0, 0, 0, 0.62)",
+        "hero_1": "#14103F",
+        "hero_2": "#2A2280",
+        "hero_3": "#5A46C9",
+        "hero_ink": "#F3F1FF",
+        "hero_muted": "#BDB6F2",
+        "paper": "#0F1120",
     },
 }
 
@@ -1506,7 +1549,7 @@ for _theme_colors in THEMES.values():
     for _legacy_key, _fresh_key in _LEGACY_ALIASES.items():
         _theme_colors.setdefault(_legacy_key, _theme_colors[_fresh_key])
 
-RADIUS = {"card": 18, "inner": 12, "chip": 9, "button": 12}
+RADIUS = {"card": 20, "inner": 14, "chip": 10, "button": 13}
 SPACE = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 22, "xxl": 30}
 
 FONT_CANDIDATES = [
@@ -1564,6 +1607,17 @@ def app_font(size: int = 10, weight: int = QFont.Normal) -> QFont:
     font.setStyleStrategy(QFont.PreferAntialias)
     font.setHintingPreference(QFont.PreferFullHinting)
     return font
+
+
+def set_text_aligned(label, text: str, side: str = "right") -> None:
+    """متن و تراز را با هم به‌روزرسانی می‌کند (تراز راست واقعی در RTL)."""
+    label.setText(text)
+    if side == "center":
+        label.setAlignment(Qt.AlignCenter)
+    elif side == "left":
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter | Qt.AlignAbsolute)
+    else:
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute)
 
 
 def mix(color_a: str, color_b: str, ratio: float) -> QColor:
@@ -1645,20 +1699,25 @@ def build_stylesheet(c: Dict[str, str], base_size: int = 10) -> str:
 
     /* ---------- نوارهای پیمایش ---------- */
     QScrollArea {{ background: transparent; border: none; }}
-    QScrollBar:vertical {{ background: transparent; width: 11px; margin: 4px 2px; }}
+    QScrollBar:vertical {{ background: transparent; width: 9px; margin: 3px 2px; }}
     QScrollBar::handle:vertical {{
-        background: {c['border']}; min-height: 36px; border-radius: 4px;
+        background: {c['border']}; min-height: 40px; border-radius: 3.5px;
     }}
-    QScrollBar::handle:vertical:hover {{ background: {c['brand']}; }}
-    QScrollBar::add-line, QScrollBar::sub-line {{
+    QScrollBar::handle:vertical:hover {{ background: {c['ink_3']}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0; width: 0; background: none; border: none;
     }}
-    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-    QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px 4px; }}
+    QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {{ image: none; height: 0; width: 0; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+    QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 2px 3px; }}
     QScrollBar::handle:horizontal {{
-        background: {c['border']}; min-width: 36px; border-radius: 4px;
+        background: {c['border']}; min-width: 40px; border-radius: 3.5px;
     }}
-    QScrollBar::handle:horizontal:hover {{ background: {c['brand']}; }}
+    QScrollBar::handle:horizontal:hover {{ background: {c['ink_3']}; }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        height: 0; width: 0; background: none; border: none;
+    }}
+    QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal {{ image: none; height: 0; width: 0; }}
 
     /* ---------- برچسب‌ها ---------- */
     QLabel {{ background: transparent; }}
@@ -1703,9 +1762,20 @@ def build_stylesheet(c: Dict[str, str], base_size: int = 10) -> str:
         background: {primary_gradient};
         color: {c['on_brand']};
         border: 1px solid transparent;
-        padding: 9px 18px;
+        padding: 9px 20px;
+        font-weight: 800;
     }}
     QPushButton#Primary:hover {{ background: {c['brand_deep']}; color: #FFFFFF; border-color: transparent; }}
+    QPushButton#Soft {{
+        background: {c['brand_soft']}; color: {c['brand_deep']};
+        border: 1px solid transparent; font-weight: 700;
+    }}
+    QPushButton#Soft:hover {{ background: {c['brand_tint']}; border-color: {c['brand_2']}; color: {c['brand_deep']}; }}
+    QPushButton#Link {{
+        background: transparent; border: none; color: {c['brand_deep']};
+        padding: 4px 2px; font-weight: 700;
+    }}
+    QPushButton#Link:hover {{ color: {c['brand']}; text-decoration: underline; }}
     QPushButton#Ghost {{
         background: transparent; border: 1px solid transparent; color: {c['ink_2']};
     }}
@@ -1832,9 +1902,9 @@ def build_stylesheet(c: Dict[str, str], base_size: int = 10) -> str:
         color: {c['ink_3']};
         border: none;
         border-bottom: 1px solid {c['border']};
-        padding: 10px 10px;
+        padding: 11px 10px;
         font-weight: 700;
-        font-size: {max(8, base_size - 1)}pt;
+        font-size: {max(8, base_size - 1.5)}pt;
     }}
     QHeaderView::section:hover {{ color: {c['brand_deep']}; background: {c['brand_tint']}; }}
     QTableCornerButton::section {{ background: {c['surface_2']}; border: none; }}
@@ -1861,8 +1931,28 @@ def build_stylesheet(c: Dict[str, str], base_size: int = 10) -> str:
     QListWidget::item {{ padding: 10px 8px; border-radius: 10px; color: {c['ink_2']}; }}
     QListWidget::item:selected {{ background: {c['brand_soft']}; color: {c['brand_deep']}; }}
     QListWidget::item:hover {{ background: {c['surface_3']}; }}
-    QStatusBar {{ background: {c['surface']}; border-top: 1px solid {c['border_soft']}; }}
-    QStatusBar QLabel {{ color: {c['ink_3']}; padding: 0 10px; font-size: {max(8, base_size - 1)}pt; }}
+    QStatusBar {{ background: {c['surface']}; border-top: 1px solid {c['border_soft']}; min-height: 26px; }}
+    QStatusBar::item {{ border: none; }}
+    QStatusBar QLabel {{ color: {c['ink_3']}; padding: 0 10px; font-size: {max(7.5, base_size - 2)}pt; }}
+    QStatusBar QLabel#StatusStrong {{ color: {c['ink_2']}; font-weight: 700; }}
+
+    /* ---------- نشان‌ها و ریزبرچسب‌ها ---------- */
+    QLabel#Overline {{
+        color: {c['ink_3']}; font-size: {max(7.5, base_size - 2.5)}pt;
+        font-weight: 700; letter-spacing: 0.6px;
+    }}
+    QLabel#StatusPill {{
+        background: {c['success_soft']}; color: {c['success']};
+        border-radius: 11px; padding: 5px 12px; font-weight: 700;
+        font-size: {max(8, base_size - 1.5)}pt;
+    }}
+    QLabel#StatusPillOff {{ background: {c['danger_soft']}; color: {c['danger']}; }}
+    QLabel#HeroKpi {{
+        color: {c['hero_ink']}; font-size: {base_size + 2}pt; font-weight: 800;
+    }}
+    QLabel#HeroKpiHint {{ color: {c['hero_muted']}; font-size: {max(7.5, base_size - 2)}pt; }}
+    QFrame#Divider {{ background: {c['border_soft']}; max-height: 1px; min-height: 1px; border: none; }}
+    QFrame#RailDivider {{ background: rgba(255,255,255,0.08); max-height: 1px; min-height: 1px; border: none; }}
     QProgressBar {{
         background: {c['border_soft']}; border: none; border-radius: 4px;
         height: 8px; text-align: center; color: transparent;
@@ -2299,6 +2389,7 @@ class Card(QFrame):
         self._hover = False
         self._accent: Optional[QColor] = None
         self.setAttribute(Qt.WA_Hover, True)
+        self.setLayoutDirection(Qt.RightToLeft)
         self.body = QVBoxLayout(self)
         inset = self.SHADOW
         self.body.setContentsMargins(inset + padding, inset + padding,
@@ -2339,7 +2430,10 @@ class Card(QFrame):
 
         if self.variant != "flat":
             shadow = QColor(c["shadow"])
-            strength = 20 if self.variant == "hero" else (14 if not self._hover else 22)
+            if self.variant == "hero":
+                strength = 18
+            else:
+                strength = 15 if self._hover else 9
             layers = 9
             for index in range(layers, 0, -1):
                 ratio = index / layers
@@ -2361,18 +2455,42 @@ class Card(QFrame):
             painter.setPen(Qt.NoPen)
             painter.setBrush(gradient)
             painter.drawRoundedRect(body, radius, radius)
-            # موج‌های تزئینی
+            # نور و موج‌های تزئینی
             painter.save()
             clip = QPainterPath()
             clip.addRoundedRect(body, radius, radius)
             painter.setClipPath(clip)
-            painter.setBrush(QColor(255, 255, 255, 16))
+            glow = QRadialGradient(
+                QPointF(body.right() - body.width() * 0.16, body.top() + body.height() * 0.10),
+                body.width() * 0.62,
+            )
+            glow.setColorAt(0.0, QColor(255, 255, 255, 40))
+            glow.setColorAt(0.55, QColor(255, 255, 255, 12))
+            glow.setColorAt(1.0, QColor(255, 255, 255, 0))
             painter.setPen(Qt.NoPen)
-            painter.drawEllipse(QPointF(body.right() - body.width() * 0.10, body.top() + body.height() * 0.08),
-                                body.width() * 0.34, body.width() * 0.34)
-            painter.setBrush(QColor(255, 255, 255, 9))
-            painter.drawEllipse(QPointF(body.right() - body.width() * 0.02, body.bottom() + body.height() * 0.18),
-                                body.width() * 0.42, body.width() * 0.42)
+            painter.setBrush(glow)
+            painter.drawRect(body)
+
+            painter.setBrush(QColor(255, 255, 255, 12))
+            painter.drawEllipse(
+                QPointF(body.left() + body.width() * 0.16, body.bottom() + body.height() * 0.24),
+                body.width() * 0.34, body.width() * 0.34,
+            )
+            painter.setBrush(QColor(255, 255, 255, 8))
+            painter.drawEllipse(
+                QPointF(body.right() - body.width() * 0.04, body.bottom() + body.height() * 0.10),
+                body.width() * 0.30, body.width() * 0.30,
+            )
+            # خط نور بالای کارت
+            highlight = QLinearGradient(body.topLeft(), body.topRight())
+            highlight.setColorAt(0.0, QColor(255, 255, 255, 0))
+            highlight.setColorAt(0.35, QColor(255, 255, 255, 70))
+            highlight.setColorAt(0.75, QColor(255, 255, 255, 40))
+            highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QBrush(highlight), 1))
+            painter.drawLine(QPointF(body.left() + radius, body.top() + 0.5),
+                             QPointF(body.right() - radius, body.top() + 0.5))
             painter.restore()
         elif self.variant == "soft":
             painter.setPen(Qt.NoPen)
@@ -2403,8 +2521,8 @@ class Card(QFrame):
             painter.setPen(Qt.NoPen)
             painter.setBrush(self._accent)
             painter.drawRoundedRect(
-                QRectF(body.right() - 4, body.top() + radius * 0.7, 4,
-                       max(12.0, body.height() - radius * 1.4)), 2, 2,
+                QRectF(body.right() - 3, body.top() + radius * 0.9, 3,
+                       max(10.0, body.height() - radius * 1.8)), 1.5, 1.5,
             )
 
 
@@ -2418,10 +2536,12 @@ class SectionHeader(QWidget):
         layout.setSpacing(10)
         title_label = QLabel(title)
         title_label.setObjectName("SectionTitle")
+        set_text_aligned(title_label, title, "right")
         layout.addWidget(title_label)
         if subtitle:
             sub = QLabel(subtitle)
             sub.setObjectName("Muted")
+            set_text_aligned(sub, subtitle, "right")
             layout.addWidget(sub)
         layout.addStretch(1)
         self.actions = QHBoxLayout()
@@ -2640,10 +2760,10 @@ class RingGauge(QWidget):
             span = -240.0 * value / 100.0
             gradient = QConicalGradient(arc_box.center(), 210)
             if self.hero_mode:
-                gradient.setColorAt(0.0, QColor("#EAFBF6"))
-                gradient.setColorAt(0.45, QColor("#A9E6D8"))
-                gradient.setColorAt(0.80, QColor("#5BDCC6"))
-                gradient.setColorAt(1.0, QColor("#F2C777"))
+                gradient.setColorAt(0.0, QColor("#FFFFFF"))
+                gradient.setColorAt(0.40, QColor("#DCD6FF"))
+                gradient.setColorAt(0.78, QColor("#A697FF"))
+                gradient.setColorAt(1.0, QColor("#F6CE86"))
             else:
                 gradient.setColorAt(0.0, QColor(c["brand_2"]))
                 gradient.setColorAt(0.45, QColor(c["brand"]))
@@ -2663,21 +2783,26 @@ class RingGauge(QWidget):
             painter.drawEllipse(end, thickness * 0.12, thickness * 0.12)
 
         # متن مرکزی
-        inner = arc_box.width() / 2 - thickness / 2 - 4
-        font = app_font(max(20, int(inner * 0.42)), QFont.Black)
-        painter.setFont(font)
-        painter.setPen(QPen(QColor(c["hero_ink"] if self.hero_mode else c["ink"])))
+        inner = arc_box.width() / 2 - thickness / 2 - 6
         percent_text = fa(f"{value:.1f}٪") if value > 0 else "—"
+        size = max(16, int(inner * 0.40))
+        while size > 11:
+            probe = QFontMetrics(app_font(size, QFont.Black))
+            if probe.horizontalAdvance(percent_text) <= inner * 1.86:
+                break
+            size -= 1
+        painter.setFont(app_font(size, QFont.Black))
+        painter.setPen(QPen(QColor(c["hero_ink"] if self.hero_mode else c["ink"])))
         painter.drawText(
-            QRectF(arc_box.center().x() - inner, arc_box.center().y() - inner * 0.62,
-                   inner * 2, inner * 0.72),
+            QRectF(arc_box.center().x() - inner, arc_box.center().y() - inner * 0.58,
+                   inner * 2, inner * 0.62),
             Qt.AlignCenter, percent_text,
         )
-        painter.setFont(app_font(max(8, int(inner * 0.11)), QFont.DemiBold))
+        painter.setFont(app_font(max(8, int(inner * 0.115)), QFont.DemiBold))
         painter.setPen(QPen(QColor(c["hero_muted"] if self.hero_mode else c["ink_3"])))
         painter.drawText(
-            QRectF(arc_box.center().x() - inner, arc_box.center().y() + inner * 0.18,
-                   inner * 2, inner * 0.4),
+            QRectF(arc_box.center().x() - inner, arc_box.center().y() + inner * 0.10,
+                   inner * 2, inner * 0.38),
             Qt.AlignCenter, self.caption,
         )
 
@@ -2930,13 +3055,14 @@ class LegendList(QWidget):
             label_width = max(16, int(width - label_left - 20))
             painter.drawText(
                 QRectF(label_left, y, label_width, row_height),
-                Qt.AlignRight | Qt.AlignVCenter,
+                Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute,
                 metrics.elidedText(pretty_label(label).replace(" درصد", "٪"),
                                    Qt.ElideRight, label_width),
             )
             painter.setPen(QPen(QColor(c["ink_3"])))
             painter.drawText(QRectF(0, y, percent_width, row_height),
-                             Qt.AlignLeft | Qt.AlignVCenter, percent_texts[index])
+                             Qt.AlignLeft | Qt.AlignVCenter | Qt.AlignAbsolute,
+                             percent_texts[index])
 
         if len(self.items) > len(rows):
             painter.setPen(QPen(QColor(c["ink_3"])))
@@ -3053,7 +3179,7 @@ class BarChart(QWidget):
             painter.setPen(QPen(QColor(c["ink_2"])))
             painter.drawText(
                 QRectF(track_right + 10, y, label_width, row_height),
-                Qt.AlignRight | Qt.AlignVCenter,
+                Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute,
                 metrics.elidedText(
                     f"{item['label']} ({fa_num(item['count'])})", Qt.ElideRight, label_width,
                 ),
@@ -3061,7 +3187,7 @@ class BarChart(QWidget):
             value_text = bidi(f"{fa(item['percent'])}٪")
             painter.setPen(QPen(QColor(c["ink_3"])))
             painter.drawText(QRectF(0, y, value_width, row_height),
-                             Qt.AlignLeft | Qt.AlignVCenter, value_text)
+                             Qt.AlignLeft | Qt.AlignVCenter | Qt.AlignAbsolute, value_text)
 
     def _row_at(self, y: int) -> int:
         if not self.items:
@@ -3255,18 +3381,18 @@ class ContractTableModel(QAbstractTableModel):
     """مدل جدول با فیلتر، جستجو و مرتب‌سازی داخلی."""
 
     COLUMNS: List[ColumnSpec] = [
-        ColumnSpec("ردیف", 48, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
-        ColumnSpec("نام شرکت", 158, lambda r, i: r.col2),
-        ColumnSpec("شماره قرارداد", 124, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
-        ColumnSpec("موضوع قرارداد", 190, lambda r, i: r.col4),
-        ColumnSpec("نوع قرارداد", 132, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
-        ColumnSpec("موارد باز", 82, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
-        ColumnSpec("کسورات اسناد اختتام", 152, lambda r, i: r.deductions),
-        ColumnSpec("پیشرفت کارکرد", 122, lambda r, i: r.progress_status, int(Qt.AlignCenter), "chip:progress"),
-        ColumnSpec("الحاقیه", 118, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
-        ColumnSpec("وضعیت پکیج", 112, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
-        ColumnSpec("فایل", 50, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
-        ColumnSpec("نشان", 40, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
+        ColumnSpec("ردیف", 42, lambda r, i: str(i + 1), int(Qt.AlignCenter), "number"),
+        ColumnSpec("نام شرکت", 146, lambda r, i: r.col2),
+        ColumnSpec("شماره قرارداد", 130, lambda r, i: r.col3, int(Qt.AlignCenter), "code"),
+        ColumnSpec("موضوع قرارداد", 134, lambda r, i: r.col4),
+        ColumnSpec("نوع قرارداد", 100, lambda r, i: r.f_value, int(Qt.AlignCenter), "chip:type"),
+        ColumnSpec("موارد باز", 62, lambda r, i: str(len(r.open_flags)), int(Qt.AlignCenter), "flags"),
+        ColumnSpec("کسورات اسناد اختتام", 150, lambda r, i: r.deductions),
+        ColumnSpec("پیشرفت کارکرد", 104, lambda r, i: r.progress_status, int(Qt.AlignCenter), "chip:progress"),
+        ColumnSpec("الحاقیه", 134, lambda r, i: r.annex_status, int(Qt.AlignCenter), "chip:annex"),
+        ColumnSpec("وضعیت پکیج", 110, lambda r, i: r.as_status, int(Qt.AlignCenter), "chip:status"),
+        ColumnSpec("فایل", 42, lambda r, i: "PDF" if r.pdf_file else "", int(Qt.AlignCenter), "pdf"),
+        ColumnSpec("نشان", 26, lambda r, i: "", int(Qt.AlignCenter), "bookmark"),
     ]
 
     def __init__(self, notes: NotesStore, parent=None) -> None:
@@ -3600,7 +3726,8 @@ class ContractDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor(colors["text"])))
             text_rect = rect.adjusted(8, 0, -8, 0)
             painter.drawText(text_rect, Qt.AlignCenter,
-                             metrics.elidedText(text, Qt.ElideRight, max(10, text_rect.width())))
+                             metrics.elidedText(f"\u202a{text}\u202c", Qt.ElideRight,
+                                                max(10, text_rect.width())))
             painter.restore()
             return
 
@@ -3668,16 +3795,20 @@ class DataLoader(QThread):
         self.pdf_folder = pdf_folder
 
     def run(self) -> None:
+        log_event("DataLoader: شروع خواندن از دیتابیس")
         try:
             data = read_database_workbook(self.settings, self.pdf_folder)
         except ExcelDataError as exc:
+            log_event(f"DataLoader: خطای داده — {exc}")
             self.failed.emit(str(exc))
             return
         except Exception as exc:  # خطای پیش‌بینی‌نشده
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             write_error_log(traceback.format_exc())
+            log_event(f"DataLoader: خطای غیرمنتظره — {detail}")
             self.failed.emit(f"خطای پیش‌بینی‌نشده در خواندن دیتابیس:\n{detail}")
             return
+        log_event(f"DataLoader: {data.total_contracts} قرارداد آماده شد")
         self.loaded.emit(data)
 
 
@@ -4048,6 +4179,15 @@ def _apply_args(config: AppConfig, args: argparse.Namespace) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
+    install_crash_logging()
+    log_event(
+        f"شروع برنامه — نسخهٔ {APP_VERSION} | python {sys.version.split()[0]} | "
+        f"{platform.platform()}"
+    )
+    log_event(
+        "mysql-connector: " + ("نصب است" if mysql_connector is not None else "نصب نیست")
+    )
+
     if args.check:
         config = AppConfig()
         _apply_args(config, args)
@@ -4195,61 +4335,71 @@ class PillTabs(QWidget):
 
 
 class StatTile(Card):
-    """کاشی آمار با آیکون، مقدار بزرگ، توضیح و نوار درصد."""
+    """کاشی آمار: عنوان، مقدار بزرگ، توضیح و نوار نسبت."""
 
     clicked = pyqtSignal(str)
 
     def __init__(self, key: str, title: str, kind: str, accent: str,
                  colors: Dict[str, str], parent=None) -> None:
-        super().__init__(colors, radius=16, padding=14, hoverable=True, parent=parent)
+        super().__init__(colors, radius=18, padding=16, hoverable=True, parent=parent)
         self.key = key
         self.accent = accent
+        self.title_text = title
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(148)
+        self.setMinimumHeight(154)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.set_accent(accent)
 
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        self.tile = IconTile(kind, accent, alpha(accent, 26).name(QColor.HexArgb), size=42, radius=13)
-        top.addWidget(self.tile, 0, Qt.AlignTop)
-        top.addStretch(1)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("CardTitle")
+        self.title_label.setStyleSheet(
+            f"font-size: 9pt; font-weight: 700; color: {colors['ink_2']};"
+        )
+        set_text_aligned(self.title_label, title, "right")
+        self.tile = IconTile(kind, accent, alpha(accent, 24).name(QColor.HexArgb),
+                             size=36, radius=12)
+        header.addWidget(self.tile, 0, Qt.AlignTop)
+        header.addWidget(self.title_label, 1)
+        self.body.addLayout(header)
+        self.body.addSpacing(2)
+
+        value_row = QHBoxLayout()
+        value_row.setSpacing(8)
+        self.value_label = QLabel("—")
+        self.value_label.setObjectName("CardValue")
+        self.value_label.setStyleSheet("font-size: 23pt; font-weight: 800;")
+        value_row.addWidget(self.value_label, 1)
         self.badge = QLabel("")
         self.badge.setObjectName("Chip")
         self.badge.setVisible(False)
-        top.addWidget(self.badge, 0, Qt.AlignTop)
-        self.body.addLayout(top)
-
-        self.value_label = QLabel("—")
-        self.value_label.setObjectName("CardValue")
-        self.value_label.setStyleSheet("font-size: 19pt; font-weight: 800;")
-        self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.body.addWidget(self.value_label)
-
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("CardTitle")
-        self.title_label.setStyleSheet("font-size: 9pt; font-weight: 600;")
-        self.title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.body.addWidget(self.title_label)
-
-        self.bar = MiniBar(colors, accent)
-        self.body.addWidget(self.bar)
+        value_row.addWidget(self.badge, 0, Qt.AlignBottom)
+        self.body.addLayout(value_row)
 
         self.hint_label = QLabel("")
         self.hint_label.setObjectName("Muted")
-        self.hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.hint_label.setStyleSheet("font-size: 8.5pt;")
         self.body.addWidget(self.hint_label)
+
         self.body.addStretch(1)
+        self.bar = MiniBar(colors, accent)
+        self.body.addWidget(self.bar)
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         super().set_theme(colors)
-        self.tile.set_colors(self.accent, alpha(self.accent, 26).name(QColor.HexArgb))
+        self.colors = colors
+        self.tile.set_colors(self.accent, alpha(self.accent, 24).name(QColor.HexArgb))
         self.bar.set_theme(colors, self.accent)
+        self.title_label.setStyleSheet(
+            f"font-size: 9pt; font-weight: 700; color: {colors['ink_2']};"
+        )
 
     def set_values(self, value: str, hint: str = "", ratio: Optional[float] = None,
                    badge: str = "") -> None:
         self.value_label.setText(value)
+        set_text_aligned(self.value_label, value, "right")
         self.hint_label.setText(hint)
+        set_text_aligned(self.hint_label, hint, "right")
         if ratio is not None:
             self.bar.set_value(ratio)
             self.bar.setVisible(True)
@@ -4282,39 +4432,47 @@ class FlagTile(Card):
     clicked = pyqtSignal(str)
 
     def __init__(self, key: str, title: str, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(colors, radius=14, padding=11, hoverable=True, parent=parent)
+        super().__init__(colors, radius=16, padding=12, hoverable=True, parent=parent)
         self.key = key
         self.colors = colors
+        self.title_text = title
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(84)
+        self.setMinimumHeight(92)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         top = QHBoxLayout()
         top.setSpacing(6)
+        self.value_label = QLabel("—")
+        self.value_label.setStyleSheet(
+            f"font-size: 16pt; font-weight: 800; color: {colors['ink']};"
+        )
         self.tile = IconTile(FLAG_ICONS.get(key, "check"), colors["brand"],
                              colors["brand_soft"], size=28, radius=9)
         top.addWidget(self.tile, 0, Qt.AlignTop)
-        top.addStretch(1)
-        self.value_label = QLabel("—")
-        self.value_label.setStyleSheet("font-size: 14pt; font-weight: 800;")
-        self.value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        top.addWidget(self.value_label, 0, Qt.AlignTop)
+        top.addWidget(self.value_label, 1)
         self.body.addLayout(top)
 
         self.title_label = QLabel(title)
-        self.title_label.setStyleSheet("font-size: 7.5pt; font-weight: 600;")
         self.title_label.setWordWrap(True)
-        self.title_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.title_label.setStyleSheet("font-size: 7.5pt; font-weight: 600;")
+        set_text_aligned(self.title_label, title, "right")
         self.body.addWidget(self.title_label)
         self.body.addStretch(1)
 
     def set_value(self, value: str) -> None:
         self.value_label.setText(value)
+        set_text_aligned(self.value_label, value, "right")
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         super().set_theme(colors)
         self.colors = colors
         self.tile.set_colors(colors["brand"], colors["brand_soft"])
+        self.value_label.setStyleSheet(
+            f"font-size: 16pt; font-weight: 800; color: {colors['ink']};"
+        )
+        self.title_label.setStyleSheet(
+            f"font-size: 7.5pt; font-weight: 600; color: {colors['ink_2']};"
+        )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
@@ -4335,8 +4493,10 @@ class ChartCard(Card):
         title_box.setSpacing(2)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("SectionTitle")
+        set_text_aligned(self.title_label, title, "right")
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("Muted")
+        set_text_aligned(self.subtitle_label, subtitle, "right")
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
         header.addLayout(title_box)
@@ -4576,20 +4736,64 @@ class Combo(QPushButton):
         text_rect = body.adjusted(30, 0, -12, 0)
         metrics = QFontMetrics(font)
         text = metrics.elidedText(self.currentText(), Qt.ElideRight, int(text_rect.width()))
-        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, text)
+        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute, text)
 
 
 class CheckBox(QCheckBox):
-    """چک‌باکس بومی با پالت هماهنگ پوسته."""
+    """چک‌باکس با نشانگر سفارشیِ هماهنگ با پوسته (بدون وابستگی به استایل بومی)."""
+
+    BOX = 18
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.colors = THEMES["light"]
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(26)
+        self.setAttribute(Qt.WA_Hover, True)
 
     def set_theme_colors(self, colors: Dict[str, str]) -> None:
-        palette = self.palette()
-        palette.setColor(QPalette.Base, QColor(colors["surface"]))
-        palette.setColor(QPalette.Text, QColor(colors["ink"]))
-        palette.setColor(QPalette.WindowText, QColor(colors["ink"]))
-        palette.setColor(QPalette.Highlight, QColor(colors["brand"]))
-        self.setPalette(palette)
+        self.colors = colors
         self.update()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        width = self.fontMetrics().horizontalAdvance(self.text())
+        return QSize(width + self.BOX + 34, 26)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        c = self.colors
+        box = QRectF(self.width() - self.BOX - 2,
+                     (self.height() - self.BOX) / 2, self.BOX, self.BOX)
+        checked = self.isChecked()
+        enabled = self.isEnabled()
+        hovered = self.underMouse()
+        if checked:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["brand"] if enabled else c["ink_3"]))
+            painter.drawRoundedRect(box, 5.5, 5.5)
+            painter.setPen(QPen(QColor(c["on_brand"]), 2.0, Qt.SolidLine,
+                                Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            path = QPainterPath()
+            path.moveTo(box.left() + 4.7, box.center().y() + 0.5)
+            path.lineTo(box.center().x() - 0.7, box.bottom() - 4.6)
+            path.lineTo(box.right() - 4.3, box.top() + 4.8)
+            painter.drawPath(path)
+        else:
+            border = c["brand_2"] if (hovered and enabled) else c["border"]
+            painter.setPen(QPen(QColor(border), 1.4))
+            painter.setBrush(QColor(c["surface"]))
+            painter.drawRoundedRect(box, 5.5, 5.5)
+        painter.setFont(self.font())
+        painter.setPen(QPen(QColor(c["ink"] if enabled else c["ink_3"])))
+        text_rect = QRectF(0, 0, max(0.0, box.left() - 8), self.height())
+        painter.drawText(
+            text_rect, Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute,
+            self.fontMetrics().elidedText(self.text(), Qt.ElideRight,
+                                          int(text_rect.width())),
+        )
 
 
 class SpinBox(QSpinBox):
@@ -4615,11 +4819,12 @@ class NumberStepper(QWidget):
         self._value = 0
         self._suffix = ""
         self._special = ""
-        self.setMinimumHeight(36)
+        self.setMinimumHeight(38)
+        self.setMinimumWidth(92)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(5, 4, 5, 4)
+        layout.setSpacing(2)
         self.minus_button = QPushButton("−")
         self.minus_button.setObjectName("Stepper")
         self.minus_button.setCursor(Qt.PointingHandCursor)
@@ -4627,7 +4832,9 @@ class NumberStepper(QWidget):
         layout.addWidget(self.minus_button)
         self.value_label = QLabel("")
         self.value_label.setAlignment(Qt.AlignCenter)
-        self.value_label.setStyleSheet("font-size: 10pt; font-weight: 700;")
+        self.value_label.setStyleSheet(
+            "font-size: 10pt; font-weight: 700; background: transparent;"
+        )
         layout.addWidget(self.value_label, 1)
         self.plus_button = QPushButton("+")
         self.plus_button.setObjectName("Stepper")
@@ -4762,11 +4969,13 @@ def _card_title(title: str, subtitle: str = "") -> QWidget:
     layout.setSpacing(1)
     main = QLabel(title)
     main.setObjectName("SectionTitle")
+    set_text_aligned(main, title, "right")
     layout.addWidget(main)
     if subtitle:
         sub = QLabel(subtitle)
         sub.setObjectName("Muted")
         sub.setWordWrap(True)
+        set_text_aligned(sub, subtitle, "right")
         layout.addWidget(sub)
     return box
 
@@ -4791,7 +5000,7 @@ class AttentionRow(QWidget):
         self.colors = colors
         self.record: Optional[ContractRecord] = None
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(56)
+        self.setFixedHeight(58)
         self._hover = False
         self.setAttribute(Qt.WA_Hover, True)
         layout = QHBoxLayout(self)
@@ -4823,13 +5032,14 @@ class AttentionRow(QWidget):
         super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        if not self._hover:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(alpha(self.colors["brand"], 14))
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, -1), 10, 10)
+        if self._hover:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(alpha(self.colors["brand"], 16))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0, 1, 0, -1), 10, 10)
+        painter.setPen(QPen(QColor(self.colors["border_soft"]), 1))
+        painter.drawLine(14, self.height() - 1, self.width() - 14, self.height() - 1)
 
     def set_record(self, record: ContractRecord, colors: Dict[str, str]) -> None:
         self.colors = colors
@@ -4896,6 +5106,12 @@ class DashboardPage(QWidget):
         self.body.setContentsMargins(30, 22, 30, 26)
         self.body.setSpacing(16)
 
+        # --- نوار خطای اتصال ---------------------------------------------
+        self.error_banner = NoticeBar(colors, "warning")
+        self.error_banner.setVisible(False)
+        self.error_banner.actionClicked.connect(self.reloadRequested.emit)
+        self.body.addWidget(self.error_banner)
+
         # --- کارت قهرمان -------------------------------------------------
         self.hero = Card(colors, radius=22, padding=24, variant="hero")
         hero_box = QVBoxLayout()
@@ -4925,7 +5141,7 @@ class DashboardPage(QWidget):
         gauge_col.setSpacing(0)
         self.gauge = RingGauge(colors)
         self.gauge.set_hero_mode(True)
-        self.gauge.setFixedSize(168, 168)
+        self.gauge.setFixedSize(182, 182)
         gauge_col.addStretch(1)
         gauge_col.addWidget(self.gauge, 0, Qt.AlignHCenter)
         gauge_col.addStretch(1)
@@ -4943,10 +5159,38 @@ class DashboardPage(QWidget):
         self.chips_host.setAttribute(Qt.WA_TranslucentBackground, True)
         chips_layout = QHBoxLayout(self.chips_host)
         chips_layout.setContentsMargins(0, 0, 0, 0)
-        chips_layout.setSpacing(6)
+        chips_layout.setSpacing(0)
         self.hero_chips = chips_layout
+        self.hero_kpis = []
+        for caption in ("قرارداد", "میانگین پیشرفت", "فایل PDF"):
+            block = QWidget()
+            block.setAttribute(Qt.WA_TranslucentBackground, True)
+            block_layout = QVBoxLayout(block)
+            block_layout.setContentsMargins(0, 0, 0, 0)
+            block_layout.setSpacing(1)
+            value = QLabel("—")
+            value.setObjectName("HeroKpi")
+            hint = QLabel(caption)
+            hint.setObjectName("HeroKpiHint")
+            block_layout.addWidget(value)
+            block_layout.addWidget(hint)
+            self.hero_kpis.append((value, hint))
+            chips_layout.addWidget(block)
+            line = QFrame()
+            line.setFixedSize(1, 34)
+            line.setStyleSheet("background: rgba(255,255,255,0.22);")
+            chips_layout.addSpacing(16)
+            chips_layout.addWidget(line)
+            chips_layout.addSpacing(16)
         hero_bottom.addWidget(self.chips_host, 0, Qt.AlignVCenter)
         hero_bottom.addStretch(1)
+
+        self.view_button = QPushButton("مشاهدهٔ قراردادها")
+        self.view_button.setObjectName("OnHeroSolid")
+        self.view_button.setCursor(Qt.PointingHandCursor)
+        self.view_button.setMinimumHeight(38)
+        self.view_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
+        hero_bottom.addWidget(self.view_button, 0, Qt.AlignVCenter)
 
         self.reload_button = QPushButton("بازخوانی")
         self.reload_button.setObjectName("OnHero")
@@ -4963,13 +5207,6 @@ class DashboardPage(QWidget):
         self.report_button.setIcon(make_icon("chart", colors["hero_ink"], 15))
         self.report_button.clicked.connect(lambda: self.navigateRequested.emit("reports"))
         hero_bottom.addWidget(self.report_button, 0, Qt.AlignVCenter)
-
-        self.view_button = QPushButton("مشاهدهٔ قراردادها")
-        self.view_button.setObjectName("OnHeroSolid")
-        self.view_button.setCursor(Qt.PointingHandCursor)
-        self.view_button.setMinimumHeight(38)
-        self.view_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
-        hero_bottom.addWidget(self.view_button, 0, Qt.AlignVCenter)
 
         hero_box.addLayout(hero_bottom)
         self.hero.body.addLayout(hero_box)
@@ -4996,6 +5233,7 @@ class DashboardPage(QWidget):
             tile = StatTile(key, title, kind, accent, colors)
             tile.clicked.connect(self.filterRequested.emit)
             self.tiles[key] = tile
+        self.body.addWidget(SectionHeader("شاخص‌های کلیدی", "نمای کلی سبد قراردادها"))
         self.body.addLayout(self.tiles_grid)
 
         # --- کارت‌های وضعیت اسناد اختتام ----------------------------------
@@ -5022,8 +5260,8 @@ class DashboardPage(QWidget):
 
         self.progress_card = ChartCard(
             "وضعیت پیشرفت کارکرد",
-            "بر اساس ستون‌های کارکرد فایل اکسل — برای فیلتر کلیک کنید",
-            colors, min_height=340,
+            "بر اساس ستون‌های کارکرد — برای فیلتر کلیک کنید",
+            colors, min_height=300,
         )
         self.donut = DonutChart(colors, CHART_COLORS["progress"])
         self.donut.setMinimumSize(180, 180)
@@ -5040,7 +5278,7 @@ class DashboardPage(QWidget):
         self.types_card = ChartCard(
             "پرکاربردترین انواع قرارداد",
             "همهٔ انواع قرارداد — کلیک روی هر میله جدول را فیلتر می‌کند",
-            colors, min_height=340,
+            colors, min_height=300,
         )
         self.types_bar = BarChart(colors)
         self.types_bar.barClicked.connect(self._on_type_bar)
@@ -5049,10 +5287,10 @@ class DashboardPage(QWidget):
         self.attention_card = ChartCard(
             "نیازمند پیگیری",
             "قراردادهایی با مورد باز یا الحاقیهٔ منقضی",
-            colors, min_height=430,
+            colors, min_height=404,
         )
-        follow_button = QPushButton("همه")
-        follow_button.setObjectName("Ghost")
+        follow_button = QPushButton("مشاهدهٔ همه")
+        follow_button.setObjectName("Link")
         follow_button.setCursor(Qt.PointingHandCursor)
         follow_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
         self.attention_card.add_action(follow_button)
@@ -5064,7 +5302,7 @@ class DashboardPage(QWidget):
         self.attention_card.content_layout.addStretch(1)
 
         self.type_card = ChartCard(
-            "ترکیب نوع قرارداد", "سهم هر نوع از کل سبد", colors, min_height=250,
+            "ترکیب نوع قرارداد", "سهم هر نوع از کل سبد", colors, min_height=236,
         )
         self.type_pie = DonutChart(colors, CHART_COLORS["type"])
         self.type_pie.setMinimumSize(136, 136)
@@ -5082,7 +5320,7 @@ class DashboardPage(QWidget):
         self.annex_card = ChartCard(
             "وضعیت الحاقیه",
             "توزیع زمان الحاقیه — برای فیلتر جدول کلیک کنید",
-            colors, min_height=310,
+            colors, min_height=286,
         )
         self.annex_donut = DonutChart(colors, CHART_COLORS["annex"])
         self.annex_donut.setMinimumSize(150, 150)
@@ -5102,7 +5340,7 @@ class DashboardPage(QWidget):
         self.completion_card = ChartCard(
             "وضعیت پیشرفت اختتام",
             "توزیع پیشرفت اختتام — برای فیلتر جدول کلیک کنید",
-            colors, min_height=310,
+            colors, min_height=286,
         )
         self.completion_donut = DonutChart(colors, CHART_COLORS["completion"])
         self.completion_donut.setMinimumSize(150, 150)
@@ -5118,6 +5356,8 @@ class DashboardPage(QWidget):
         completion_row.addWidget(self.completion_donut, 1)
         self.completion_card.content_layout.addLayout(completion_row, 1)
 
+        self.body.addWidget(SectionHeader(
+            "تحلیل داده‌ها", "روی هر نمودار کلیک کنید تا جدول قراردادها فیلتر شود"))
         self.body.addLayout(self.charts_grid, 1)
         self.body.addStretch(1)
         self._place_cards(False)
@@ -5176,25 +5416,31 @@ class DashboardPage(QWidget):
                 card.show()
 
     # ---- داده ----
+    def show_error(self, message: str) -> None:
+        """نمایش/پاک‌کردن نوار خطای بارگذاری در بالای داشبورد."""
+        text = (message or "").strip()
+        if not text:
+            self.error_banner.setVisible(False)
+            return
+        first = text.splitlines()[0]
+        self.error_banner.set_text(
+            bidi(f"خواندن داده از دیتابیس ممکن نشد — {first}"), "تلاش دوباره"
+        )
+        self.error_banner.setVisible(True)
+
     def set_data(self, data: DashboardData) -> None:
         self.data = data
+        self.show_error("")
         self.gauge.set_value(data.progress_percent)
         self.hero_meta.setText(bidi(
             f"منبع: {os.path.basename(data.excel_path) or '—'}  •  شیت {data.sheet_name}"
         ))
-        clear_layout(self.hero_chips)
         pdf_count = sum(1 for record in data.records if record.pdf_file)
-        for text in (f"{fa(data.total_contracts)} قرارداد",
-                     f"{fa(data.contracts_with_deductions)} کسورات",
-                     f"{fa(pdf_count)} فایل PDF"):
-            chip = QLabel(text)
-            chip.setStyleSheet(
-                "background: rgba(255,255,255,0.16); color: #FFFFFF; border-radius: 10px;"
-                "padding: 4px 10px; font-size: 8pt; font-weight: 700;"
-            )
-            chip.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-            self.hero_chips.addWidget(chip)
-        self.hero_chips.addStretch(1)
+        for (value_label, _hint), text in zip(
+            self.hero_kpis,
+            (fa(data.total_contracts), f"{data.progress_percent_text}٪", fa(pdf_count)),
+        ):
+            value_label.setText(text)
 
         total = max(1, data.total_contracts)
         types_dist = data.dist("type")
@@ -5312,6 +5558,7 @@ class DashboardPage(QWidget):
             tile.set_theme(colors)
         self.types_bar.set_theme(colors)
         self.banner.set_theme(colors)
+        self.error_banner.set_theme(colors)
         for tile in self.tiles.values():
             tile.set_theme(colors)
         self.hero_eyebrow.setStyleSheet(
@@ -5379,10 +5626,11 @@ class ContractsPage(QWidget):
         self.pills.changed.connect(lambda _key: self._on_filter_changed())
         pills.addWidget(self.pills, 1)
         self.footer_label = QLabel("—")
-        self.footer_label.setObjectName("Muted")
+        self.footer_label.setObjectName("ChipBrand")
         pills.addWidget(self.footer_label)
         export_button = QPushButton("خروجی اکسل")
-        export_button.setIcon(make_icon("download", colors["ink_2"], 15))
+        export_button.setObjectName("Primary")
+        export_button.setIcon(make_icon("download", colors["on_brand"], 15))
         export_button.setCursor(Qt.PointingHandCursor)
         export_button.clicked.connect(self.exportRequested.emit)
         pills.addWidget(export_button)
@@ -5403,14 +5651,18 @@ class ContractsPage(QWidget):
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(46)
+        self.table.verticalHeader().setDefaultSectionSize(48)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         header = self.table.horizontalHeader()
         header.setHighlightSections(False)
         header.setSectionsClickable(True)
+        header.setMinimumHeight(42)
         header.sectionClicked.connect(self._on_header_clicked)
         for index, spec in enumerate(ContractTableModel.COLUMNS):
             self.table.setColumnWidth(index, spec.width)
             header.setSectionResizeMode(index, QHeaderView.Interactive)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setColumnHidden(11, True)
         self.table.doubleClicked.connect(self._on_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
@@ -5455,33 +5707,40 @@ class ContractsPage(QWidget):
         self.bookmark_check.setChecked(False)
         self.bookmark_check.blockSignals(False)
         self._apply_view()
-        QTimer.singleShot(0, self._fit_columns)
+        QTimer.singleShot(150, self._fit_columns)
 
-    MIN_WIDTHS = (48, 148, 114, 168, 122, 78, 132, 116, 112, 118, 50, 40)
+    MIN_WIDTHS = (38, 120, 96, 140, 88, 54, 130, 86, 96, 84, 38, 22)
 
     def _fit_columns(self) -> None:
-        """توزیع عرض جدول بین ستون‌ها؛ هیچ ستونی از حد خوانا کوچک‌تر نمی‌شود."""
-        available = self.table.viewport().width()
-        if available <= 0:
+        """عرض ستون‌ها را دقیقاً در عرض دید جدول توزیع می‌کند (بدون اسکرول افقی)."""
+        available = self.table.viewport().width() - 14
+        if available <= 40:
             return
         specs = ContractTableModel.COLUMNS
-        minimums = [min(m, max(1, spec.width)) for m, spec in zip(self.MIN_WIDTHS, specs)]
-        min_total = sum(minimums)
-        if available <= min_total:
-            widths = minimums
-        else:
-            extra = available - min_total
-            weights = [max(0, spec.width - minimums[i]) for i, spec in enumerate(specs)]
-            weight_total = sum(weights) or 1
-            widths = [minimums[i] + int(extra * weights[i] / weight_total)
-                      for i in range(len(specs))]
-            widths[3] += available - sum(widths)
+        base_total = sum(spec.width for spec in specs) or 1
+        widths = [(0 if self.table.isColumnHidden(index) else
+                   max(minimum, int(spec.width * available / base_total)))
+                  for index, (spec, minimum) in enumerate(zip(specs, self.MIN_WIDTHS))]
+        overflow = sum(widths) - available
+        if overflow > 0:
+            shrinkable = sum(max(0, width - 34) for width in widths) or 1
+            widths = [width - int(overflow * max(0, width - 34) / shrinkable)
+                      for width in widths]
+        leftover = available - sum(widths)
+        if leftover != 0:
+            widths[3] = max(60, widths[3] + leftover)
+        widths[11] = 0
         for index, width in enumerate(widths):
-            self.table.setColumnWidth(index, max(34, width))
+            self.table.setColumnWidth(index, width)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_columns)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_columns)
+        QTimer.singleShot(150, self._fit_columns)
 
     # ---- فیلتر ----
     def _active_key(self) -> str:
@@ -6013,8 +6272,9 @@ class PdfLibraryPage(QWidget):
         c = self.colors
         self.list_widget.setStyleSheet(
             f"QListWidget {{ background: transparent; border: none; outline: none; }}"
-            f"QListWidget::item {{ padding: 5px 8px; border-radius: 8px;"
-            f" color: {c['ink']}; }}"
+            f"QListWidget::item {{ padding: 8px 10px; border-radius: 9px;"
+            f" color: {c['ink']}; font-size: 9.5pt; font-weight: 600;"
+            f" border-bottom: 1px solid {c['border_soft']}; }}"
             f"QListWidget::item:hover {{ background: {c['surface_2']}; }}"
             f"QListWidget::item:selected {{ background: {c['brand_soft']};"
             f" color: {c['brand_deep']}; }}"
@@ -6063,7 +6323,7 @@ class PdfLibraryPage(QWidget):
             item = QListWidgetItem(f"\u202a{name}\u202c")
             item.setData(Qt.UserRole, name)
             item.setIcon(make_icon("pdf", self.colors["danger"], 18))
-            item.setSizeHint(QSize(0, 32))
+            item.setSizeHint(QSize(0, 38))
             self.list_widget.addItem(item)
         if not shown:
             message = ("پوشه‌ای انتخاب نشده است." if not self.folder
@@ -6130,12 +6390,13 @@ class SettingsPage(QWidget):
             "داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شود؛ نیازی به فایل اکسل نیست",
         ))
         form = QGridLayout()
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(9)
+        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(8)
 
         form.addWidget(QLabel("میزبان:"), 0, 0)
         self.host_edit = QLineEdit(str(config.get("db_host") or "127.0.0.1"))
         self.host_edit.setPlaceholderText("127.0.0.1")
+        self.host_edit.setMinimumWidth(96)
         form.addWidget(self.host_edit, 0, 1)
         form.addWidget(QLabel("پورت:"), 0, 2)
         self.port_spin = NumberStepper(colors)
@@ -6146,6 +6407,7 @@ class SettingsPage(QWidget):
         form.addWidget(QLabel("دیتابیس:"), 1, 0)
         self.db_edit = QLineEdit(str(config.get("db_name") or "master_data"))
         self.db_edit.setPlaceholderText("master_data")
+        self.db_edit.setMinimumWidth(96)
         self.db_edit.setToolTip(
             "دیتابیسی که «مدیریت دیتابیس مرکزی» ساخته است (پیش‌فرض: master_data)."
         )
@@ -6153,12 +6415,14 @@ class SettingsPage(QWidget):
         form.addWidget(QLabel("کاربر:"), 1, 2)
         self.user_edit = QLineEdit(str(config.get("db_user") or "master_app"))
         self.user_edit.setPlaceholderText("master_app")
+        self.user_edit.setMinimumWidth(96)
         form.addWidget(self.user_edit, 1, 3)
 
         form.addWidget(QLabel("رمز عبور:"), 2, 0)
         self.password_edit = QLineEdit(str(config.get_password() or ""))
         self.password_edit.setEchoMode(QLineEdit.Password)
         self.password_edit.setPlaceholderText("رمز کاربر دیتابیس")
+        self.password_edit.setMinimumWidth(96)
         form.addWidget(self.password_edit, 2, 1)
         self.remember_check = CheckBox("ذخیرهٔ رمز")
         self.remember_check.set_theme_colors(colors)
@@ -6176,11 +6440,13 @@ class SettingsPage(QWidget):
         form.addWidget(QLabel("نام شیت:"), 3, 2)
         self.sheet_edit = QLineEdit(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
         self.sheet_edit.setPlaceholderText(SHEET_NAME_DEFAULT)
+        self.sheet_edit.setMinimumWidth(96)
         form.addWidget(self.sheet_edit, 3, 3)
 
         form.addWidget(QLabel("پوشهٔ PDF:"), 4, 0)
         self.pdf_edit = QLineEdit(str(config.get("pdf_folder") or ""))
         self.pdf_edit.setPlaceholderText("پوشه‌ای که فایل‌های PDF قراردادها در آن است")
+        self.pdf_edit.setMinimumWidth(96)
         form.addWidget(self.pdf_edit, 4, 1, 1, 2)
         browse_pdf = QPushButton("انتخاب…")
         browse_pdf.setIcon(make_icon("folder", colors["ink_2"], 15))
@@ -6312,19 +6578,8 @@ class SettingsPage(QWidget):
         form2.setColumnStretch(1, 1)
         display_card.body.addLayout(form2)
 
-        swatches = QHBoxLayout()
-        swatches.setSpacing(6)
-        self._swatches: List[QFrame] = []
-        for color in (colors["brand"], colors["brand_2"], colors["accent"], colors["info"]):
-            swatch = QFrame()
-            swatch.setFixedSize(16, 16)
-            swatch.setStyleSheet(
-                f"background: {color}; border-radius: 8px;")
-            swatches.addWidget(swatch)
-            self._swatches.append(swatch)
-        swatches.addStretch(1)
-        display_card.body.addSpacing(4)
-        display_card.body.addLayout(swatches)
+        display_card.body.addSpacing(2)
+
         left_column.addWidget(display_card)
 
         # ---- نکته‌ها ----
@@ -6363,17 +6618,17 @@ class SettingsPage(QWidget):
         self.status_label = QLabel("")
         self.status_label.setObjectName("Muted")
         save_bar.addWidget(self.status_label, 1)
-        reload_btn = QPushButton("بارگذاری مجدد داده‌ها")
-        reload_btn.setObjectName("Ghost")
-        reload_btn.setIcon(make_icon("refresh", colors["ink_2"], 15))
-        reload_btn.clicked.connect(self.reloadRequested.emit)
-        save_bar.addWidget(reload_btn)
-        save_btn = QPushButton("ذخیره و اعمال")
-        save_btn.setObjectName("Primary")
-        save_btn.setIcon(make_icon("check", "#FFFFFF", 15))
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.clicked.connect(self._emit_save)
-        save_bar.addWidget(save_btn)
+        self.save_button = QPushButton("ذخیره و اعمال")
+        self.save_button.setObjectName("Primary")
+        self.save_button.setIcon(make_icon("check", colors["on_brand"], 15))
+        self.save_button.setCursor(Qt.PointingHandCursor)
+        self.save_button.clicked.connect(self._emit_save)
+        save_bar.addWidget(self.save_button)
+        self.reload_button = QPushButton("بارگذاری مجدد داده‌ها")
+        self.reload_button.setObjectName("Ghost")
+        self.reload_button.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        self.reload_button.clicked.connect(self.reloadRequested.emit)
+        save_bar.addWidget(self.reload_button)
         layout.addLayout(save_bar)
 
     def _browse_pdf(self) -> None:
@@ -6517,7 +6772,7 @@ class HelpPage(QWidget):
         shortcuts_card.body.addWidget(_card_title("میان‌برها", "دسترسی سریع از هر صفحه"))
         self._key_chips: List[QLabel] = []
         for keys, description in (
-            ("Ctrl + R", "بازخوانی فایل اکسل"),
+            ("Ctrl + R", "بازخوانی از دیتابیس"),
             ("Ctrl + F", "جستجو در جدول قراردادها"),
             ("Ctrl + E", "خروجی اکسل جدول"),
             ("Ctrl + D", "تغییر پوستهٔ روشن/تیره"),
@@ -6576,7 +6831,7 @@ class HelpPage(QWidget):
                 f"{html_module.escape(web)}</span>"
             )
             text.setWordWrap(True)
-            text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            text.setAlignment(Qt.AlignRight | Qt.AlignVCenter | Qt.AlignAbsolute)
             row_layout.addWidget(text, 1)
             mapping_card.body.addWidget(row_widget)
             if index < len(rows) - 1:
@@ -6629,6 +6884,61 @@ NAV_ITEMS: List[Tuple[str, str, str]] = [
 ]
 
 
+def install_crash_logging() -> None:
+    """نصب قلاب‌های ثبت خطا تا برنامه بی‌صدا بسته نشود."""
+    def _hook(exc_type, exc, tb):
+        detail = "".join(traceback.format_exception(exc_type, exc, tb))
+        log_event("Unhandled exception:\n" + detail)
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+    try:
+        threading.excepthook = lambda args: log_event(
+            "Unhandled thread exception:\n"
+            + "".join(traceback.format_exception(args.exc_type, args.exc_value,
+                                                 args.exc_traceback))
+        )
+    except Exception:
+        pass
+    try:
+        handle = open(log_path(), "a", encoding="utf-8")
+        faulthandler.enable(file=handle, all_threads=True)
+    except Exception:
+        pass
+    log_event("قلاب‌های ثبت خطا فعال شد")
+
+
+def open_path(target: str) -> None:
+    """باز کردن پوشه یا فایل در برنامهٔ پیش‌فرض سیستم."""
+    path = Path(str(target or "")).expanduser()
+    if not path.exists():
+        path = path.parent
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def guarded(name: str):
+    """تزئین‌کنندهٔ اسلات‌های Qt: خطا را ثبت می‌کند و برنامه را باز نگه می‌دارد."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception:
+                detail = traceback.format_exc()
+                log_event(f"{name} failed:\n{detail}")
+                try:
+                    QMessageBox.critical(
+                        self, "خطا در برنامه",
+                        "یک خطای پیش‌بینی‌نشده رخ داد؛ برنامه بسته نشد.\n"
+                        f"جزئیات در این فایل ذخیره شد:\n{log_path()}",
+                    )
+                except Exception:
+                    pass
+                return None
+        return wrapper
+    return decorator
+
+
 class LogoMark(QWidget):
     """نشان برنامه: مربع گرد با گرادیان برند و آیکون لایه‌ها."""
 
@@ -6646,20 +6956,28 @@ class LogoMark(QWidget):
         painter.setRenderHint(QPainter.Antialiasing, True)
         body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         gradient = QLinearGradient(body.topLeft(), body.bottomRight())
-        gradient.setColorAt(0.0, QColor("#2BC3AC"))
-        gradient.setColorAt(1.0, QColor("#0A5A4F"))
+        gradient.setColorAt(0.0, QColor("#8E7BFF"))
+        gradient.setColorAt(0.55, QColor("#6A5BF2"))
+        gradient.setColorAt(1.0, QColor("#3F35AC"))
         painter.setPen(Qt.NoPen)
         painter.setBrush(gradient)
-        painter.drawRoundedRect(body, body.width() * 0.30, body.width() * 0.30)
-        margin = body.width() * 0.26
-        draw_icon(painter, "layers", body.adjusted(margin, margin, -margin, -margin),
-                  QColor("#FFFFFF"), 1.7)
+        painter.drawRoundedRect(body, body.width() * 0.32, body.width() * 0.32)
+        painter.setPen(QPen(QColor(255, 255, 255, 46), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5),
+                                body.width() * 0.32, body.width() * 0.32)
+        painter.setPen(QPen(QColor(255, 255, 255, 235)))
+        font = app_font(max(11, int(body.width() * 0.42)), QFont.Black)
+        painter.setFont(font)
+        painter.drawText(body.adjusted(0, -body.height() * 0.04, 0, 0),
+                         Qt.AlignCenter, "م")
 
 
 class RailItem(QWidget):
     """یک دکمهٔ ناوبری در ریل کنار با آیکون و برچسب."""
 
     clicked = pyqtSignal(str)
+    HEIGHT = 60
 
     def __init__(self, key: str, label: str, kind: str,
                  colors: Dict[str, str], parent=None) -> None:
@@ -6670,24 +6988,27 @@ class RailItem(QWidget):
         self.colors = colors
         self.active = False
         self._hover = False
+        self.badge = 0
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(62)
+        self.setFixedHeight(self.HEIGHT)
         self.setAttribute(Qt.WA_Hover, True)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 7, 0, 5)
-        layout.setSpacing(3)
-        self.icon = IconWidget(kind, colors["rail_muted"], 21, 1.7)
+        layout.setContentsMargins(0, 8, 0, 6)
+        layout.setSpacing(4)
+        self.icon = IconWidget(kind, colors["rail_muted"], 20, 1.7)
         layout.addWidget(self.icon, 0, Qt.AlignHCenter)
         self.label_widget = QLabel(label)
         self.label_widget.setAlignment(Qt.AlignCenter)
-        self.label_widget.setStyleSheet(
-            f"color: {colors['rail_muted']}; font-size: 7.5pt; font-weight: 600;"
-        )
         layout.addWidget(self.label_widget)
+        self._sync()
 
     def set_active(self, active: bool) -> None:
         self.active = active
         self._sync()
+
+    def set_badge(self, count: int) -> None:
+        self.badge = max(0, int(count))
+        self.update()
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
@@ -6697,8 +7018,8 @@ class RailItem(QWidget):
         color = self.colors["rail_ink"] if (self.active or self._hover) else self.colors["rail_muted"]
         self.icon.set_color(color)
         self.label_widget.setStyleSheet(
-            f"color: {color}; font-size: 7.5pt;"
-            f"font-weight: {800 if self.active else 600};"
+            f"color: {color}; font-size: 7.5pt; background: transparent;"
+            f"font-weight: {800 if self.active else 500};"
         )
         self.update()
 
@@ -6715,17 +7036,39 @@ class RailItem(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        body = QRectF(self.rect()).adjusted(4, 3, -4, -3)
+        body = QRectF(self.rect()).adjusted(9, 3, -9, -3)
         if self.active:
+            gradient = QLinearGradient(body.topLeft(), body.bottomLeft())
+            gradient.setColorAt(0.0, QColor(255, 255, 255, 26))
+            gradient.setColorAt(1.0, QColor(255, 255, 255, 8))
+            painter.setPen(QPen(QColor(255, 255, 255, 24), 1))
+            painter.setBrush(gradient)
+            painter.drawRoundedRect(body, 15, 15)
+            # نشانگر لبهٔ داخلی + هالهٔ برند
+            indicator = QRectF(body.left() + 1.5, body.center().y() - 11, 3, 22)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(alpha(self.colors["rail_active"], 235))
-            painter.drawRoundedRect(body, 13, 13)
+            glow = QColor(self.colors["brand_2"])
+            glow.setAlpha(70)
+            painter.setBrush(glow)
+            painter.drawRoundedRect(indicator.adjusted(-2.5, -2, 2.5, 2), 4, 4)
             painter.setBrush(QColor(self.colors["brand_2"]))
-            painter.drawRoundedRect(QRectF(body.right() - 2.5, body.center().y() - 13, 3, 26), 1.5, 1.5)
+            painter.drawRoundedRect(indicator, 1.5, 1.5)
         elif self._hover:
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 14))
-            painter.drawRoundedRect(body, 13, 13)
+            painter.setBrush(QColor(255, 255, 255, 12))
+            painter.drawRoundedRect(body, 15, 15)
+
+        if self.badge > 0:
+            text = fa(str(self.badge))
+            painter.setFont(app_font(7, QFont.Bold))
+            metrics = painter.fontMetrics()
+            width = max(16.0, metrics.width(text) + 9)
+            pill = QRectF(body.right() - width - 2, body.top() + 1, width, 16)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(self.colors["accent"]))
+            painter.drawRoundedRect(pill, 8, 8)
+            painter.setPen(QPen(QColor("#231A05")))
+            painter.drawText(pill, Qt.AlignCenter, text)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
@@ -6734,12 +7077,12 @@ class RailItem(QWidget):
 
 
 class Rail(QFrame):
-    """ریل ناوبری عمودی تیره در سمت چپ پنجره."""
+    """ریل ناوبری عمودی با نشان برند، ناوبری گروه‌بندی‌شده و پابرگ."""
 
     pageRequested = pyqtSignal(str)
     themeRequested = pyqtSignal()
 
-    WIDTH = 86
+    WIDTH = 94
 
     def __init__(self, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -6747,18 +7090,55 @@ class Rail(QFrame):
         self.setObjectName("Rail")
         self.setFixedWidth(self.WIDTH)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 20, 0, 16)
-        layout.setSpacing(6)
-        self.logo = LogoMark(colors)
+        layout.setContentsMargins(0, 18, 0, 14)
+        layout.setSpacing(0)
+
+        self.logo = LogoMark(colors, 44)
         layout.addWidget(self.logo, 0, Qt.AlignHCenter)
-        layout.addSpacing(18)
+        title = QLabel("مهر")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet(
+            f"color: {colors['rail_ink']}; font-size: 10pt; font-weight: 800;"
+            " background: transparent;"
+        )
+        layout.addSpacing(7)
+        layout.addWidget(title)
+        caption = QLabel("سامانهٔ قرارداد")
+        caption.setAlignment(Qt.AlignCenter)
+        caption.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; background: transparent;"
+        )
+        layout.addSpacing(1)
+        layout.addWidget(caption)
+        self.title_label = title
+        self.caption_label = caption
+
+        layout.addSpacing(16)
+        divider = QFrame()
+        divider.setObjectName("RailDivider")
+        divider.setFixedHeight(1)
+        layout.addWidget(divider)
+        layout.addSpacing(12)
+
+        group = QLabel("پیمایش")
+        group.setAlignment(Qt.AlignCenter)
+        group.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; font-weight: 700;"
+            " letter-spacing: 1px; background: transparent;"
+        )
+        layout.addWidget(group)
+        self.group_label = group
+        layout.addSpacing(6)
+
         self.items: Dict[str, RailItem] = {}
         for key, label, kind in NAV_ITEMS:
             item = RailItem(key, label, kind, colors)
             item.clicked.connect(self.pageRequested.emit)
             layout.addWidget(item)
             self.items[key] = item
+
         layout.addStretch(1)
+
         self.theme_button = IconButton("", "moon", colors["rail_muted"])
         self.theme_button.setObjectName("RailUtility")
         self.theme_button.setFixedSize(38, 38)
@@ -6766,11 +7146,31 @@ class Rail(QFrame):
         self.theme_button.setToolTip("تغییر پوسته (Ctrl+D)")
         self.theme_button.clicked.connect(self.themeRequested.emit)
         layout.addWidget(self.theme_button, 0, Qt.AlignHCenter)
-        version = QLabel(f"v{fa(APP_VERSION)}")
+        layout.addSpacing(6)
+        version = QLabel(f"نسخهٔ {fa(APP_VERSION)}")
         version.setAlignment(Qt.AlignCenter)
-        version.setStyleSheet(f"color: {colors['rail_muted']}; font-size: 7pt;")
+        version.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; background: transparent;"
+        )
         layout.addWidget(version)
         self.version_label = version
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        gradient = QLinearGradient(0, 0, 0, self.height())
+        gradient.setColorAt(0.0, QColor(self.colors["rail_2"]))
+        gradient.setColorAt(0.55, QColor(self.colors["rail"]))
+        gradient.setColorAt(1.0, QColor(self.colors["rail"]))
+        painter.fillRect(self.rect(), gradient)
+        glow = QRadialGradient(QPointF(self.width() * 0.5, 70), self.width() * 2.2)
+        brand = QColor(self.colors["brand"])
+        brand.setAlpha(46)
+        glow.setColorAt(0.0, brand)
+        glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), glow)
+        painter.setPen(QPen(QColor(255, 255, 255, 16), 1))
+        painter.drawLine(0, 0, 0, self.height())
 
     def set_active(self, key: str) -> None:
         for item_key, item in self.items.items():
@@ -6778,20 +7178,29 @@ class Rail(QFrame):
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
-        self.setStyleSheet(f"QFrame#Rail {{ background: {colors['rail']}; }}")
         self.logo.set_theme(colors)
         self.theme_button.set_icon_color(colors["rail_muted"])
-        self.version_label.setStyleSheet(f"color: {colors['rail_muted']}; font-size: 7pt;")
+        self.title_label.setStyleSheet(
+            f"color: {colors['rail_ink']}; font-size: 10pt; font-weight: 800;"
+            " background: transparent;"
+        )
+        self.caption_label.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; background: transparent;"
+        )
+        self.group_label.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; font-weight: 700;"
+            " letter-spacing: 1px; background: transparent;"
+        )
+        self.version_label.setStyleSheet(
+            f"color: {colors['rail_muted']}; font-size: 6.5pt; background: transparent;"
+        )
         for item in self.items.values():
             item.set_theme(colors)
+        self.update()
 
     def set_dark(self, dark: bool) -> None:
         self.theme_button.set_icon_kind("sun" if dark else "moon",
                                         self.colors["rail_muted"])
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(self.colors["rail"]))
 
 
 class TopBar(QFrame):
@@ -6809,32 +7218,39 @@ class TopBar(QFrame):
         self.colors = colors
         self.setFixedHeight(self.HEIGHT)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(30, 14, 30, 14)
+        layout.setContentsMargins(30, 15, 30, 12)
         layout.setSpacing(14)
 
         title_box = QVBoxLayout()
-        title_box.setSpacing(1)
+        title_box.setSpacing(3)
         title_box.setContentsMargins(0, 0, 0, 0)
         self.eyebrow = QLabel("پروژهٔ مهر خلیج فارس")
         self.eyebrow.setObjectName("Eyebrow")
+        self.eyebrow.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.title = QLabel(PAGE_TITLES["dashboard"])
         self.title.setObjectName("PageTitle")
+        self.title.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.subtitle = QLabel(PAGE_SUBTITLES["dashboard"])
         self.subtitle.setObjectName("PageSubtitle")
+        self.subtitle.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         title_box.addWidget(self.eyebrow)
         title_box.addWidget(self.title)
         title_box.addWidget(self.subtitle)
         title_widget = QWidget()
         title_widget.setLayout(title_box)
-        title_widget.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        layout.addWidget(title_widget)
-        layout.addStretch(1)
+        title_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(title_widget, 1)
 
         self.search_edit = SearchBox("جستجوی قرارداد، شرکت، موضوع…")
         self.search_edit.setMinimumWidth(300)
         self.search_edit.setMaximumWidth(430)
         self.search_edit.textChanged.connect(self.searchChanged.emit)
         layout.addWidget(self.search_edit, 0)
+
+        self.status_pill = QLabel("در حال اتصال…")
+        self.status_pill.setObjectName("StatusPill")
+        self.status_pill.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_pill, 0)
 
         self.date_chip = QLabel(today_jalali(with_time=False))
         self.date_chip.setObjectName("Chip")
@@ -6843,7 +7259,7 @@ class TopBar(QFrame):
         self.reload_button = IconButton("", "refresh", colors["ink_2"])
         self.reload_button.setObjectName("Ghost")
         self.reload_button.setFixedSize(38, 38)
-        self.reload_button.setToolTip("بازخوانی اکسل (Ctrl+R)")
+        self.reload_button.setToolTip("بازخوانی از دیتابیس (Ctrl+R)")
         self.reload_button.setCursor(Qt.PointingHandCursor)
         self.reload_button.clicked.connect(self.reloadRequested.emit)
         layout.addWidget(self.reload_button)
@@ -6865,18 +7281,34 @@ class TopBar(QFrame):
         layout.addWidget(self.menu_button)
 
     def set_page(self, key: str) -> None:
-        self.title.setText(PAGE_TITLES.get(key, ""))
-        self.subtitle.setText(PAGE_SUBTITLES.get(key, ""))
+        set_text_aligned(self.title, PAGE_TITLES.get(key, ""), "right")
+        set_text_aligned(self.subtitle, PAGE_SUBTITLES.get(key, ""), "right")
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
+        self.status_pill.style().unpolish(self.status_pill)
+        self.status_pill.style().polish(self.status_pill)
         self.reload_button.set_icon_color(colors["ink_2"])
         self.menu_button.set_icon_color(colors["ink_2"])
+        self.theme_button.set_icon_color(colors["ink_2"])
         self.search_edit.set_icon_color(colors["ink_3"])
+        self.date_chip.setStyleSheet("")
         self.update()
 
     def set_dark(self, dark: bool) -> None:
         self.theme_button.set_icon_kind("sun" if dark else "moon", self.colors["ink_2"])
+
+    def set_connection(self, online: bool, text: str = "") -> None:
+        """نشان وضعیت اتصال به دیتابیس در نوار بالا."""
+        label = text or ("دیتابیس متصل" if online else "بدون اتصال")
+        self.status_pill.setText(label)
+        self.status_pill.setObjectName("StatusPill" if online else "StatusPillOff")
+        self.status_pill.style().unpolish(self.status_pill)
+        self.status_pill.style().polish(self.status_pill)
+        self.status_pill.setToolTip(
+            "اتصال به دیتابیس مرکزی برقرار است" if online
+            else "اتصال به دیتابیس برقرار نیست — تنظیمات را بررسی کنید"
+        )
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -7071,13 +7503,14 @@ class DetailDrawer(QWidget):
         key = QLabel(title)
         key.setObjectName("Muted")
         key.setFixedWidth(96)
-        key.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        set_text_aligned(key, title, "right")
         key.setStyleSheet("font-size: 8pt;")
         layout.addWidget(key, 0, Qt.AlignTop)
         val = QLabel(value or "—")
         val.setWordWrap(True)
         val.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        val.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        val.setText(value or "—")
+        val.setAlignment(Qt.AlignRight | Qt.AlignTop | Qt.AlignAbsolute)
         val.setMinimumWidth(0)
         val.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         val.setStyleSheet("font-size: 9pt; font-weight: 600;")
@@ -7103,7 +7536,7 @@ class DetailDrawer(QWidget):
         chip.setStyleSheet(chip.styleSheet() + "font-size: 7.6pt;")
         layout.addWidget(chip, 0)
         text = QLabel(label)
-        text.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        set_text_aligned(text, label, "right")
         text.setWordWrap(True)
         text.setStyleSheet(
             f"color: {c['ink'] if state else c['ink_2']}; font-size: 9pt;"
@@ -7555,6 +7988,8 @@ class MainWindow(QMainWindow):
         self.topbar.set_page(key)
         self.stack.setCurrentWidget(page)
         self._current_page = key
+        if key == "contracts":
+            QTimer.singleShot(120, self.contracts._fit_columns)
         if key == "reports":
             self.reports.update_data(self.data)
 
@@ -7586,11 +8021,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # بارگذاری داده
     # ------------------------------------------------------------------
+    @guarded("initial_load")
     def initial_load(self) -> None:
+        log_event("بارگذاری اولیه آغاز شد")
         if not str(self.config.get("db_password") or "") and not str(self.config.get("db_host") or ""):
             self.show_page("settings")
         self.load_data(silent=True)
 
+    @guarded("load_data")
     def load_data(self, *_args, silent: bool = False) -> None:
         if self._loader_running():
             return
@@ -7617,17 +8055,22 @@ class MainWindow(QMainWindow):
             self.loader = None
             return False
 
+    @guarded("_set_loading")
     def _set_loading(self, loading: bool) -> None:
         self.topbar.reload_button.setEnabled(not loading)
         if loading:
             self.statusBar().showMessage("در حال خواندن داده از دیتابیس مرکزی…", 0)
 
+    @guarded("_on_loader_finished")
     def _on_loader_finished(self) -> None:
         self._set_loading(False)
         self.topbar.reload_button.setEnabled(True)
         self.loader = None
 
+    @guarded("_on_data_loaded")
     def _on_data_loaded(self, data: DashboardData, silent: bool = False) -> None:
+        log_event(f"داده در رابط کاربری — {data.total_contracts} قرارداد")
+        self.topbar.set_connection(True)
         self.data = data
         self.dashboard.set_data(data)
         self.contracts.set_data(data)
@@ -7653,23 +8096,31 @@ class MainWindow(QMainWindow):
         if not silent and data.warnings:
             QMessageBox.warning(self, "هشدار داده‌ها", "\n".join(data.warnings))
 
+    @guarded("_on_load_failed")
     def _on_load_failed(self, message: str, silent: bool = False) -> None:
         self._last_error = message
-        self.statusBar().showMessage("بارگذاری داده‌ها ناموفق بود.", 8000)
+        log_event("بارگذاری ناموفق: " + " / ".join((message or "").splitlines()[:3]))
+        self.topbar.set_connection(False)
+        first = message.splitlines()[0] if message else "خطا در بارگذاری"
+        self.statusBar().showMessage("بارگذاری داده‌ها ناموفق بود — " + first, 8000)
         self._notify("بارگذاری داده‌ها ناموفق بود", "alert")
         if not self.data.records:
-            empty = empty_dashboard(message.splitlines()[0] if message else "خطا در بارگذاری")
+            empty = empty_dashboard(first)
             self.dashboard.set_data(empty)
+            self.dashboard.show_error(first)
             self.reports.update_data(empty)
         if silent:
+            if not self.data.records and not self.config.get("db_host"):
+                self.show_page("settings")
             return
         box = QMessageBox(self)
         box.setWindowTitle("خطا در خواندن داده‌ها")
         box.setIcon(QMessageBox.Critical)
         box.setText("خواندن داده از دیتابیس مرکزی ممکن نشد.")
-        box.setInformativeText(message)
+        box.setInformativeText(message + f"\n\nفایل گزارش:\n{log_path()}")
         settings_button = box.addButton("تنظیمات اتصال", QMessageBox.AcceptRole)
         retry_button = box.addButton("تلاش دوباره", QMessageBox.ActionRole)
+        log_button = box.addButton("باز کردن فایل گزارش", QMessageBox.HelpRole)
         box.addButton("بستن", QMessageBox.RejectRole)
         box.exec_()
         clicked = box.clickedButton()
@@ -7677,7 +8128,10 @@ class MainWindow(QMainWindow):
             self.show_page("settings")
         elif clicked is retry_button:
             self.load_data()
+        elif clicked is log_button:
+            open_path(str(log_path()))
 
+    @guarded("_setup_auto_timer")
     def _setup_auto_timer(self) -> None:
         if not hasattr(self, "auto_timer"):
             self.auto_timer = QTimer(self)
@@ -8005,12 +8459,13 @@ class MainWindow(QMainWindow):
             f"<div dir='rtl' style='font-family: Tahoma;'>"
             f"<h3>{APP_NAME}</h3>"
             f"<p>نسخهٔ {APP_VERSION} — برنامهٔ دسکتاپ تک‌فایلی بر پایهٔ PyQt5</p>"
-            f"<p>داده‌ها مستقیماً از فایل اکسل (شیت colorcode) خوانده می‌شوند و "
-            f"به Flask، مرورگر یا فایل HTML نیازی نیست.</p>"
+            f"<p>داده‌ها مستقیماً از دیتابیس مرکزی MySQL (کتاب کار شناسهٔ ۱، شیت colorcode) "
+            f"خوانده می‌شوند و به Flask، مرورگر، فایل HTML یا فایل اکسل محلی نیازی نیست.</p>"
             f"<p style='color:#66756f;'>مسیر تنظیمات: {self.config.path}</p>"
             f"</div>",
         )
 
+    @guarded("_notify")
     def _notify(self, text: str, icon: str = "check") -> None:
         try:
             self.toast.show_message(text, icon, self.colors)
@@ -8073,12 +8528,12 @@ if __name__ == "__main__":
     except Exception as exc:  # pragma: no cover
         import traceback as _tb
         _tb.print_exc()
-        log_path = write_error_log(_tb.format_exc())
+        log_file = write_error_log(_tb.format_exc())
         try:
             app = QApplication.instance() or QApplication(sys.argv[:1])
             message = f"برنامه با خطا متوقف شد:\n{exc}"
-            if log_path:
-                message += f"\n\nجزئیات در این فایل ذخیره شد:\n{log_path}"
+            if log_file:
+                message += f"\n\nجزئیات در این فایل ذخیره شد:\n{log_file}"
             QMessageBox.critical(None, "خطای اجرای برنامه", message)
         except Exception:
             pass
