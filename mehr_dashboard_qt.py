@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.4.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1737,6 +1737,284 @@ def update_local_from_system(source_path: str, target_path: str,
         "updated_cells": cells,
         "backup_path": backup,
         "output_path": str(output),
+        "summary": preview_system_update(plan),
+    }
+
+
+MANAGED_WORKBOOK_NAME = "MehrWorkbook.xlsx"
+# سرستون‌هایی که برای تشخیص ستون‌های فایل سامانه جست‌وجو می‌شوند (کلید ← نام‌های ممکن)
+_SOURCE_HEADER_HINTS: Dict[str, Tuple[str, ...]] = {
+    "name": ("نام شرکت", "نام پیمانکار", "شرکت", "پیمانکار", "contractor", "company"),
+    "subject": ("موضوع قرارداد", "موضوع", "شرح قرارداد", "subject", "description"),
+    "employer": ("کارفرما", "employer", "client"),
+    "progress": ("پیشرفت کارکرد", "درصد پیشرفت", "progress"),
+}
+
+
+def managed_workbook_path() -> Path:
+    """مسیر کتاب کار داخلی برنامه (جایگزین فایل ۰۲ برای کاربر)."""
+    return data_dir() / MANAGED_WORKBOOK_NAME
+
+
+def _header_column(rows: Sequence[Sequence[Any]], header_row: int,
+                   hints: Sequence[str]) -> int:
+    """ستونی که سرستونش با یکی از نام‌های داده‌شده هم‌خوان است."""
+    if not rows or header_row < 0 or header_row >= len(rows):
+        return -1
+    header = [txt(value) for value in rows[header_row]]
+    normalized = [_norm_words(value) for value in header]
+    for hint in hints:
+        needle = _norm_words(hint)
+        if not needle:
+            continue
+        for column, value in enumerate(normalized):
+            if not value:
+                continue
+            if value == needle or (len(needle) > 3 and needle in value):
+                return column
+    return -1
+
+
+def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DEFAULT,
+                               first_column: int = SYSTEM_UPDATE_FIRST_COLUMN,
+                               last_column: int = SYSTEM_UPDATE_LAST_COLUMN) -> Dict[str, Any]:
+    """از فایل ۰۱ سامانه یک کتاب کار کامل (شیت colorcode) می‌سازد.
+
+    فایل ۰۲ لازم نیست: ردیف‌های «اجرا - مهر» ستون Sub Project انتخاب می‌شوند،
+    ستون‌های L تا AJ عیناً منتقل می‌شوند و ستون‌های شناسایی (ردیف، نام شرکت،
+    شمارهٔ قرارداد، نوع، موضوع، کارفرما) از خود فایل سامانه پر می‌شوند.
+    """
+    if openpyxl is None:
+        raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
+    sheet_names, source_sheet, rows = _open_rows(source_path)
+    if not rows:
+        raise ExcelDataError("شیت فایل سامانه خالی است.")
+    header_row, sub_col, contract_col = _detect_header_row(rows)
+    notes: List[str] = []
+    if sub_col < 0:
+        sub_col = _guess_sub_project_column(rows, header_row + 1)
+    if sub_col < 0:
+        sub_col = 5  # ستون F
+        notes.append("ستون «sub project» در سرستون‌ها پیدا نشد؛ ستون F استفاده شد.")
+    if contract_col < 0:
+        # اگر سرستون «شمارهٔ قرارداد» نبود، از روی شکل داده‌ها (وجود عدد و حرف)
+        # ستون قرارداد را پیدا می‌کنیم.
+        for column in range(max((len(row) for row in rows[: header_row + 2]), default=0)):
+            hits = sum(
+                1 for row in rows[header_row + 1: header_row + 30]
+                if column < len(row) and _looks_like_contract_number(row[column])
+            )
+            if hits >= 3:
+                contract_col = column
+                break
+    if contract_col < 0:
+        contract_col = 4  # ستون E
+        notes.append("ستون شمارهٔ قرارداد پیدا نشد؛ ستون E استفاده شد.")
+
+    name_col = _header_column(rows, header_row, _SOURCE_HEADER_HINTS["name"])
+    subject_col = _header_column(rows, header_row, _SOURCE_HEADER_HINTS["subject"])
+    employer_col = _header_column(rows, header_row, _SOURCE_HEADER_HINTS["employer"])
+    progress_col = _header_column(rows, header_row, _SOURCE_HEADER_HINTS["progress"])
+    if name_col < 0:
+        name_col = 1  # ستون B به‌عنوان حدس
+        notes.append("ستون «نام شرکت» در سرستون‌ها پیدا نشد؛ ستون B استفاده شد.")
+
+    filtered: List[List[Any]] = []
+    total = 0
+    for index in range(header_row + 1, len(rows)):
+        row = rows[index]
+        if not any(not is_blank(value) for value in row):
+            continue
+        total += 1
+        if _matches_sub_project(row[sub_col] if sub_col < len(row) else None):
+            filtered.append(row)
+    if not filtered:
+        raise ExcelDataError(
+            "در فایل سامانه هیچ ردیفی با «اجرا - مهر» پیدا نشد.\n"
+            f"شیت خوانده‌شده: «{source_sheet}» — ستون زیرپروژه: "
+            f"{_column_letter(sub_col + 1)} (ردیف سرستون {fa(header_row + 1)})."
+        )
+
+    def cell(row: Sequence[Any], column: int) -> Any:
+        if column < 0 or column >= len(row):
+            return None
+        value = row[column]
+        if isinstance(value, str):
+            value = value.strip() or None
+        return value
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = (sheet_name or SHEET_NAME_DEFAULT)[:31]
+    sheet.sheet_view.rightToLeft = True
+    sheet.cell(row=1, column=1,
+               value=f"کتاب کار داخلی برنامه — ساخته‌شده از {Path(str(source_path)).name}")
+    headers = {
+        1: "ردیف", 2: "کد", 3: "وضعیت", 4: "نام شرکت", 5: "شماره قرارداد",
+        6: "نوع قرارداد", 7: "موضوع قرارداد", 8: "کارفرما", 11: "پیشرفت کارکرد",
+    }
+    for column, title in headers.items():
+        sheet.cell(row=3, column=column, value=title)
+    # عنوان ستون‌های کسورات (L تا W) از سرستون خود فایل سامانه گرفته می‌شود.
+    for column in range(first_column, min(last_column, 34) + 1):
+        title = txt(rows[header_row][column - 1]) if header_row < len(rows) else ""
+        sheet.cell(row=3, column=column, value=title or f"کسورات {fa(column - first_column + 1)}")
+
+    written = 0
+    progress_values: List[float] = []
+    target_row = 4
+    for order, row in enumerate(filtered, start=1):
+        sheet.cell(row=target_row, column=1, value=order)
+        sheet.cell(row=target_row, column=4, value=cell(row, name_col))
+        sheet.cell(row=target_row, column=5, value=cell(row, contract_col))
+        sheet.cell(row=target_row, column=6, value=cell(row, sub_col))
+        sheet.cell(row=target_row, column=7, value=cell(row, subject_col))
+        sheet.cell(row=target_row, column=8, value=cell(row, employer_col))
+        progress_raw = cell(row, progress_col)
+        sheet.cell(row=target_row, column=11, value=progress_raw)
+        progress_number = num(progress_raw) if progress_col >= 0 else None
+        if progress_number is not None and 0 <= progress_number <= 100:
+            fraction = progress_number / 100.0 if progress_number > 1.5 else progress_number
+            progress_values.append(fraction)
+            sheet.cell(row=target_row, column=SYSTEM_UPDATE_LAST_COLUMN + 1, value=fraction)
+        for offset in range(max(0, last_column - first_column + 1)):
+            value = cell(row, first_column - 1 + offset)
+            if isinstance(value, str) and value.lower() in _SYSTEM_UPDATE_OK_WORDS:
+                value = "ok"
+            if value is None:
+                continue
+            sheet.cell(row=target_row, column=first_column + offset, value=value)
+            written += 1
+        target_row += 1
+    if progress_values:
+        # ردیف ۲ ستون ۳۷ در کتاب کار اصلی، درصد پیشرفت کل است؛ همان را می‌گذاریم.
+        sheet.cell(row=2, column=37,
+                   value=round(sum(progress_values) / len(progress_values), 4))
+        notes.append(
+            f"درصد پیشرفت از ستون «{txt(rows[header_row][progress_col])}» "
+            f"فایل سامانه محاسبه شد (میانگین {fa(len(progress_values))} ردیف)."
+        )
+    # اکسل ستون‌های خالی انتهایی را می‌اندازد؛ یک سلول برای حفظ عرض ۵۷ می‌گذاریم.
+    if int(sheet.max_column or 0) < REQUIRED_COLUMNS:
+        sheet.cell(row=1, column=REQUIRED_COLUMNS, value="")
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    try:
+        workbook.close()
+    except Exception:
+        pass
+    log_event(f"کتاب کار داخلی از فایل ۰۱ ساخته شد: {len(filtered)} ردیف، {written} مقدار")
+    return {
+        "blob": buffer.getvalue(),
+        "source_path": str(source_path),
+        "source_sheet": source_sheet,
+        "source_sheets": sheet_names,
+        "header_row": header_row + 1,
+        "sub_project_column": sub_col,
+        "contract_column": contract_col,
+        "total_rows": total,
+        "filtered_rows": len(filtered),
+        "updated_cells": written,
+        "sheet_name": sheet.title,
+        "notes": notes,
+    }
+
+
+def _seed_workbook_blob(seed_path: str, source_path: str) -> bytes:
+    """اگر کتاب کار معتبری از قبل روی دیسک بود، کتاب کار داخلی از آن شروع می‌شود."""
+    if not seed_path:
+        return b""
+    try:
+        seed = Path(str(seed_path)).expanduser()
+        if not seed.exists() or not seed.is_file():
+            return b""
+        if seed.resolve() == managed_workbook_path().resolve():
+            return b""
+        if seed.resolve() == Path(str(source_path)).expanduser().resolve():
+            return b""
+        if not has_colorcode_sheet(str(seed)):
+            return b""
+        return seed.read_bytes()
+    except Exception as exc:
+        log_event(f"استفاده از کتاب کار موجود به‌عنوان پایه ناموفق بود: {exc}")
+        return b""
+
+
+def update_managed_workbook(source_path: str,
+                            sheet_name: str = SHEET_NAME_DEFAULT,
+                            seed_path: str = "") -> Dict[str, Any]:
+    """کتاب کار داخلی برنامه را از فایل ۰۱ می‌سازد یا به‌روزرسانی می‌کند."""
+    target = managed_workbook_path()
+    existing = target.exists() and target.stat().st_size > 0
+    if existing and not has_colorcode_sheet(str(target)):
+        existing = False
+    seed_blob = b"" if existing else _seed_workbook_blob(seed_path, source_path)
+    if not existing and seed_blob:
+        # کتاب کار قبلی کاربر پیدا شد؛ همان را پایه می‌گیریم تا ستون‌های دیگرش حفظ شود.
+        plan = plan_system_update(source_path, seed_blob, sheet_name=sheet_name)
+        new_blob, cells = apply_system_update(plan, seed_blob)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(new_blob)
+        log_event(
+            f"کتاب کار داخلی از روی «{Path(str(seed_path)).name}» ساخته و به‌روزرسانی شد: "
+            f"{plan.matched_rows} ردیف، {cells} سلول"
+        )
+        return {
+            "created": True,
+            "plan": plan,
+            "built": {},
+            "source_path": plan.source_path,
+            "updated_cells": cells,
+            "filtered_rows": plan.filtered_rows,
+            "matched_rows": plan.matched_rows,
+            "backup_path": "",
+            "output_path": str(target),
+            "seeded_from": str(seed_path),
+            "summary": preview_system_update(plan),
+        }
+    if not existing:
+        built = build_workbook_from_system(source_path, sheet_name=sheet_name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(built["blob"])
+        lines = [
+            f"کتاب کار داخلی برنامه ساخته شد ({fa(built['filtered_rows'])} قرارداد «اجرا - مهر»"
+            f" از {fa(built['total_rows'])} ردیف فایل سامانه).",
+            f"ستون‌های L تا AJ منتقل شد: {fa(built['updated_cells'])} مقدار.",
+            f"شیت «{built['source_sheet']}» — ردیف سرستون {fa(built['header_row'])}.",
+        ]
+        if built["notes"]:
+            lines.append("یادداشت: " + " ".join(built["notes"]))
+        return {
+            "created": True,
+            "plan": None,
+            "built": built,
+            "source_path": str(source_path),
+            "updated_cells": built["updated_cells"],
+            "filtered_rows": built["filtered_rows"],
+            "matched_rows": built["filtered_rows"],
+            "backup_path": "",
+            "output_path": str(target),
+            "summary": "\n".join(lines),
+        }
+    blob = target.read_bytes()
+    plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
+    backup = backup_workbook(blob, target.name)
+    new_blob, cells = apply_system_update(plan, blob)
+    target.write_bytes(new_blob)
+    log_event(
+        f"کتاب کار داخلی به‌روزرسانی شد: {plan.filtered_rows} ردیف «اجرا - مهر»، "
+        f"{cells} سلول → {target}"
+    )
+    return {
+        "created": False,
+        "plan": plan,
+        "built": {},
+        "source_path": plan.source_path,
+        "updated_cells": cells,
+        "filtered_rows": plan.filtered_rows,
+        "matched_rows": plan.matched_rows,
+        "backup_path": backup,
+        "output_path": str(target),
         "summary": preview_system_update(plan),
     }
 
@@ -5015,6 +5293,31 @@ class LocalSystemUpdateWorker(QThread):
             self.failed.emit(f"خطای پیش‌بینی‌نشده در به‌روزرسانی محلی:\n{exc}")
 
 
+class ManagedUpdateWorker(QThread):
+    """کتاب کار داخلی برنامه را از فایل ۰۱ می‌سازد/به‌روزرسانی می‌کند (بدون فایل ۰۲)."""
+
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, source_path: str, sheet_name: str = SHEET_NAME_DEFAULT,
+                 parent=None, seed_path: str = "") -> None:
+        super().__init__(parent)
+        self.source_path = str(source_path)
+        self.sheet_name = sheet_name
+        self.seed_path = str(seed_path or "")
+
+    def run(self) -> None:
+        try:
+            result = update_managed_workbook(self.source_path, sheet_name=self.sheet_name,
+                                             seed_path=self.seed_path)
+            self.done.emit(result)
+        except ExcelDataError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در ساخت کتاب کار داخلی:\n{exc}")
+
+
 class SystemUpdateApplyWorker(QThread):
     """اعمال نقشه روی کتاب کار، گرفتن نسخهٔ پشتیبان و ذخیره در دیتابیس."""
 
@@ -5504,21 +5807,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.update_excel:
         config = AppConfig()
         _apply_args(config, args)
+        sheet = str(config.get("sheet_name") or SHEET_NAME_DEFAULT)
         try:
             result = update_database_from_system(
-                config.db_settings(), args.update_excel,
-                sheet_name=str(config.get("sheet_name") or SHEET_NAME_DEFAULT),
+                config.db_settings(), args.update_excel, sheet_name=sheet,
             )
+            target_label = "کتاب کار دیتابیس"
         except ExcelDataError as exc:
-            print(f"خطا: {exc}")
-            return 1
+            print(f"دیتابیس در دسترس نیست ({exc}).")
+            print("کتاب کار داخلی برنامه به‌روزرسانی می‌شود…")
+            try:
+                result = update_managed_workbook(
+                    args.update_excel, sheet_name=sheet,
+                    seed_path=str(config.get("local_excel_path") or ""),
+                )
+            except ExcelDataError as inner:
+                print(f"خطا: {inner}")
+                return 1
+            target_label = "کتاب کار داخلی"
         config.save()
-        plan = result["plan"]
-        print(preview_system_update(plan))
+        print(str(result.get("summary") or ""))
         print(f"سلول‌های به‌روزرسانی‌شده: {fa(result['updated_cells'])}")
         if result.get("backup_path"):
             print(f"نسخهٔ پشتیبان: {result['backup_path']}")
-        print("کتاب کار دیتابیس با موفقیت به‌روزرسانی شد.")
+        print(f"{target_label} با موفقیت به‌روزرسانی شد: {result.get('output_path') or ''}")
         return 0
 
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
@@ -7947,9 +8259,9 @@ class SettingsPage(QWidget):
         self.update_button.setIcon(make_icon("refresh", colors["on_brand"], 15))
         self.update_button.setCursor(Qt.PointingHandCursor)
         self.update_button.setToolTip(
-            "فایل خام سامانه (Contract-Info-Report) را می‌خواند، فقط ردیف‌های "
+            "فقط فایل خام سامانه (Contract-Info-Report) را می‌خواند، ردیف‌های "
             "«اجرا - مهر» ستون Sub Project را نگه می‌دارد، ستون‌های L تا AJ را به‌ترتیب "
-            "روی شیت colorcode می‌نویسد و همان را در دیتابیس ذخیره می‌کند."
+            "منتقل می‌کند و کتاب کار را خودش می‌سازد/به‌روز می‌کند — فایل ۰۲ لازم نیست."
         )
         self.update_button.clicked.connect(self._emit_system_update)
         import_row = QHBoxLayout()
@@ -7966,9 +8278,10 @@ class SettingsPage(QWidget):
         ))
         import_card.body.addWidget(_muted(
             "روش کار همین است: فایل ۰۱ را از سامانه بگیرید و فقط همین فایل را بدهید. "
-            "برنامه خودش ستون Sub Project را به «اجرا - مهر» فیلتر می‌کند، ستون‌های "
-            "L تا AJ را به‌ترتیب روی شیت colorcode می‌نویسد و همان کتاب کار را در "
-            "دیتابیس ذخیره می‌کند (قبل از نوشتن، نسخهٔ پشتیبان در پوشهٔ backups)."
+            "برنامه خودش فیلتر «اجرا - مهر» و انتقال ستون‌های L تا AJ را انجام می‌دهد؛ "
+            "اگر دیتابیس در دسترس باشد همان کتاب کار دیتابیس به‌روز می‌شود و اگر نباشد "
+            "کتاب کار داخلی برنامه ساخته/به‌روزرسانی می‌شود (پشتیبان در پوشهٔ backups). "
+            "هیچ فایل دومی لازم نیست."
         ))
         right_column.addWidget(import_card)
 
@@ -7985,6 +8298,16 @@ class SettingsPage(QWidget):
         self.notes_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         storage_card.body.addWidget(self.config_path_label)
         storage_card.body.addWidget(self.notes_path_label)
+        self.workbook_path_label = QLabel(
+            f"کتاب کار داخلی: \u202a{managed_workbook_path()}\u202c"
+        )
+        self.workbook_path_label.setObjectName("Muted")
+        self.workbook_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.workbook_path_label.setToolTip(
+            "کتابی که برنامه از فایل ۰۱ سامانه می‌سازد و به‌روز می‌کند؛ برای اجرا "
+            "بدون دیتابیس همین فایل استفاده می‌شود."
+        )
+        storage_card.body.addWidget(self.workbook_path_label)
         self.version_label = QLabel(f"نسخهٔ برنامه: {fa(APP_VERSION)}")
         self.version_label.setObjectName("Muted")
         self.loaded_label = QLabel("آخرین بارگذاری: —")
@@ -9640,6 +9963,9 @@ class MainWindow(QMainWindow):
         local_path = ""
         if str(self.config.get("data_source") or "database") == "local":
             candidate = str(self.config.get("local_excel_path") or "")
+            if (not candidate or not Path(candidate).exists()) and managed_workbook_path().exists():
+                candidate = str(managed_workbook_path())
+                self.config.set("local_excel_path", candidate, save=False)
             if candidate and Path(candidate).exists():
                 local_path = candidate
                 settings["sheet_name"] = str(
@@ -9841,6 +10167,14 @@ class MainWindow(QMainWindow):
     def open_local_excel(self, path: str) -> None:
         """خواندن مستقیم فایل اکسل از دیسک (بدون دیتابیس)."""
         candidate = Path(str(path or "")).expanduser()
+        if candidate.exists() and not has_colorcode_sheet(str(candidate)):
+            # کاربر فایل ۰۱ سامانه را داده است؛ خود برنامه کتاب کار داخلی را می‌سازد.
+            self._system_update_note = (
+                f"«{candidate.name}» شیت colorcode ندارد، پس به‌عنوان فایل ۰۱ سامانه "
+                "خوانده می‌شود و کتاب کار داخلی برنامه از آن ساخته/به‌روزرسانی می‌شود."
+            )
+            self.start_local_system_update(str(candidate))
+            return
         if not candidate.exists():
             box = QMessageBox(self)
             box.setWindowTitle("فایل اکسل")
@@ -9907,75 +10241,110 @@ class MainWindow(QMainWindow):
     # به‌روزرسانی محلی از فایل سامانه (بدون دیتابیس)
     # ------------------------------------------------------------------
     def start_local_system_update(self, source_path: str) -> None:
-        """فایل ۰۱ را روی یک فایل اکسل محلی (دارای شیت colorcode) اعمال می‌کند."""
-        target = str(self.config.get("local_excel_path") or "").strip()
-        if not target or not Path(target).exists():
-            target = str(self.settings.excel_edit.text().strip() or "")
-        if not target or not Path(target).exists():
-            default_target = str(ORIGINAL_EXCEL_PATH)
-            if Path(default_target).exists():
-                target = default_target
-        if not target or not Path(target).exists() or not has_colorcode_sheet(target):
-            start = str(self.config.get("last_excel_path") or app_dir())
-            target, _selected = QFileDialog.getOpenFileName(
-                self, "فایل اکسل مقصد (دارای شیت colorcode) را انتخاب کنید", start,
-                "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
-            )
-        if not target:
+        """فقط فایل ۰۱: کتاب کار داخلی برنامه خودش ساخته یا به‌روزرسانی می‌شود.
+
+        دیگر فایل ۰۲ (کتاب کار دارای شیت colorcode) از کاربر پرسیده نمی‌شود؛
+        برنامه همان کار کپی/چسباندن دستی را روی کتاب کار داخلی خودش انجام می‌دهد.
+        """
+        if self._system_update_running():
+            self._notify("یک به‌روزرسانی در حال‌اجراست؛ کمی صبر کنید", "clock")
             return
-        if not has_colorcode_sheet(target):
-            QMessageBox.warning(
-                self, "به‌روزرسانی محلی",
-                "فایل انتخاب‌شده شیت «colorcode» ندارد.\n"
-                "فایل ۰۲ (کتاب کار دارای شیت colorcode) را انتخاب کنید.",
-            )
+        if not str(source_path or "").strip():
+            self.pick_system_update_file()
             return
-        self.settings.set_status("در حال اعمال فایل سامانه روی فایل اکسل محلی…")
-        worker = LocalSystemUpdateWorker(
-            source_path, target,
-            str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT), self,
+        self.show_page("settings")
+        self._pending_system_source = source_path
+        seed = ""
+        for candidate in (self.config.get("local_excel_path"),
+                          self.settings.excel_edit.text().strip()):
+            text = str(candidate or "").strip()
+            if not text or not Path(text).exists():
+                continue
+            if Path(text) == managed_workbook_path():
+                continue
+            if has_colorcode_sheet(text):
+                seed = text
+                break
+        self.settings.set_status("در حال ساخت/به‌روزرسانی کتاب کار داخلی از فایل ۰۱…")
+        worker = ManagedUpdateWorker(
+            source_path, str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT), self,
+            seed_path=seed,
         )
         worker.done.connect(self._on_local_update_done)
-        worker.failed.connect(self._on_system_update_failed)
+        worker.failed.connect(self._on_managed_update_failed)
         worker.finished.connect(lambda: self._set_system_update_busy(False))
         self._system_update_worker = worker
         self._system_update_busy = True
         worker.start()
 
-    @guarded("_on_local_update_done")
+    @guarded("_on_managed_update_failed")
+    def _on_managed_update_failed(self, message: str) -> None:
+        self.settings.set_status("ساخت کتاب کار داخلی از فایل ۰۱ انجام نشد.")
+        self._set_system_update_busy(False)
+        self._pending_system_source = ""
+        log_event("به‌روزرسانی کتاب کار داخلی ناموفق: "
+                  + " / ".join((message or "").splitlines()[:3]))
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی از فایل ۰۱")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("خواندن فایل ۰۱ و به‌روزرسانی کتاب کار داخلی ممکن نشد.")
+        box.setInformativeText(f"{message}\n\nفایل گزارش:\n{log_path()}")
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
     def _on_local_update_done(self, result: Dict[str, Any]) -> None:
-        plan: SystemUpdatePlan = result["plan"]
+        plan = result.get("plan")
+        created = bool(result.get("created"))
         output = str(result.get("output_path") or "")
-        self.config.set("last_excel_path", plan.source_path, save=False)
+        source = str(result.get("source_path") or getattr(plan, "source_path", "") or "")
+        if source:
+            self.config.set("last_excel_path", source, save=False)
         if output:
             self.config.set("local_excel_path", output, save=False)
             self.config.set("data_source", "local", save=False)
             self.config.save()
+        self._pending_system_source = ""
         self.settings.set_status(
-            f"به‌روزرسانی محلی انجام شد — {fa(result['updated_cells'])} سلول "
-            f"در {fa(plan.matched_rows)} ردیف"
+            ("کتاب کار داخلی ساخته شد" if created else "کتاب کار داخلی به‌روزرسانی شد")
+            + f" — {fa(result.get('updated_cells') or 0)} مقدار، "
+            + f"{fa(result.get('matched_rows') or 0)} قرارداد"
         )
-        self._notify("فایل اکسل محلی به‌روزرسانی شد", "check")
+        self._notify(
+            "کتاب کار داخلی ساخته شد" if created else "کتاب کار داخلی به‌روزرسانی شد",
+            "check",
+        )
         if output:
             self.load_data()
-        lines = [
-            f"{fa(plan.matched_rows)} ردیف از «اجرا - مهر» اعمال شد "
-            f"({fa(result['updated_cells'])} سلول، روش تطبیق: {plan.method}).",
-        ]
-        if plan.unmatched:
+        lines: List[str] = []
+        if created:
             lines.append(
-                f"بدون تطبیق: {fa(len(plan.unmatched))} ردیف — نمونه: "
-                + "، ".join(plan.unmatched[:4])
+                "برای همین فایل ۰۱، کتاب کار داخلی برنامه ساخته شد: فیلتر «اجرا - مهر» "
+                "و انتقال ستون‌های L تا AJ انجام شد — بدون نیاز به فایل ۰۲."
             )
+        else:
+            lines.append(
+                f"{fa(result.get('matched_rows') or 0)} قرارداد «اجرا - مهر» روی کتاب کار "
+                f"داخلی نوشته شد ({fa(result.get('updated_cells') or 0)} مقدار)."
+            )
+            if plan is not None:
+                lines.append(f"روش تطبیق: {plan.method}")
+        summary = str(result.get("summary") or "")
+        if summary:
+            lines.append("")
+            lines.append(summary)
         if output:
-            lines.append(f"فایل تازه: {output}")
-            lines.append("برنامه همین حالا با فایل تازه اجرا شد (حالت محلی).")
+            lines.append("")
+            lines.append(f"کتاب کار داخلی: {output}")
+            lines.append("دفعهٔ بعد فقط فایل ۰۱ سامانه را بدهید؛ همین فایل به‌روز می‌شود.")
         if result.get("backup_path"):
             lines.append(f"نسخهٔ پشتیبان: {result['backup_path']}")
         box = QMessageBox(self)
-        box.setWindowTitle("به‌روزرسانی محلی انجام شد")
+        box.setWindowTitle("کتاب کار داخلی ساخته شد" if created else "کتاب کار داخلی به‌روزرسانی شد")
         box.setIcon(QMessageBox.Information)
-        box.setText("فایل اکسل با فایل سامانه به‌روزرسانی شد.")
+        box.setText(
+            "داده‌ها آماده است؛ برنامه همین حالا با کتاب کار داخلی اجرا شد."
+            if created else "کتاب کار داخلی برنامه با فایل ۰۱ به‌روزرسانی شد."
+        )
         box.setInformativeText("\n".join(lines))
         box.addButton("باشه", QMessageBox.AcceptRole)
         box.exec_()
@@ -10081,15 +10450,17 @@ class MainWindow(QMainWindow):
         database_problem = any(token in lowered for token in (
             "اتصال به دیتابیس", "اتصال به سرور", "1045", "access denied",
             "نام کاربری یا رمز", "2003", "can't connect",
+            "در دیتابیس پیدا نشد", "ذخیره نشده است", "excel_original_files",
         ))
         source = str(getattr(self, "_pending_system_source", "") or "")
         if database_problem and source:
             if ask_confirm(
                 self, "دیتابیس در دسترس نیست",
-                "اتصال به دیتابیس برقرار نشد.\n\n"
-                "می‌خواهید همین به‌روزرسانی را روی فایل اکسل محلی (بدون دیتابیس) "
-                "انجام دهم و برنامه با فایل تازه اجرا شود؟",
-                "بله، محلی به‌روزرسانی کن",
+                "برای نوشتن در دیتابیس مشکلی هست (اتصال یا کتاب کار ذخیره‌شده).\n\n"
+                "می‌خواهید همین فایل ۰۱ را داخل خودِ برنامه اعمال کنم؟ برنامه کتاب کار "
+                "داخلی خودش را می‌سازد/به‌روز می‌کند و داشبورد با همان داده اجرا می‌شود "
+                "— بدون دیتابیس و بدون فایل ۰۲.",
+                "بله، داخل برنامه انجام بده",
             ):
                 self.start_local_system_update(source)
                 return
@@ -10117,6 +10488,11 @@ class MainWindow(QMainWindow):
                 f"می‌شود (شیت‌ها: {'، '.join(sheets) or '—'})."
             )
             self.start_system_update(path)
+            return
+        if not str(self.config.get("db_host") or "").strip():
+            # دیتابیسی تنظیم نشده است؛ همان فایل دارای colorcode محلی اجرا می‌شود.
+            self._notify("دیتابیس تنظیم نشده؛ فایل به‌صورت محلی اجرا می‌شود", "table")
+            self.open_local_excel(path)
             return
         self.show_page("settings")
         values = self.settings.connection_values()
