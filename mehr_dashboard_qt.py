@@ -164,7 +164,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.1.1"
+APP_VERSION = "3.1.2"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -2756,7 +2756,7 @@ def chip_label(text: str, fg: str, bg: str, radius: int = 9, padding: str = "4px
 class Card(QFrame):
     """قاب کارت با سایهٔ چندلایه (بدون نیاز به افکت‌های سنگین)."""
 
-    SHADOW = 12
+    SHADOW = 6
 
     def __init__(self, colors: Dict[str, str], radius: int = RADIUS["card"],
                  padding: int = 16, variant: str = "surface",
@@ -2775,7 +2775,7 @@ class Card(QFrame):
         inset = self.SHADOW
         self.body.setContentsMargins(inset + padding, inset + padding,
                                      inset + padding, inset + padding)
-        self.body.setSpacing(10)
+        self.body.setSpacing(7)
 
     # ---- تنظیمات ظاهری ----
     def set_theme(self, colors: Dict[str, str]) -> None:
@@ -2815,16 +2815,16 @@ class Card(QFrame):
                 strength = 18
             else:
                 strength = 15 if self._hover else 9
-            layers = 9
+            layers = 6
             for index in range(layers, 0, -1):
                 ratio = index / layers
                 alpha_value = int(strength * (1.0 - ratio) ** 1.6) + 2
                 shadow.setAlpha(max(1, alpha_value))
-                painter.setPen(QPen(shadow, 1.6))
+                painter.setPen(QPen(shadow, 1.4))
                 painter.setBrush(Qt.NoBrush)
-                grow = index * 1.15
+                grow = index * 0.85
                 painter.drawRoundedRect(
-                    body.adjusted(-grow, -grow * 0.55 + 2.6, grow, grow + 3.6),
+                    body.adjusted(-grow, -grow * 0.5 + 1.6, grow, grow + 2.2),
                     radius + grow * 0.7, radius + grow * 0.7,
                 )
 
@@ -2913,8 +2913,8 @@ class SectionHeader(QWidget):
     def __init__(self, title: str, subtitle: str = "", parent=None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 6, 4, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(2, 2, 2, 0)
+        layout.setSpacing(8)
         title_label = QLabel(title)
         title_label.setObjectName("SectionTitle")
         set_text_aligned(title_label, title, "right")
@@ -3390,7 +3390,7 @@ class LegendList(QWidget):
         return color.lighter(112 + 8 * cycle) if cycle else color
 
     def _row_height(self) -> int:
-        return 26
+        return 22
 
     def _rows(self) -> List[Tuple[str, int, int]]:
         fits = max(1, int((self.height() - 6) // self._row_height()))
@@ -3492,7 +3492,7 @@ class BarChart(QWidget):
         self.items: List[Dict[str, Any]] = []
         self.hover = -1
         self.setMouseTracking(True)
-        self.setMinimumHeight(200)
+        self.setMinimumHeight(120)
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
@@ -3506,8 +3506,8 @@ class BarChart(QWidget):
     def _row_height(self) -> int:
         if not self.items:
             return 24
-        available = max(80, self.height() - 10)
-        return int(max(13, min(34, available / len(self.items))))
+        available = max(60, self.height() - 6)
+        return int(max(12, min(28, available / len(self.items))))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -4798,16 +4798,16 @@ class StatTile(Card):
 
     def __init__(self, key: str, title: str, kind: str, accent: str,
                  colors: Dict[str, str], parent=None) -> None:
-        super().__init__(colors, radius=18, padding=16, hoverable=True, parent=parent)
+        super().__init__(colors, radius=16, padding=13, hoverable=True, parent=parent)
         self.key = key
         self.accent = accent
         self.title_text = title
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(154)
+        self.setMinimumHeight(116)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(6)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
         self.title_label.setStyleSheet(
@@ -4815,17 +4815,16 @@ class StatTile(Card):
         )
         set_text_aligned(self.title_label, title, "right")
         self.tile = IconTile(kind, accent, alpha(accent, 24).name(QColor.HexArgb),
-                             size=36, radius=12)
+                             size=27, radius=9)
         header.addWidget(self.tile, 0, Qt.AlignTop)
         header.addWidget(self.title_label, 1)
         self.body.addLayout(header)
-        self.body.addSpacing(2)
 
         value_row = QHBoxLayout()
         value_row.setSpacing(8)
         self.value_label = QLabel("—")
         self.value_label.setObjectName("CardValue")
-        self.value_label.setStyleSheet("font-size: 23pt; font-weight: 800;")
+        self.value_label.setStyleSheet("font-size: 16pt; font-weight: 800;")
         value_row.addWidget(self.value_label, 1)
         self.badge = QLabel("")
         self.badge.setObjectName("Chip")
@@ -4835,7 +4834,7 @@ class StatTile(Card):
 
         self.hint_label = QLabel("")
         self.hint_label.setObjectName("Muted")
-        self.hint_label.setStyleSheet("font-size: 8.5pt;")
+        self.hint_label.setStyleSheet("font-size: 8pt;")
         self.body.addWidget(self.hint_label)
 
         self.body.addStretch(1)
@@ -4889,22 +4888,22 @@ class FlagTile(Card):
     clicked = pyqtSignal(str)
 
     def __init__(self, key: str, title: str, colors: Dict[str, str], parent=None) -> None:
-        super().__init__(colors, radius=16, padding=12, hoverable=True, parent=parent)
+        super().__init__(colors, radius=14, padding=8, hoverable=True, parent=parent)
         self.key = key
         self.colors = colors
         self.title_text = title
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(92)
+        self.setMinimumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         top = QHBoxLayout()
         top.setSpacing(6)
         self.value_label = QLabel("—")
         self.value_label.setStyleSheet(
-            f"font-size: 16pt; font-weight: 800; color: {colors['ink']};"
+            f"font-size: 12.5pt; font-weight: 800; color: {colors['ink']};"
         )
         self.tile = IconTile(FLAG_ICONS.get(key, "check"), colors["brand"],
-                             colors["brand_soft"], size=28, radius=9)
+                             colors["brand_soft"], size=22, radius=7)
         top.addWidget(self.tile, 0, Qt.AlignTop)
         top.addWidget(self.value_label, 1)
         self.body.addLayout(top)
@@ -4925,7 +4924,7 @@ class FlagTile(Card):
         self.colors = colors
         self.tile.set_colors(colors["brand"], colors["brand_soft"])
         self.value_label.setStyleSheet(
-            f"font-size: 16pt; font-weight: 800; color: {colors['ink']};"
+            f"font-size: 12.5pt; font-weight: 800; color: {colors['ink']};"
         )
         self.title_label.setStyleSheet(
             f"font-size: 7.5pt; font-weight: 600; color: {colors['ink_2']};"
@@ -4942,10 +4941,10 @@ class ChartCard(Card):
 
     def __init__(self, title: str, subtitle: str, colors: Dict[str, str],
                  min_height: int = 260, parent=None) -> None:
-        super().__init__(colors, radius=16, padding=16, parent=parent)
+        super().__init__(colors, radius=16, padding=13, parent=parent)
         self.setMinimumHeight(min_height)
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(6)
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
         self.title_label = QLabel(title)
@@ -4965,8 +4964,8 @@ class ChartCard(Card):
 
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 2, 0, 0)
-        self.content_layout.setSpacing(8)
+        self.content_layout.setContentsMargins(0, 1, 0, 0)
+        self.content_layout.setSpacing(5)
         self.body.addWidget(self.content, 1)
         self.set_theme_colors(colors)
 
@@ -5434,8 +5433,8 @@ def page_step_label(text: str, number: int, colors: Dict[str, str]) -> QWidget:
 def _card_title(title: str, subtitle: str = "") -> QWidget:
     box = QWidget()
     layout = QVBoxLayout(box)
-    layout.setContentsMargins(0, 0, 0, 6)
-    layout.setSpacing(1)
+    layout.setContentsMargins(0, 0, 0, 3)
+    layout.setSpacing(0)
     main = QLabel(title)
     main.setObjectName("SectionTitle")
     set_text_aligned(main, title, "right")
@@ -5459,6 +5458,33 @@ def _muted(text: str) -> QLabel:
 # ---------------------------------------------------------------------------
 # داشبورد
 # ---------------------------------------------------------------------------
+class ElidedLabel(QLabel):
+    """برچسب تک‌خطی که متن بلند را با «…» کوتاه می‌کند."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full_text = text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        self.setText(text)
+
+    def full_text(self) -> str:
+        return self._full_text
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full_text = text
+        self._refresh()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        width = max(12, self.width())
+        elided = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, width)
+        QLabel.setText(self, elided)
+
+
 class AttentionRow(QWidget):
     """یک ردیف «نیازمند پیگیری» در داشبورد."""
 
@@ -5469,26 +5495,28 @@ class AttentionRow(QWidget):
         self.colors = colors
         self.record: Optional[ContractRecord] = None
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(58)
+        self.setFixedHeight(46)
         self._hover = False
         self.setAttribute(Qt.WA_Hover, True)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 5, 6, 5)
-        layout.setSpacing(10)
-        self.avatar = Avatar("", 34)
+        layout.setContentsMargins(4, 3, 4, 3)
+        layout.setSpacing(8)
+        self.avatar = Avatar("", 28)
         layout.addWidget(self.avatar)
         text_box = QVBoxLayout()
         text_box.setSpacing(1)
-        self.name_label = QLabel("—")
-        self.name_label.setStyleSheet("font-weight: 700;")
-        self.meta_label = QLabel("")
+        self.name_label = ElidedLabel("—")
+        self.name_label.setStyleSheet("font-weight: 700; font-size: 8.5pt;")
+        self.meta_label = ElidedLabel("")
         self.meta_label.setObjectName("Muted")
+        self.meta_label.setStyleSheet("font-size: 7.5pt;")
         text_box.addWidget(self.name_label)
         text_box.addWidget(self.meta_label)
         layout.addLayout(text_box, 1)
         self.chips = QHBoxLayout()
-        self.chips.setSpacing(5)
-        layout.addLayout(self.chips)
+        self.chips.setSpacing(4)
+        self.chips.setAlignment(Qt.AlignVCenter)
+        layout.addLayout(self.chips, 0)
 
     def enterEvent(self, event) -> None:  # noqa: N802
         self._hover = True
@@ -5515,7 +5543,7 @@ class AttentionRow(QWidget):
         self.record = record
         self.avatar.set_name(record.col2 or record.col3 or "?")
         self.name_label.setText(record.col2 or "—")
-        self.meta_label.setText(bidi(f"{record.col3} • {_truncate(record.col4 or '—', 46)}"))
+        self.meta_label.setText(bidi(f"{record.col3} • {_truncate(record.col4 or '—', 30)}"))
         clear_layout(self.chips)
         if record.is_expired:
             self._add_chip("منقضی", colors["danger"], colors["danger_soft"])
@@ -5531,7 +5559,7 @@ class AttentionRow(QWidget):
         chip = QLabel(text)
         chip.setStyleSheet(
             f"background: {bg}; color: {fg}; border-radius: 8px;"
-            f"padding: 2px 8px; font-size: 7.5pt; font-weight: 700;"
+            f"padding: 1px 6px; font-size: 7pt; font-weight: 700;"
         )
         self.chips.addWidget(chip)
 
@@ -5558,7 +5586,7 @@ class DashboardPage(QWidget):
         self.data: Optional[DashboardData] = None
         self.preview_model = None  # در پنجرهٔ اصلی به مدل جدول وصل می‌شود
         self._tile_layout_state: Optional[bool] = None
-        self._chart_layout_state: Optional[bool] = None
+        self._chart_layout_state: Optional[str] = None
         self._flag_layout_state: Optional[bool] = None
         self._chart_raw: Dict[str, Dict[str, str]] = {}
 
@@ -5574,8 +5602,8 @@ class DashboardPage(QWidget):
         content = QWidget()
         self.scroll.setWidget(content)
         self.body = QVBoxLayout(content)
-        self.body.setContentsMargins(30, 22, 30, 26)
-        self.body.setSpacing(16)
+        self.body.setContentsMargins(20, 10, 20, 14)
+        self.body.setSpacing(9)
 
         # --- نوار خطای اتصال ---------------------------------------------
         self.error_banner = NoticeBar(colors, "warning")
@@ -5585,22 +5613,22 @@ class DashboardPage(QWidget):
         self.body.addWidget(self.error_banner)
 
         # --- کارت قهرمان -------------------------------------------------
-        self.hero = Card(colors, radius=22, padding=24, variant="hero")
+        self.hero = Card(colors, radius=20, padding=14, variant="hero")
         hero_box = QVBoxLayout()
-        hero_box.setSpacing(14)
+        hero_box.setSpacing(8)
 
         hero_top = QHBoxLayout()
-        hero_top.setSpacing(28)
+        hero_top.setSpacing(18)
         hero_text = QVBoxLayout()
-        hero_text.setSpacing(5)
+        hero_text.setSpacing(2)
         self.hero_eyebrow = QLabel("سند قراردادها — نمای زندهٔ سبد")
         self.hero_eyebrow.setStyleSheet(
-            f"color: {colors['hero_muted']}; font-size: 8.5pt; font-weight: 700;")
+            f"color: {colors['hero_muted']}; font-size: 8pt; font-weight: 700;")
         self.hero_title = QLabel("پیشرفت اختتام قراردادها")
         self.hero_title.setStyleSheet(
-            f"color: {colors['hero_ink']}; font-size: 19pt; font-weight: 800;")
+            f"color: {colors['hero_ink']}; font-size: 16pt; font-weight: 800;")
         self.hero_meta = QLabel("—")
-        self.hero_meta.setStyleSheet(f"color: {colors['hero_muted']}; font-size: 9pt;")
+        self.hero_meta.setStyleSheet(f"color: {colors['hero_muted']}; font-size: 8pt;")
         self.hero_meta.setWordWrap(True)
         hero_text.addStretch(1)
         hero_text.addWidget(self.hero_eyebrow)
@@ -5613,7 +5641,7 @@ class DashboardPage(QWidget):
         gauge_col.setSpacing(0)
         self.gauge = RingGauge(colors)
         self.gauge.set_hero_mode(True)
-        self.gauge.setFixedSize(182, 182)
+        self.gauge.setFixedSize(104, 104)
         gauge_col.addStretch(1)
         gauge_col.addWidget(self.gauge, 0, Qt.AlignHCenter)
         gauge_col.addStretch(1)
@@ -5626,7 +5654,7 @@ class DashboardPage(QWidget):
         hero_box.addWidget(divider)
 
         hero_bottom = QHBoxLayout()
-        hero_bottom.setSpacing(12)
+        hero_bottom.setSpacing(8)
         self.chips_host = QWidget()
         self.chips_host.setAttribute(Qt.WA_TranslucentBackground, True)
         chips_layout = QHBoxLayout(self.chips_host)
@@ -5649,25 +5677,25 @@ class DashboardPage(QWidget):
             self.hero_kpis.append((value, hint))
             chips_layout.addWidget(block)
             line = QFrame()
-            line.setFixedSize(1, 34)
+            line.setFixedSize(1, 26)
             line.setStyleSheet("background: rgba(255,255,255,0.22);")
-            chips_layout.addSpacing(16)
+            chips_layout.addSpacing(11)
             chips_layout.addWidget(line)
-            chips_layout.addSpacing(16)
+            chips_layout.addSpacing(11)
         hero_bottom.addWidget(self.chips_host, 0, Qt.AlignVCenter)
         hero_bottom.addStretch(1)
 
         self.view_button = QPushButton("مشاهدهٔ قراردادها")
         self.view_button.setObjectName("OnHeroSolid")
         self.view_button.setCursor(Qt.PointingHandCursor)
-        self.view_button.setMinimumHeight(38)
+        self.view_button.setMinimumHeight(32)
         self.view_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
         hero_bottom.addWidget(self.view_button, 0, Qt.AlignVCenter)
 
         self.reload_button = QPushButton("بازخوانی")
         self.reload_button.setObjectName("OnHero")
         self.reload_button.setCursor(Qt.PointingHandCursor)
-        self.reload_button.setMinimumHeight(38)
+        self.reload_button.setMinimumHeight(32)
         self.reload_button.setIcon(make_icon("refresh", colors["hero_ink"], 15))
         self.reload_button.clicked.connect(self.reloadRequested.emit)
         hero_bottom.addWidget(self.reload_button, 0, Qt.AlignVCenter)
@@ -5675,7 +5703,7 @@ class DashboardPage(QWidget):
         self.report_button = QPushButton("گزارش مدیریتی")
         self.report_button.setObjectName("OnHero")
         self.report_button.setCursor(Qt.PointingHandCursor)
-        self.report_button.setMinimumHeight(38)
+        self.report_button.setMinimumHeight(32)
         self.report_button.setIcon(make_icon("chart", colors["hero_ink"], 15))
         self.report_button.clicked.connect(lambda: self.navigateRequested.emit("reports"))
         hero_bottom.addWidget(self.report_button, 0, Qt.AlignVCenter)
@@ -5693,8 +5721,8 @@ class DashboardPage(QWidget):
         # --- کاشی‌های آمار ------------------------------------------------
         self.tiles: Dict[str, StatTile] = {}
         self.tiles_grid = QGridLayout()
-        self.tiles_grid.setHorizontalSpacing(14)
-        self.tiles_grid.setVerticalSpacing(14)
+        self.tiles_grid.setHorizontalSpacing(10)
+        self.tiles_grid.setVerticalSpacing(10)
         specs = [
             ("all", "کل قراردادها", "documents", colors["brand"]),
             ("progress", "میانگین پیشرفت اختتام", "gauge", colors["brand_2"]),
@@ -5709,14 +5737,14 @@ class DashboardPage(QWidget):
         self.body.addLayout(self.tiles_grid)
 
         # --- کارت‌های وضعیت اسناد اختتام ----------------------------------
-        self.status_card = Card(colors, radius=18, padding=16)
+        self.status_card = Card(colors, radius=16, padding=13)
         self.status_card.body.addWidget(_card_title(
             "وضعیت اسناد اختتام",
             "برای دیدن قراردادهای هر وضعیت، روی کارت آن کلیک کنید",
         ))
         self.flag_grid = QGridLayout()
-        self.flag_grid.setHorizontalSpacing(10)
-        self.flag_grid.setVerticalSpacing(10)
+        self.flag_grid.setHorizontalSpacing(8)
+        self.flag_grid.setVerticalSpacing(8)
         self.flag_tiles: Dict[str, FlagTile] = {}
         for flag_key, flag_label, _column in FLAG_DEFS:
             tile = FlagTile(flag_key, flag_label, colors, self.status_card)
@@ -5727,30 +5755,34 @@ class DashboardPage(QWidget):
 
         # --- نمودارها -----------------------------------------------------
         self.charts_grid = QGridLayout()
-        self.charts_grid.setHorizontalSpacing(14)
-        self.charts_grid.setVerticalSpacing(14)
+        self.charts_grid.setHorizontalSpacing(10)
+        self.charts_grid.setVerticalSpacing(10)
 
         self.progress_card = ChartCard(
             "وضعیت پیشرفت کارکرد",
             "بر اساس ستون‌های کارکرد — برای فیلتر کلیک کنید",
-            colors, min_height=300,
+            colors, min_height=206,
         )
         self.donut = DonutChart(colors, CHART_COLORS["progress"])
-        self.donut.setMinimumSize(180, 180)
+        self.donut.setMinimumSize(116, 116)
+        self.donut.setFixedWidth(160)
         self.donut.sliceClicked.connect(self._on_progress_slice)
         self.legend = LegendList(colors)
-        self.legend.setMaximumWidth(238)
+        self.legend.setMinimumWidth(160)
+        self.legend.setMaximumWidth(206)
         self.legend.itemClicked.connect(self._on_progress_slice)
         donut_row = QHBoxLayout()
-        donut_row.setSpacing(8)
+        donut_row.setSpacing(10)
+        donut_row.addStretch(1)
         donut_row.addWidget(self.legend, 0)
-        donut_row.addWidget(self.donut, 1)
+        donut_row.addWidget(self.donut, 0)
+        donut_row.addStretch(1)
         self.progress_card.content_layout.addLayout(donut_row, 1)
 
         self.types_card = ChartCard(
             "پرکاربردترین انواع قرارداد",
             "همهٔ انواع قرارداد — کلیک روی هر میله جدول را فیلتر می‌کند",
-            colors, min_height=300,
+            colors, min_height=212,
         )
         self.types_bar = BarChart(colors)
         self.types_bar.barClicked.connect(self._on_type_bar)
@@ -5759,7 +5791,7 @@ class DashboardPage(QWidget):
         self.attention_card = ChartCard(
             "نیازمند پیگیری",
             "قراردادهایی با مورد باز یا الحاقیهٔ منقضی",
-            colors, min_height=404,
+            colors, min_height=210,
         )
         follow_button = QPushButton("مشاهدهٔ همه")
         follow_button.setObjectName("Link")
@@ -5767,65 +5799,77 @@ class DashboardPage(QWidget):
         follow_button.clicked.connect(lambda: self.navigateRequested.emit("contracts"))
         self.attention_card.add_action(follow_button)
         self.attention_box = QVBoxLayout()
-        self.attention_box.setSpacing(2)
+        self.attention_box.setSpacing(0)
         self.attention_card.content_layout.addLayout(self.attention_box)
         self.attention_empty = _muted("موردی برای پیگیری وجود ندارد.")
         self.attention_card.content_layout.addWidget(self.attention_empty)
         self.attention_card.content_layout.addStretch(1)
 
         self.type_card = ChartCard(
-            "ترکیب نوع قرارداد", "سهم هر نوع از کل سبد", colors, min_height=236,
+            "ترکیب نوع قرارداد", "سهم هر نوع از کل سبد", colors, min_height=200,
         )
         self.type_pie = DonutChart(colors, CHART_COLORS["type"])
-        self.type_pie.setMinimumSize(136, 136)
+        self.type_pie.setMinimumSize(104, 104)
+        self.type_pie.setFixedWidth(140)
         self.type_pie.sliceClicked.connect(self._on_type_slice)
         self.type_legend = LegendList(colors)
-        self.type_legend.setMaximumWidth(196)
+        self.type_legend.setMinimumWidth(152)
+        self.type_legend.setMaximumWidth(190)
         self.type_legend.max_rows = 6
         self.type_legend.itemClicked.connect(self._on_type_slice)
         type_row = QHBoxLayout()
-        type_row.setSpacing(6)
+        type_row.setSpacing(8)
+        type_row.addStretch(1)
         type_row.addWidget(self.type_legend, 0)
-        type_row.addWidget(self.type_pie, 1)
+        type_row.addWidget(self.type_pie, 0)
+        type_row.addStretch(1)
         self.type_card.content_layout.addLayout(type_row, 1)
 
         self.annex_card = ChartCard(
             "وضعیت الحاقیه",
             "توزیع زمان الحاقیه — برای فیلتر جدول کلیک کنید",
-            colors, min_height=286,
+            colors, min_height=186,
         )
         self.annex_donut = DonutChart(colors, CHART_COLORS["annex"])
-        self.annex_donut.setMinimumSize(150, 150)
+        self.annex_donut.setMinimumSize(110, 110)
+        self.annex_donut.setFixedWidth(150)
         self.annex_donut.sliceClicked.connect(
             lambda label: self._emit_chart_filter("annex", label))
         self.annex_legend = LegendList(colors)
-        self.annex_legend.setMaximumWidth(268)
+        self.annex_legend.setMinimumWidth(168)
+        self.annex_legend.setMaximumWidth(214)
         self.annex_legend.max_rows = 8
         self.annex_legend.itemClicked.connect(
             lambda label: self._emit_chart_filter("annex", label))
         annex_row = QHBoxLayout()
-        annex_row.setSpacing(8)
+        annex_row.setSpacing(10)
+        annex_row.addStretch(1)
         annex_row.addWidget(self.annex_legend, 0)
-        annex_row.addWidget(self.annex_donut, 1)
+        annex_row.addWidget(self.annex_donut, 0)
+        annex_row.addStretch(1)
         self.annex_card.content_layout.addLayout(annex_row, 1)
 
         self.completion_card = ChartCard(
             "وضعیت پیشرفت اختتام",
             "توزیع پیشرفت اختتام — برای فیلتر جدول کلیک کنید",
-            colors, min_height=286,
+            colors, min_height=186,
         )
         self.completion_donut = DonutChart(colors, CHART_COLORS["completion"])
-        self.completion_donut.setMinimumSize(150, 150)
+        self.completion_donut.setMinimumSize(110, 110)
+        self.completion_donut.setFixedWidth(150)
         self.completion_donut.sliceClicked.connect(
             lambda label: self._emit_chart_filter("completion", label))
         self.completion_legend = LegendList(colors)
-        self.completion_legend.setMaximumWidth(238)
+        self.completion_legend.setMinimumWidth(164)
+        self.completion_legend.setMaximumWidth(210)
         self.completion_legend.itemClicked.connect(
             lambda label: self._emit_chart_filter("completion", label))
         completion_row = QHBoxLayout()
-        completion_row.setSpacing(8)
+        completion_row.setSpacing(10)
+        completion_row.addStretch(1)
         completion_row.addWidget(self.completion_legend, 0)
-        completion_row.addWidget(self.completion_donut, 1)
+        completion_row.addWidget(self.completion_donut, 0)
+        completion_row.addStretch(1)
         self.completion_card.content_layout.addLayout(completion_row, 1)
 
         self.body.addWidget(SectionHeader(
@@ -5837,9 +5881,12 @@ class DashboardPage(QWidget):
     # ---- چیدمان واکنش‌گرا ----
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._place_cards(self.width() < 1220)
+        width = self.width()
+        mode = "wide" if width >= 1220 else ("mid" if width >= 900 else "narrow")
+        self._place_cards(mode)
 
-    def _place_cards(self, compact: bool) -> None:
+    def _place_cards(self, mode: str) -> None:
+        compact = mode != "wide"
         if self._tile_layout_state != compact:
             self._tile_layout_state = compact
             drain_layout(self.tiles_grid)
@@ -5863,27 +5910,27 @@ class DashboardPage(QWidget):
             for column in range(4):
                 self.flag_grid.setColumnStretch(column, 1 if column < columns else 0)
 
-        if self._chart_layout_state != compact:
-            self._chart_layout_state = compact
+        if self._chart_layout_state != mode:
+            self._chart_layout_state = mode
             drain_layout(self.charts_grid)
             cards = (self.progress_card, self.types_card, self.annex_card,
                      self.completion_card, self.attention_card, self.type_card)
             for card in cards:
                 card.setParent(self)
-            if compact:
-                for index, card in enumerate(cards):
-                    self.charts_grid.addWidget(card, index, 0)
-                self.charts_grid.setColumnStretch(0, 1)
-                self.charts_grid.setColumnStretch(1, 0)
+            if mode == "narrow":
+                columns = 1
+            elif mode == "mid":
+                columns = 2
             else:
-                self.charts_grid.addWidget(self.progress_card, 0, 0)
-                self.charts_grid.addWidget(self.types_card, 0, 1)
-                self.charts_grid.addWidget(self.annex_card, 1, 0)
-                self.charts_grid.addWidget(self.completion_card, 1, 1)
-                self.charts_grid.addWidget(self.attention_card, 2, 0)
-                self.charts_grid.addWidget(self.type_card, 2, 1)
-                self.charts_grid.setColumnStretch(0, 3)
-                self.charts_grid.setColumnStretch(1, 2)
+                columns = 3
+            order = cards
+            if mode == "wide":
+                order = (self.progress_card, self.types_card, self.attention_card,
+                         self.annex_card, self.completion_card, self.type_card)
+            for index, card in enumerate(order):
+                self.charts_grid.addWidget(card, index // columns, index % columns)
+            for column in range(3):
+                self.charts_grid.setColumnStretch(column, 1 if column < columns else 0)
             for card in cards:
                 card.show()
 
@@ -5940,7 +5987,7 @@ class DashboardPage(QWidget):
         progress = data.dist("progress")
         progress_labels = self._display_labels("progress", progress)
         self.donut.set_data(progress_labels, progress.values,
-                            "پیشرفت کارکرد", CHART_COLORS["progress"])
+                            "پیشرفت کل", CHART_COLORS["progress"])
         self.legend.set_data(progress_labels, progress.values, CHART_COLORS["progress"])
 
         annex = data.dist("annex")
@@ -5979,7 +6026,7 @@ class DashboardPage(QWidget):
 
     def _fill_attention(self, records: Sequence[ContractRecord]) -> None:
         clear_layout(self.attention_box)
-        for record in records:
+        for record in list(records)[:3]:
             row = AttentionRow(self.colors)
             row.set_record(record, self.colors)
             row.activated.connect(self.recordActivated.emit)
