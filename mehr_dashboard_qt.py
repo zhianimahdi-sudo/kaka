@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.3.1"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -989,6 +989,22 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8,
         })
         return connection
     detail = "\n".join(errors[:4]) if errors else "خطای نامشخص"
+    auth_only = bool(errors) and all(
+        ("1045" in item) or ("access denied" in item.lower()) for item in errors
+    )
+    if auth_only:
+        raise DatabaseError(
+            f"نام کاربری یا رمز MySQL پذیرفته نشد ({host}:{port} — دیتابیس {database}).\n"
+            f"{detail}\n\n"
+            "راه‌حل‌ها:\n"
+            "• رمزِ درستِ کاربر «master_app» را در تنظیمات وارد کنید (فیلد رمز را خالی نگذارید).\n"
+            "• یا در MySQL یک‌بار رمز را تنظیم کنید:\n"
+            "   ALTER USER 'master_app'@'localhost' IDENTIFIED BY 'رمز-شما';\n"
+            "   FLUSH PRIVILEGES;\n"
+            "• اگر رمز root را دارید، همان را با کاربر root وارد کنید.\n"
+            "• اگر دیتابیس روی سرور دیگری است، آدرس آن را در فیلد «میزبان» بگذارید.\n"
+            "• برای کار بدون دیتابیس: «اجرای محلی (بدون دیتابیس)» یا به‌روزرسانی محلی فایل ۰۱."
+        )
     raise DatabaseError(
         f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{detail}\n\n"
         "اگر MySQL شما کاربر بدون رمز دارد (مثل root بدون رمز)، همان را وارد کنید؛ "
@@ -1617,6 +1633,56 @@ def preview_system_update(plan: SystemUpdatePlan) -> str:
     for note in plan.notes:
         lines.append(f"یادداشت: {note}")
     return "\n".join(lines)
+
+
+def workbook_sheet_names(path: str) -> List[str]:
+    """فهرست شیت‌های یک فایل اکسل (برای تشخیص فایل سامانه)."""
+    if openpyxl is None:
+        return []
+    try:
+        workbook = openpyxl.load_workbook(str(path), read_only=True)
+    except Exception:
+        return []
+    try:
+        return [str(name) for name in workbook.sheetnames]
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+
+
+def has_colorcode_sheet(path: str) -> bool:
+    for name in workbook_sheet_names(path):
+        if normalize_per(name).strip() == "colorcode":
+            return True
+    return False
+
+
+def update_local_from_system(source_path: str, target_path: str,
+                             sheet_name: str = SHEET_NAME_DEFAULT) -> Dict[str, Any]:
+    """همان به‌روزرسانی فایل ۰۱، اما روی یک فایل اکسل محلی (بدون دیتابیس)."""
+    target = Path(str(target_path)).expanduser()
+    if not target.exists() or not target.is_file():
+        raise ExcelDataError(f"فایل اکسل مقصد پیدا نشد:\n{target}")
+    blob = target.read_bytes()
+    plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
+    backup = backup_workbook(blob, target.name)
+    new_blob, cells = apply_system_update(plan, blob)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    output = target.with_name(f"{target.stem}-به‌روزرسانی-{stamp}.xlsx")
+    output.write_bytes(new_blob)
+    log_event(
+        f"به‌روزرسانی محلی از فایل سامانه: {plan.filtered_rows} ردیف «اجرا - مهر»، "
+        f"{plan.matched_rows} تطبیق، {cells} سلول → {output}"
+    )
+    return {
+        "plan": plan,
+        "updated_cells": cells,
+        "backup_path": backup,
+        "output_path": str(output),
+        "summary": preview_system_update(plan),
+    }
 
 
 def backup_workbook(blob: bytes, filename: str = "workbook") -> str:
@@ -4867,6 +4933,32 @@ class SystemUpdatePlanWorker(QThread):
             self.failed.emit(f"خطای پیش‌بینی‌نشده در خواندن فایل سامانه:\n{exc}")
 
 
+class LocalSystemUpdateWorker(QThread):
+    """به‌روزرسانی فایل اکسل محلی با فایل سامانه (بدون دیتابیس)."""
+
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, source_path: str, target_path: str,
+                 sheet_name: str = SHEET_NAME_DEFAULT, parent=None) -> None:
+        super().__init__(parent)
+        self.source_path = str(source_path)
+        self.target_path = str(target_path)
+        self.sheet_name = sheet_name
+
+    def run(self) -> None:
+        try:
+            result = update_local_from_system(
+                self.source_path, self.target_path, sheet_name=self.sheet_name
+            )
+            self.done.emit(result)
+        except ExcelDataError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در به‌روزرسانی محلی:\n{exc}")
+
+
 class SystemUpdateApplyWorker(QThread):
     """اعمال نقشه روی کتاب کار، گرفتن نسخهٔ پشتیبان و ذخیره در دیتابیس."""
 
@@ -6148,6 +6240,19 @@ def page_step_label(text: str, number: int, colors: Dict[str, str]) -> QWidget:
     label.setWordWrap(True)
     layout.addWidget(label, 1)
     return row
+
+
+def ask_confirm(parent, title: str, text: str, ok_text: str,
+                cancel_text: str = "لغو") -> bool:
+    """پرسش بله/خیر با دکمه‌های فارسی."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Question)
+    box.setText(text)
+    ok_button = box.addButton(ok_text, QMessageBox.AcceptRole)
+    box.addButton(cancel_text, QMessageBox.RejectRole)
+    box.exec_()
+    return box.clickedButton() is ok_button
 
 
 def _card_title(title: str, subtitle: str = "") -> QWidget:
@@ -9465,7 +9570,8 @@ class MainWindow(QMainWindow):
     def load_data(self, *_args, silent: bool = False) -> None:
         if self._loader_running():
             return
-        if not str(self.config.get("db_host") or "").strip():
+        local_source = str(self.config.get("data_source") or "database") == "local"
+        if not local_source and not str(self.config.get("db_host") or "").strip():
             self.show_page("settings")
             return
         settings = self.config.db_settings()
@@ -9722,14 +9828,10 @@ class MainWindow(QMainWindow):
             self.pick_system_update_file()
             return
         if not str(self.config.get("db_host") or "").strip():
-            QMessageBox.information(
-                self, "به‌روزرسانی از فایل سامانه",
-                "برای به‌روزرسانی کتاب کار دیتابیس، ابتدا اتصال دیتابیس را در "
-                "تنظیمات کامل کنید.\n\n"
-                "اگر بدون دیتابیس کار می‌کنید، فایل اکسل را با «اجرای محلی» باز کنید.",
-            )
+            self.start_local_system_update(path)
             return
         self.show_page("settings")
+        self._pending_system_source = path
         self.settings.set_status("در حال خواندن فایل سامانه و تطبیق ردیف‌ها…")
         worker = SystemUpdatePlanWorker(self.config.db_settings(), path,
                                         str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT),
@@ -9740,6 +9842,79 @@ class MainWindow(QMainWindow):
         self._system_update_worker = worker
         self._system_update_busy = True
         worker.start()
+
+    # ------------------------------------------------------------------
+    # به‌روزرسانی محلی از فایل سامانه (بدون دیتابیس)
+    # ------------------------------------------------------------------
+    def start_local_system_update(self, source_path: str) -> None:
+        """فایل ۰۱ را روی یک فایل اکسل محلی (دارای شیت colorcode) اعمال می‌کند."""
+        target = str(self.config.get("local_excel_path") or "").strip()
+        if not target or not Path(target).exists():
+            target = str(self.settings.excel_edit.text().strip() or "")
+        if not target or not Path(target).exists() or not has_colorcode_sheet(target):
+            start = str(self.config.get("last_excel_path") or app_dir())
+            target, _selected = QFileDialog.getOpenFileName(
+                self, "فایل اکسل مقصد (دارای شیت colorcode) را انتخاب کنید", start,
+                "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+            )
+        if not target:
+            return
+        if not has_colorcode_sheet(target):
+            QMessageBox.warning(
+                self, "به‌روزرسانی محلی",
+                "فایل انتخاب‌شده شیت «colorcode» ندارد.\n"
+                "فایل ۰۲ (کتاب کار دارای شیت colorcode) را انتخاب کنید.",
+            )
+            return
+        self.settings.set_status("در حال اعمال فایل سامانه روی فایل اکسل محلی…")
+        worker = LocalSystemUpdateWorker(
+            source_path, target,
+            str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT), self,
+        )
+        worker.done.connect(self._on_local_update_done)
+        worker.failed.connect(self._on_system_update_failed)
+        worker.finished.connect(lambda: self._set_system_update_busy(False))
+        self._system_update_worker = worker
+        self._system_update_busy = True
+        worker.start()
+
+    @guarded("_on_local_update_done")
+    def _on_local_update_done(self, result: Dict[str, Any]) -> None:
+        plan: SystemUpdatePlan = result["plan"]
+        output = str(result.get("output_path") or "")
+        self.config.set("last_excel_path", plan.source_path, save=False)
+        if output:
+            self.config.set("local_excel_path", output, save=False)
+            self.config.set("data_source", "local", save=False)
+            self.config.save()
+        self.settings.set_status(
+            f"به‌روزرسانی محلی انجام شد — {fa(result['updated_cells'])} سلول "
+            f"در {fa(plan.matched_rows)} ردیف"
+        )
+        self._notify("فایل اکسل محلی به‌روزرسانی شد", "check")
+        if output:
+            self.load_data()
+        lines = [
+            f"{fa(plan.matched_rows)} ردیف از «اجرا - مهر» اعمال شد "
+            f"({fa(result['updated_cells'])} سلول، روش تطبیق: {plan.method}).",
+        ]
+        if plan.unmatched:
+            lines.append(
+                f"بدون تطبیق: {fa(len(plan.unmatched))} ردیف — نمونه: "
+                + "، ".join(plan.unmatched[:4])
+            )
+        if output:
+            lines.append(f"فایل تازه: {output}")
+            lines.append("برنامه همین حالا با فایل تازه اجرا شد (حالت محلی).")
+        if result.get("backup_path"):
+            lines.append(f"نسخهٔ پشتیبان: {result['backup_path']}")
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی محلی انجام شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("فایل اکسل با فایل سامانه به‌روزرسانی شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
 
     def pick_system_update_file(self) -> None:
         start = str(
@@ -9831,6 +10006,22 @@ class MainWindow(QMainWindow):
     def _on_system_update_failed(self, message: str) -> None:
         self.settings.set_status("به‌روزرسانی از فایل سامانه انجام نشد.")
         self._set_system_update_busy(False)
+        lowered = (message or "").lower()
+        database_problem = any(token in lowered for token in (
+            "اتصال به دیتابیس", "اتصال به سرور", "1045", "access denied",
+            "نام کاربری یا رمز", "2003", "can't connect",
+        ))
+        source = str(getattr(self, "_pending_system_source", "") or "")
+        if database_problem and source:
+            if ask_confirm(
+                self, "دیتابیس در دسترس نیست",
+                "اتصال به دیتابیس برقرار نشد.\n\n"
+                "می‌خواهید همین به‌روزرسانی را روی فایل اکسل محلی (بدون دیتابیس) "
+                "انجام دهم و برنامه با فایل تازه اجرا شود؟",
+                "بله، محلی به‌روزرسانی کن",
+            ):
+                self.start_local_system_update(source)
+                return
         log_event("به‌روزرسانی از فایل سامانه ناموفق: "
                   + " / ".join((message or "").splitlines()[:3]))
         box = QMessageBox(self)
@@ -9847,6 +10038,18 @@ class MainWindow(QMainWindow):
             return
         if not str(path or "").strip():
             self.import_excel_dialog()
+            return
+        if Path(path).exists() and not has_colorcode_sheet(path):
+            sheets = workbook_sheet_names(path)
+            if ask_confirm(
+                self, "این فایل شیت colorcode ندارد",
+                "فایل انتخاب‌شده به‌نظر «فایل خام سامانه» است و شیت colorcode ندارد "
+                f"(شیت‌ها: {'، '.join(sheets) or '—'}).\n\n"
+                "می‌خواهید همین فایل را به‌عنوان به‌روزرسانی روی کتاب کار فعلی "
+                "اعمال کنم؟ (فیلتر «اجرا - مهر» و ستون‌های L تا AJ خودکار انجام می‌شود)",
+                "بله، به‌روزرسانی کن",
+            ):
+                self.start_system_update(path)
             return
         self.show_page("settings")
         values = self.settings.connection_values()
