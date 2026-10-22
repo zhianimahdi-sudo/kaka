@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.4.2"
+APP_VERSION = "3.5.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1105,6 +1105,286 @@ def _safe_identifier(name: str, label: str) -> str:
     return clean
 
 
+# ---------------------------------------------------------------------------
+# دیتابیس نرمال‌شده (نسخهٔ ۳٫۵) — اعداد داشبورد از همین جدول‌ها ساخته می‌شوند
+# ---------------------------------------------------------------------------
+# هر ردیف شیت colorcode به یک سطر mehr_contracts تبدیل می‌شود: ستون‌های شناسایی
+# جدا و قابل جست‌وجو، و نسخهٔ کامل مقدارهای ردیف در row_values (JSON) تا بازسازی
+# داده بدون افت دقت انجام شود. سه ردیف اول شیت (عنوان، درصد کل، سرستون کسورات)
+# در mehr_workbooks.meta_rows نگه داشته می‌شوند.
+MEHR_SCHEMA_SQL = (
+    """CREATE TABLE IF NOT EXISTS mehr_workbooks (
+        workbook_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        original_filename VARCHAR(255) NOT NULL DEFAULT '',
+        sheet_name VARCHAR(64) NOT NULL DEFAULT 'colorcode',
+        sheet_count INT NOT NULL DEFAULT 0,
+        data_rows INT NOT NULL DEFAULT 0,
+        progress_cell VARCHAR(64) NULL,
+        meta_rows LONGTEXT NULL,
+        source_kind VARCHAR(20) NOT NULL DEFAULT 'excel',
+        source_sha CHAR(64) NOT NULL DEFAULT '',
+        imported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS mehr_contracts (
+        row_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        workbook_id BIGINT UNSIGNED NOT NULL,
+        excel_row INT NOT NULL,
+        contract_no VARCHAR(64) NOT NULL DEFAULT '',
+        company VARCHAR(255) NOT NULL DEFAULT '',
+        subject VARCHAR(512) NOT NULL DEFAULT '',
+        employer VARCHAR(255) NOT NULL DEFAULT '',
+        contract_type VARCHAR(255) NOT NULL DEFAULT '',
+        deductions VARCHAR(1024) NOT NULL DEFAULT '',
+        deduction_count INT NOT NULL DEFAULT 0,
+        flag_temporary TINYINT NOT NULL DEFAULT 0,
+        flag_prefinal TINYINT NOT NULL DEFAULT 0,
+        flag_balance TINYINT NOT NULL DEFAULT 0,
+        flag_statement TINYINT NOT NULL DEFAULT 0,
+        flag_mofasa TINYINT NOT NULL DEFAULT 0,
+        flag_affidavit TINYINT NOT NULL DEFAULT 0,
+        flag_delivery TINYINT NOT NULL DEFAULT 0,
+        flag_financial TINYINT NOT NULL DEFAULT 0,
+        progress_status VARCHAR(64) NOT NULL DEFAULT '',
+        completion_status VARCHAR(64) NOT NULL DEFAULT '',
+        annex_status VARCHAR(64) NOT NULL DEFAULT '',
+        progress_table VARCHAR(64) NOT NULL DEFAULT '',
+        as_status VARCHAR(64) NOT NULL DEFAULT '',
+        row_values LONGTEXT NOT NULL,
+        UNIQUE KEY uq_workbook_row (workbook_id, excel_row),
+        KEY ix_contract_no (contract_no),
+        KEY ix_company (company)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+)
+
+_FLAG_COLUMNS_SQL = {
+    "temporary": "flag_temporary",
+    "prefinal": "flag_prefinal",
+    "balance": "flag_balance",
+    "statement": "flag_statement",
+    "mofasa": "flag_mofasa",
+    "affidavit": "flag_affidavit",
+    "delivery": "flag_delivery",
+    "financial": "flag_financial",
+}
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def _rows_to_json(rows: Sequence[Sequence[Any]]) -> str:
+    return json.dumps([list(row) for row in rows], ensure_ascii=False,
+                      default=_json_default)
+
+
+def _rows_from_json(text: Any) -> List[List[Any]]:
+    if not text:
+        return []
+    if isinstance(text, (bytes, bytearray)):
+        text = text.decode("utf-8", "replace")
+    try:
+        data = json.loads(str(text))
+    except Exception:
+        return []
+    return [list(row) for row in data if isinstance(row, list)]
+
+
+def _numeric_columns(width: int) -> List[int]:
+    """ستون‌هایی که در JSON باید عدد بمانند (درصد پیشرفت)."""
+    return [37]
+
+
+def _restore_numbers(row: List[Any]) -> List[Any]:
+    """اعدادی که JSON به رشته تبدیل کرده را به عدد برمی‌گرداند."""
+    for index in _numeric_columns(len(row)):
+        if index >= len(row):
+            break
+        value = row[index]
+        if isinstance(value, str):
+            number = num(value)
+            if number is not None:
+                row[index] = number
+    return row
+
+
+def ensure_mehr_schema(cursor) -> None:
+    """جدول‌های نرمال‌شده را (اگر نباشند) می‌سازد."""
+    for statement in MEHR_SCHEMA_SQL:
+        cursor.execute(statement)
+
+
+def store_rows_in_database(cursor, workbook_id: int, filename: str,
+                           sheet_name: str, sheet_count: int,
+                           raw_rows: Sequence[Sequence[Any]],
+                           source_kind: str = "excel",
+                           source_sha: str = "") -> Dict[str, int]:
+    """همهٔ ردیف‌های شیت را در جدول‌های نرمال‌شده می‌نویسد.
+
+    سه ردیف اول (عنوان/درصد کل/سرستون کسورات) در meta_rows و بقیه به‌صورت
+    سطرهای قرارداد ذخیره می‌شوند؛ بنابراین بازخوانی، همان ردیف‌های اصلی را
+    برمی‌گرداند و اعداد داشبورد دقیقاً همان اعداد فایل می‌شود.
+    """
+    rows = [list(row) for row in raw_rows]
+    meta_rows = rows[:3]
+    data_rows = rows[3:]
+    width = max((len(row) for row in rows), default=0)
+    padded = [row + [None] * (width - len(row)) for row in data_rows]
+
+    progress_cell = ""
+    if len(rows) > 1 and len(rows[1]) > 36 and rows[1][36] not in (None, ""):
+        progress_cell = str(rows[1][36])
+
+    payload: List[Tuple[Any, ...]] = []
+    for offset, row in enumerate(padded):
+        excel_row = 4 + offset
+        if all(is_blank(value) for value in row[:REQUIRED_COLUMNS]):
+            continue  # ردیف کاملاً خالی، مثل پارس داشبورد نادیده گرفته می‌شود
+        flags = {
+            key: is_status_mark(row[column] if column < len(row) else None)
+            for key, _label, column in FLAG_DEFS
+        }
+        marked = [
+            index for index in range(23)
+            if 11 + index < len(row) and is_status_mark(row[11 + index])
+        ]
+        deduction_headers = meta_rows[2] if len(meta_rows) > 2 else []
+        deductions = " | ".join(
+            txt(deduction_headers[index]) for index in marked
+            if index < len(deduction_headers) and not is_blank(deduction_headers[index])
+        )
+        payload.append((
+            int(workbook_id), excel_row,
+            txt(row[4] if len(row) > 4 else "")[:64],
+            txt(row[3] if len(row) > 3 else "")[:255],
+            txt(row[6] if len(row) > 6 else "")[:512],
+            txt(row[2] if len(row) > 2 else "")[:255],
+            txt(row[5] if len(row) > 5 else "")[:255],
+            deductions[:1024], len(marked),
+            *(1 if flags.get(key) else 0 for key, _label, _column in FLAG_DEFS),
+            (normalize_progress_value(row[53] if len(row) > 53 else None) or "")[:64],
+            (normalize_completion_value(row[54] if len(row) > 54 else None) or "")[:64],
+            (normalize_annex_value(row[55] if len(row) > 55 else None) or "")[:64],
+            _progress_like(row[10] if len(row) > 10 else None)[:64],
+            txt(row[44] if len(row) > 44 else "")[:64],
+            _rows_to_json([row]),
+        ))
+    cursor.execute(
+        "DELETE FROM mehr_contracts WHERE workbook_id=%s", (int(workbook_id),)
+    )
+    cursor.execute(
+        "DELETE FROM mehr_workbooks WHERE workbook_id=%s", (int(workbook_id),)
+    )
+    cursor.execute(
+        "INSERT INTO mehr_workbooks (workbook_id, original_filename, sheet_name, "
+        "sheet_count, data_rows, progress_cell, meta_rows, source_kind, source_sha) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (int(workbook_id), str(filename)[:255], str(sheet_name)[:64],
+         int(sheet_count), len(payload), progress_cell, _rows_to_json(meta_rows),
+         str(source_kind)[:20], str(source_sha)[:64]),
+    )
+    if payload:
+        cursor.executemany(
+            "INSERT INTO mehr_contracts (workbook_id, excel_row, contract_no, company, "
+            "subject, employer, contract_type, deductions, deduction_count, "
+            "flag_temporary, flag_prefinal, flag_balance, flag_statement, flag_mofasa, "
+            "flag_affidavit, flag_delivery, flag_financial, progress_status, "
+            "completion_status, annex_status, progress_table, as_status, row_values) "
+            "VALUES (" + ",".join(["%s"] * 23) + ")",
+            payload,
+        )
+    return {"data_rows": len(payload), "width": width}
+
+
+def load_rows_from_database(settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """ردیف‌های شیت را از جدول‌های نرمال‌شده برمی‌گرداند (یا None اگر خالی باشد)."""
+    workbook_id = int(settings.get("workbook_id") or 1)
+    connection = connect_database(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT original_filename, sheet_name, sheet_count, data_rows, meta_rows "
+                "FROM mehr_workbooks WHERE workbook_id=%s", (workbook_id,)
+            )
+            meta = cursor.fetchone()
+            if not meta:
+                return None
+            cursor.execute(
+                "SELECT excel_row, row_values FROM mehr_contracts "
+                "WHERE workbook_id=%s ORDER BY excel_row", (workbook_id,)
+            )
+            rows = cursor.fetchall() or []
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    if not rows:
+        return None
+    by_row: Dict[int, List[Any]] = {}
+    for item in rows:
+        decoded = _rows_from_json(item[1])
+        if not decoded:
+            continue
+        try:
+            excel_row = int(item[0] or 0)
+        except (TypeError, ValueError):
+            continue
+        by_row[excel_row] = _restore_numbers(decoded[0])
+    if not by_row:
+        return None
+    width = max(len(row) for row in by_row.values())
+    last_row = max(by_row)
+    body: List[List[Any]] = []
+    for excel_row in range(4, last_row + 1):
+        row = by_row.get(excel_row)
+        body.append(list(row) if row else [None] * width)
+    meta_rows = _rows_from_json(meta[4])
+    raw_rows = [list(row) for row in meta_rows[:3]] + body
+    return {
+        "filename": str(meta[0] or ""),
+        "sheet_name": str(meta[1] or SHEET_NAME_DEFAULT),
+        "sheet_count": int(meta[2] or 0),
+        "data_rows": int(meta[3] or 0),
+        "raw_rows": raw_rows,
+    }
+
+
+def verify_database_numbers(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """اعداد محاسبه‌شده با SQL را با اعداد داشبورد مقایسه می‌کند."""
+    workbook_id = int(settings.get("workbook_id") or 1)
+    connection = connect_database(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT COUNT(*), SUM(deduction_count > 0), "
+                + ", ".join(f"SUM({column})" for column in _FLAG_COLUMNS_SQL.values())
+                + " FROM mehr_contracts WHERE workbook_id=%s",
+                (workbook_id,),
+            )
+            row = cursor.fetchone() or (0,) * 9
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    counts = {
+        "total": int(row[0] or 0),
+        "deductions": int(row[1] or 0),
+    }
+    for index, key in enumerate(_FLAG_COLUMNS_SQL, start=2):
+        counts[key] = int(row[index] or 0)
+    return counts
+
+
 def import_workbook_to_database(
     settings: Dict[str, Any],
     file_path: str,
@@ -1147,6 +1427,7 @@ def import_workbook_to_database(
     filename = path.name
     log_event(f"بارگذاری اکسل در دیتابیس: {filename} ({size} بایت) → {database} #{wid}")
 
+    stored_rows = 0
     connection = connect_server(settings)
     try:
         cursor = connection.cursor()
@@ -1158,6 +1439,7 @@ def import_workbook_to_database(
             cursor.execute(f"USE `{database}`")
             for statement in WORKBOOK_SCHEMA_SQL:
                 cursor.execute(statement)
+            ensure_mehr_schema(cursor)
             cursor.execute(
                 "SELECT workbook_id FROM excel_workbooks WHERE workbook_id=%s", (wid,)
             )
@@ -1197,6 +1479,22 @@ def import_workbook_to_database(
                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                      digest, blob),
                 )
+            # ردیف‌های شیت در جدول‌های نرمال‌شده هم ذخیره می‌شوند؛ داشبورد
+            # از همین جدول‌ها ساخته می‌شود تا اعداد دقیقاً همان اعداد فایل باشند.
+            try:
+                book = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
+                try:
+                    raw_rows = [list(row) for row in book[target_sheet].iter_rows(values_only=True)]
+                finally:
+                    book.close()
+                stored = store_rows_in_database(
+                    cursor, wid, filename, target_sheet, len(sheets), raw_rows,
+                    source_kind="excel", source_sha=digest,
+                )
+                stored_rows = int(stored.get("data_rows") or 0)
+                log_event(f"ردیف‌ها در جدول‌های نرمال‌شده ذخیره شد: {fa(stored_rows)} سطر")
+            except Exception as exc:
+                log_event(f"ذخیرهٔ ردیف‌های نرمال‌شده ناموفق بود: {type(exc).__name__}: {exc}")
             connection.commit()
         finally:
             cursor.close()
@@ -1229,6 +1527,7 @@ def import_workbook_to_database(
         "sheet_name": target_sheet,
         "database": database,
         "sha256": digest,
+        "data_rows": stored_rows,
     }
 
 
@@ -2471,17 +2770,84 @@ def _parse_imported_at(value: Any) -> Optional[datetime]:
     return None
 
 
+def migrate_blob_to_tables(settings: Dict[str, Any], info: Dict[str, Any]) -> None:
+    """فایل کتاب کار ذخیره‌شده را به جدول‌های نرمال‌شده منتقل می‌کند."""
+    workbook_id = int(settings.get("workbook_id") or 1)
+    sheet_name = str(settings.get("sheet_name") or SHEET_NAME_DEFAULT)
+    connection = connect_database(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            ensure_mehr_schema(cursor)
+            cursor.execute(
+                "SELECT COUNT(*) FROM mehr_contracts WHERE workbook_id=%s", (workbook_id,)
+            )
+            row = cursor.fetchone()
+            if row and int(row[0] or 0) > 0:
+                return
+            blob = info.get("data") or b""
+            book = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
+            try:
+                target = sheet_name if sheet_name in book.sheetnames else book.sheetnames[0]
+                raw_rows = [list(r) for r in book[target].iter_rows(values_only=True)]
+                sheet_count = len(book.sheetnames)
+            finally:
+                book.close()
+            store_rows_in_database(
+                cursor, workbook_id, str(info.get("filename") or "workbook.xlsx"),
+                target, sheet_count, raw_rows, source_kind="excel",
+                source_sha=str(info.get("sha256") or ""),
+            )
+            connection.commit()
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
 def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> DashboardData:
-    """اتصال به دیتابیس مرکزی، خواندن کتاب کار و ساخت داده‌های داشبورد."""
+    """اتصال به دیتابیس مرکزی، خواندن کتاب کار و ساخت داده‌های داشبورد.
+
+    اول از جدول‌های نرمال‌شده (mehr_contracts) خوانده می‌شود؛ اگر خالی بودند،
+    فایل ذخیره‌شده (blob) خوانده و همان‌جا به جدول‌ها منتقل می‌شود.
+    """
     log_event(
         f"خواندن داده از دیتابیس {settings.get('database')} "
         f"(workbook_id={settings.get('workbook_id')})"
     )
+    workbook_id = int(settings.get("workbook_id") or 1)
+    note = "دیتابیس {} • شناسهٔ {}".format(
+        settings.get("database") or "master_data", fa(workbook_id)
+    )
+    try:
+        stored = load_rows_from_database(settings)
+    except DatabaseError:
+        stored = None
+    except Exception as exc:
+        log_event(f"خواندن جدول‌های نرمال‌شده ناموفق بود: {type(exc).__name__}: {exc}")
+        stored = None
+    if stored and stored["raw_rows"]:
+        log_event(
+            f"داشبورد از جدول‌های دیتابیس ساخته می‌شود: "
+            f"{stored['data_rows']} سطر / شیت {stored['sheet_name']}"
+        )
+        return parse_workbook_rows(
+            stored["raw_rows"],
+            workbook_name=stored["filename"] or "کتاب کار دیتابیس",
+            source_sheet=str(settings.get("sheet_name") or stored["sheet_name"]),
+            pdf_folder=pdf_folder,
+            source_time=datetime.now(),
+            source_size=0,
+            source_note=note + " • جدول contracts",
+        )
     info = fetch_workbook_blob(settings)
     note = "دیتابیس {} • شناسهٔ {}".format(
         settings.get("database") or "master_data", fa(int(settings.get("workbook_id") or 1))
     )
-    return parse_workbook_bytes(
+    data = parse_workbook_bytes(
         info["filename"],
         info["data"],
         sheet_name=str(settings.get("sheet_name") or SHEET_NAME_DEFAULT),
@@ -2490,6 +2856,12 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
         source_size=int(info.get("size") or len(info["data"])),
         source_note=note,
     )
+    try:
+        migrate_blob_to_tables(settings, info)
+        log_event("کتاب کار ذخیره‌شده به جدول‌های نرمال‌شده منتقل شد")
+    except Exception as exc:
+        log_event(f"انتقال کتاب کار به جدول‌ها ناموفق بود: {type(exc).__name__}: {exc}")
+    return data
 
 
 def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
@@ -2807,20 +3179,16 @@ def parse_workbook_bytes(
     source_note: str = "",
 ) -> DashboardData:
     """ساخت کامل داده‌های داشبورد از بایت‌های کتاب کار (خوانده‌شده از دیتابیس)."""
-    workbook_name = str(filename or "کتاب کار")
     if openpyxl is None:
         raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
     if not blob:
         raise ExcelDataError("محتوای کتاب کار خالی است.")
-
-    warnings: List[str] = []
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
     except Exception as exc:
         raise ExcelDataError(
             f"کتاب کار ذخیره‌شده در دیتابیس باز نشد:\n{exc}"
         ) from exc
-
     try:
         sheet_names = list(workbook.sheetnames)
         target = sheet_name if sheet_name in sheet_names else None
@@ -2840,7 +3208,30 @@ def parse_workbook_bytes(
             workbook.close()
         except Exception:
             pass
+    return parse_workbook_rows(
+        raw_rows,
+        workbook_name=str(filename or "کتاب کار"),
+        source_sheet=target,
+        pdf_folder=pdf_folder,
+        source_time=source_time,
+        source_size=source_size or len(blob),
+        source_note=source_note,
+    )
 
+
+def parse_workbook_rows(
+    raw_rows: List[List[Any]],
+    workbook_name: str = "کتاب کار",
+    source_sheet: str = SHEET_NAME_DEFAULT,
+    pdf_folder: str = "",
+    source_time: Optional[datetime] = None,
+    source_size: int = 0,
+    source_note: str = "",
+) -> DashboardData:
+    """همان ساخت داشبورد، اما از ردیف‌های آمادهٔ شیت (فایل یا دیتابیس)."""
+    workbook_name = str(workbook_name or "کتاب کار")
+    target = source_sheet or SHEET_NAME_DEFAULT
+    warnings: List[str] = []
     if len(raw_rows) < 4:
         raise ExcelDataError("ساختار شیت غیرمنتظره است (کمتر از ۴ ردیف دارد).")
 
@@ -3045,7 +3436,7 @@ def parse_workbook_bytes(
         header_labels=header_labels,
         loaded_at=datetime.now(),
         source_mtime=source_mtime,
-        source_size=source_size or len(blob),
+        source_size=source_size,
         warnings=warnings,
         source_note=source_note,
         pdf_total=pdf_file_count(pdf_folder),
@@ -8490,6 +8881,7 @@ class SettingsPage(QWidget):
     openDataFolderRequested = pyqtSignal()
     testRequested = pyqtSignal()
     detectRequested = pyqtSignal()
+    verifyRequested = pyqtSignal()
     importRequested = pyqtSignal(str)
     localRunRequested = pyqtSignal(str)
     systemUpdateRequested = pyqtSignal(str)
@@ -8615,6 +9007,16 @@ class SettingsPage(QWidget):
         test_btn.setCursor(Qt.PointingHandCursor)
         test_btn.clicked.connect(self.testRequested.emit)
         actions_row.addWidget(test_btn)
+        verify_btn = QPushButton("بررسی اعداد دیتابیس")
+        verify_btn.setObjectName("Ghost")
+        verify_btn.setIcon(make_icon("check", colors["ink_2"], 15))
+        verify_btn.setCursor(Qt.PointingHandCursor)
+        verify_btn.setToolTip(
+            "تعداد قرارداد، کسورات و هشت کارت وضعیت را با SQL از جدول‌های دیتابیس "
+            "می‌شمارد و با اعداد داشبورد مقایسه می‌کند."
+        )
+        verify_btn.clicked.connect(self.verifyRequested.emit)
+        actions_row.addWidget(verify_btn)
         pdf_btn = QPushButton("پیدا کردن پوشهٔ PDF")
         pdf_btn.setObjectName("Ghost")
         pdf_btn.setIcon(make_icon("folder", colors["ink_2"], 15))
@@ -10255,6 +10657,7 @@ class MainWindow(QMainWindow):
         self.settings.reloadRequested.connect(self.load_data)
         self.settings.openDataFolderRequested.connect(self._open_data_folder)
         self.settings.testRequested.connect(self.test_database)
+        self.settings.verifyRequested.connect(self.verify_database_numbers)
         self.settings.detectRequested.connect(self.detect_database_settings)
         self.settings.importRequested.connect(self.import_excel)
         self.settings.systemUpdateRequested.connect(self.start_system_update)
@@ -10359,6 +10762,11 @@ class MainWindow(QMainWindow):
     @guarded("initial_load")
     def initial_load(self) -> None:
         log_event("بارگذاری اولیه آغاز شد")
+        self._startup_fallback_used = False
+        if not str(self.config.get("db_host") or "").strip():
+            # بدون میزبان، دیتابیس محلی روی همین سیستم امتحان می‌شود؛ اگر نبود
+            # به‌طور خودکار فایل محلی بارگذاری می‌شود (برنامه بسته نمی‌شود).
+            self.config.set("db_host", "127.0.0.1", save=False)
         if str(self.config.get("data_source") or "database") == "local":
             self.load_data(silent=True)
             return
@@ -10378,8 +10786,6 @@ class MainWindow(QMainWindow):
             self.topbar.set_connection(False)
             self._notify("اتصال خودکار غیرفعال شد — راهنمای تنظیمات", "alert")
             return
-        if not str(self.config.get("db_host") or "").strip():
-            self.show_page("settings")
         self.load_data(silent=True)
 
     @guarded("load_data")
@@ -10448,7 +10854,10 @@ class MainWindow(QMainWindow):
                 "داده‌ها از فایل اکسل محلی خوانده می‌شود (بدون دیتابیس)"
             )
         else:
-            self.topbar.set_connection(True)
+            self.topbar.set_connection(True, "دیتابیس")
+            self.topbar.status_pill.setToolTip(
+                "داده‌ها از جدول‌های دیتابیس MySQL (mehr_contracts) خوانده می‌شود"
+            )
         self.data = data
         # هر بخش جدا به‌روزرسانی می‌شود؛ خطا در یک بخش نباید بقیهٔ داشبورد را
         # صفر/خالی بگذارد (همین باگ باعث می‌شد همهٔ کارت‌ها صفر بمانند).
@@ -10498,6 +10907,35 @@ class MainWindow(QMainWindow):
             self.dashboard.set_data(empty)
             self.dashboard.show_error(first)
             self.reports.update_data(empty)
+        if silent and not self.data.records and not getattr(
+            self, "_startup_fallback_used", False
+        ):
+            # اجرای اول: دیتابیس در دسترس نبود؛ بی‌سر‌و‌صدا با فایل محلی اجرا می‌شود.
+            fallback = ""
+            for candidate in (
+                self.config.get("source_workbook_path"),
+                self.config.get("local_excel_path"),
+            ):
+                text = str(candidate or "").strip()
+                if text and Path(text).exists() and has_colorcode_sheet(text):
+                    fallback = text
+                    break
+            if not fallback:
+                fallback = find_seed_workbook(str(self.config.get("last_excel_path") or ""))
+            if fallback:
+                self._startup_fallback_used = True
+                log_event(f"دیتابیس در دسترس نبود؛ اجرای خودکار با فایل محلی: {fallback}")
+                self.config.set("data_source", "local", save=False)
+                self.config.set("local_excel_path", fallback, save=False)
+                self.config.save()
+                self.settings.set_importing(False, fallback)
+                self.settings.set_status(
+                    "دیتابیس در دسترس نبود — داده‌ها از فایل محلی خوانده شد: "
+                    + Path(fallback).name
+                )
+                self._notify("اجرای خودکار با فایل محلی (دیتابیس در دسترس نبود)", "table")
+                self.load_data(silent=True)
+                return
         if silent:
             if not self.data.records:
                 self.settings.set_status(
@@ -10562,16 +11000,90 @@ class MainWindow(QMainWindow):
         values = self.settings.connection_values()
         settings = dict(self.config.db_settings())
         settings.update(values)
+        settings["workbook_id"] = int(values.get("workbook_id") or 1)
+        counts = None
+        try:
+            counts = verify_database_numbers(settings)
+        except Exception:
+            counts = None
         try:
             info = fetch_workbook_blob(settings)
         except ExcelDataError as exc:
+            if counts and int(counts.get("total") or 0) > 0:
+                message = (
+                    f"اتصال موفق — {fa(int(counts['total']))} ردیف در جدول mehr_contracts"
+                )
+                self.settings.set_status(message)
+                self._notify("اتصال به دیتابیس برقرار است", "check")
+                return
             self.settings.set_status("اتصال ناموفق — " + str(exc).splitlines()[0])
             QMessageBox.warning(self, "آزمایش اتصال", str(exc))
             return
         size_kb = max(1, len(info["data"]) // 1024)
-        message = f"اتصال موفق — {info['filename']} ({fa(size_kb)} کیلوبایت)"
+        if counts and int(counts.get("total") or 0) > 0:
+            message = (
+                f"اتصال موفق — {info['filename']} ({fa(size_kb)} کیلوبایت) • "
+                f"{fa(int(counts['total']))} ردیف در mehr_contracts"
+            )
+        else:
+            message = (
+                f"اتصال موفق — {info['filename']} ({fa(size_kb)} کیلوبایت) • "
+                "جدول mehr_contracts خالی است؛ یک بار «بارگذاری در دیتابیس» را اجرا کنید"
+            )
         self.settings.set_status(message)
         self._notify("اتصال به دیتابیس برقرار است", "check")
+
+    @guarded("verify_database_numbers")
+    def verify_database_numbers(self) -> None:
+        """اعداد جدول‌های دیتابیس را با اعداد داشبورد مقایسه می‌کند."""
+        values = self.settings.connection_values()
+        settings = dict(self.config.db_settings())
+        settings.update(values)
+        settings["workbook_id"] = int(values.get("workbook_id") or 1)
+        try:
+            sql_counts = verify_database_numbers(settings)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "بررسی اعداد دیتابیس",
+                "خواندن جدول‌های دیتابیس ممکن نشد.\n"
+                "اگر کتاب کار را تازه بارگذاری کرده‌اید، یک بار «بارگذاری در دیتابیس» "
+                "را تکرار کنید تا جدول‌های mehr_contracts ساخته شوند.\n\n"
+                f"{exc}",
+            )
+            return
+        data = self.data
+        labels = [("total", "تعداد قرارداد"), ("deductions", "کسورات اسناد اختتام")]
+        labels += [(key, label) for key, label, _column in FLAG_DEFS]
+        lines: List[str] = []
+        mismatched = 0
+        flag_counts = data.flag_counts if data.records else {}
+        for key, label in labels:
+            db_value = int(sql_counts.get(key, 0) or 0)
+            if key == "total":
+                app_value = data.total_contracts
+            elif key == "deductions":
+                app_value = data.contracts_with_deductions
+            else:
+                app_value = int(flag_counts.get(key, 0) or 0)
+            same = db_value == app_value
+            if not same:
+                mismatched += 1
+            lines.append(
+                ("✅ " if same else "⚠️ ")
+                + f"{label}: دیتابیس {fa(db_value)} / داشبورد {fa(app_value)}"
+            )
+        box = QMessageBox(self)
+        box.setWindowTitle("بررسی اعداد دیتابیس")
+        box.setIcon(QMessageBox.Information if mismatched == 0 else QMessageBox.Warning)
+        box.setText(
+            "اعداد دیتابیس با داشبورد یکسان است."
+            if mismatched == 0 else
+            f"{fa(mismatched)} مورد اختلاف پیدا شد."
+        )
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+        log_event("بررسی اعداد دیتابیس: " + " | ".join(lines))
 
     def detect_database_settings(self) -> None:
         found = read_manager_settings()
@@ -11135,11 +11647,15 @@ class MainWindow(QMainWindow):
         self.config.save()
         self.settings.apply_connection(values)
         self._adopt_last_connection()
+        rows_text = (
+            f"، {fa(int(info['data_rows']))} ردیف در mehr_contracts"
+            if info.get("data_rows") else ""
+        )
         self.settings.set_status(
             f"فایل اکسل بارگذاری شد — {fa(info.get('size', 0))} بایت، "
-            f"{fa(len(info.get('sheets') or []))} شیت"
+            f"{fa(len(info.get('sheets') or []))} شیت{rows_text}"
         )
-        self._notify("فایل اکسل در دیتابیس ذخیره شد", "check")
+        self._notify("فایل اکسل در دیتابیس ذخیره شد؛ جدول mehr_contracts به‌روز است", "check")
         self.statusBar().showMessage("بارگذاری اکسل انجام شد؛ داده‌ها در حال خواندن…", 6000)
         self.load_data()
 
