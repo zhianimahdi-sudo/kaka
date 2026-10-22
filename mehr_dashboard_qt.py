@@ -50,6 +50,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import traceback
 from collections import Counter
 from dataclasses import dataclass
@@ -164,7 +165,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.1.2"
+APP_VERSION = "3.2.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -781,17 +782,106 @@ def log_event(message: str) -> None:
         pass
 
 
-def default_pdf_folder(config: Optional[AppConfig] = None) -> str:
+PDF_FOLDER_NAMES = ("PDF-MEHR", "pdf-mehr", "PDF", "pdf", "PDFs", "pdfs", "پیوست‌ها")
+
+
+def _expand_folder(value: Any) -> str:
+    """مسیر پوشه را باز می‌کند (متغیر محیطی، ~ و مسیر نسبی)."""
+    text = os.path.expandvars(os.path.expanduser(str(value or "").strip().strip('"').strip("'")))
+    if not text:
+        return ""
+    if not os.path.isabs(text):
+        candidate = app_dir() / text
+        if candidate.exists():
+            return str(candidate)
+    return text
+
+
+def _looks_like_contract_name(stem: str) -> bool:
+    """آیا نام فایل شبیه شمارهٔ قرارداد است؟ (مثل MEHR-003-1402)"""
+    text = str(stem or "").translate(_LATIN_DIGITS)
+    if re.search(r"(mehr|مهر)", text, re.IGNORECASE):
+        return True
+    return len(re.findall(r"\d+", text)) >= 2
+
+
+def _pdf_folder_score(folder: str) -> int:
+    """تعداد PDFهایی که نامشان شبیه شمارهٔ قرارداد است."""
+    try:
+        names = scan_pdf_files(folder, depth=1, limit=300)
+    except Exception:
+        return 0
+    score = 0
+    for rel in names:
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        if _looks_like_contract_name(stem):
+            score += 1
+    return score
+
+
+def resolve_pdf_folder(config: Optional[AppConfig] = None,
+                       extra_paths: Sequence[str] = ()) -> str:
+    """پوشهٔ PDF را از تنظیمات، کنار اکسل، کنار برنامه یا مسیر شبکه پیدا می‌کند."""
+    candidates: List[str] = []
+
+    def add(value: Any) -> None:
+        text = _expand_folder(value)
+        if text and text not in candidates:
+            candidates.append(text)
+
     if config is not None:
-        saved = str(config.get("pdf_folder") or "").strip()
-        if saved:
-            return saved
-    local = app_dir() / "PDF-MEHR"
-    if local.is_dir():
-        return str(local)
-    if os.path.isdir(ORIGINAL_PDF_FOLDER):
-        return ORIGINAL_PDF_FOLDER
-    return ""
+        add(config.get("pdf_folder"))
+    for value in extra_paths:
+        add(value)
+    excel_dirs: List[str] = []
+    if config is not None:
+        for key in ("local_excel_path", "last_excel_path"):
+            path = str(config.get(key) or "").strip()
+            if path:
+                folder = os.path.dirname(_expand_folder(path))
+                if folder and folder not in excel_dirs:
+                    excel_dirs.append(folder)
+    for base in excel_dirs:
+        for name in PDF_FOLDER_NAMES:
+            add(os.path.join(base, name))
+        add(base)
+    for base in (str(app_dir()), str(data_dir())):
+        for name in PDF_FOLDER_NAMES:
+            add(os.path.join(base, name))
+        add(base)
+    for base in (str(Path.home() / "Documents"), str(Path.home() / "Desktop")):
+        for name in PDF_FOLDER_NAMES:
+            add(os.path.join(base, name))
+    add(ORIGINAL_PDF_FOLDER)
+
+    explicit = _expand_folder(config.get("pdf_folder")) if config is not None else ""
+    if explicit and os.path.isdir(explicit):
+        return explicit
+
+    pool = candidates[1:] if explicit else candidates
+    best = ""
+    best_score = 0
+    for folder in pool:
+        if not os.path.isdir(folder) or not _pdf_folder_score(folder):
+            continue
+        score = _pdf_folder_score(folder)
+        if score > best_score:
+            best, best_score = folder, score
+    if best:
+        return best
+    # هیچ نام هم‌خوانی نبود؛ پوشه‌ای که بیشترین PDF را دارد
+    best_count = 0
+    for folder in pool:
+        if not os.path.isdir(folder):
+            continue
+        count = len(scan_pdf_files(folder, depth=1, limit=300))
+        if count > best_count:
+            best, best_count = folder, count
+    return best
+
+
+def default_pdf_folder(config: Optional[AppConfig] = None) -> str:
+    return resolve_pdf_folder(config)
 
 
 class DatabaseError(ExcelDataError):
@@ -1446,6 +1536,7 @@ class DashboardData:
     source_size: int
     warnings: List[str]
     source_note: str = ""
+    pdf_total: int = 0
 
     @property
     def excel_path(self) -> str:
@@ -1657,11 +1748,12 @@ def parse_workbook_bytes(
     pdf_index = build_pdf_index(pdf_folder)
     matched_pdfs = 0
     for record in records:
-        key = normalize_lookup_key(record.col3)
-        filename = pdf_index.get(key) if key else None
-        if filename:
-            record.pdf_file = filename
-            matched_pdfs += 1
+        for key in pdf_alias_keys(record.col3):
+            filename = pdf_index.get(key)
+            if filename:
+                record.pdf_file = filename
+                matched_pdfs += 1
+                break
 
     # ---- توزیع‌ها ----
     type_labels, type_values = value_counts([
@@ -1739,41 +1831,128 @@ def parse_workbook_bytes(
         source_size=source_size or len(blob),
         warnings=warnings,
         source_note=source_note,
+        pdf_total=pdf_file_count(pdf_folder),
     )
 
 
-_PDF_INDEX_CACHE: Dict[str, Any] = {"folder": None, "mtime": None, "index": {}}
+_PDF_INDEX_CACHE: Dict[str, Any] = {"folder": None, "stamp": None, "time": 0.0, "index": {}}
+
+_PDF_NOISE_WORDS = {
+    "pdf", "copy", "final", "signed", "scan", "scanned", "new", "old", "doc", "document",
+    "نسخه", "نسخهٔ", "کپی", "امضا", "امضاشده", "امضا شده", "نهایی", "اسکن", "اسکن‌شده",
+    "پیوست", "ضمیمه", "قرارداد", "تایید", "تأیید", "ارسال", "دریافت", "شماره", "نمبر",
+    "دانلود", "ویرایش", "اصل", "کامل", "بروزرسانی", "به‌روزرسانی", "پاک", "پاک‌شده",
+}
+
+
+def _pdf_noise_token(token: str) -> bool:
+    cleaned = normalize_per(str(token)).strip(" .-_()[]{}")
+    if not cleaned:
+        return True
+    if cleaned.isdigit():
+        return False
+    return cleaned in _PDF_NOISE_WORDS
+
+
+def scan_pdf_files(folder: str, depth: int = 2, limit: int = 20000) -> List[str]:
+    """فهرست مسیرهای نسبی PDFهای پوشه و زیرپوشه‌ها (تا دو سطح)."""
+    results: List[str] = []
+    if not folder or not os.path.isdir(folder):
+        return results
+    root = os.path.abspath(folder)
+    stack: List[Tuple[str, int]] = [(root, 0)]
+    while stack and len(results) < limit:
+        current, level = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if level + 1 <= depth and not entry.name.startswith("."):
+                        stack.append((entry.path, level + 1))
+                    continue
+                if not entry.is_file() or not entry.name.lower().endswith(".pdf"):
+                    continue
+            except OSError:
+                continue
+            results.append(os.path.relpath(entry.path, root))
+            if len(results) >= limit:
+                break
+    results.sort(key=normalize_per)
+    return results
+
+
+def pdf_alias_keys(value: Any) -> List[str]:
+    """کلیدهای ممکن برای تطبیق نام فایل PDF با شمارهٔ قرارداد."""
+    if value is None:
+        return []
+    raw = str(value).translate(_LATIN_DIGITS)
+    raw = re.sub(r"\(\s*\d+\s*\)", " ", raw)
+    raw = re.sub(r"\[\s*\d+\s*\]", " ", raw)
+    keys: List[str] = []
+
+    def add(key: str) -> None:
+        if key and key not in keys:
+            keys.append(key)
+
+    add(normalize_lookup_key(raw))
+
+    tokens = [t for t in re.split(r"[\s_\-./\\()\[\]{}•·,،;:]+", raw) if t]
+    while tokens and _pdf_noise_token(tokens[0]):
+        tokens.pop(0)
+    while tokens and _pdf_noise_token(tokens[-1]):
+        tokens.pop()
+    tokens = [t for t in tokens if not _pdf_noise_token(t)]
+    if tokens:
+        add(normalize_lookup_key(" ".join(tokens)))
+
+    groups = re.findall(r"\d+", raw)
+    if groups:
+        add("".join(groups))
+        add("".join((group.lstrip("0") or "0") for group in groups))
+        if len(groups) > 1:
+            add("".join(reversed(groups)))
+            add("".join((group.lstrip("0") or "0") for group in reversed(groups)))
+    return keys
 
 
 def build_pdf_index(folder: str, limit: int = 20000) -> Dict[str, str]:
-    """ایندکس نام فایل‌های PDF بر اساس کلید نرمال‌شده (مثل نسخهٔ وب)."""
-    index: Dict[str, str] = {}
+    """ایندکس PDFها: کلید نرمال‌شده (و کلیدهای جایگزین) → مسیر نسبی فایل."""
     if not folder or not os.path.isdir(folder):
-        return index
+        return {}
     try:
-        folder_mtime = os.path.getmtime(folder)
+        stamp = os.path.getmtime(folder)
     except OSError:
-        folder_mtime = None
+        stamp = None
     cached = _PDF_INDEX_CACHE
-    if cached["folder"] == folder and cached["mtime"] == folder_mtime and cached["index"]:
+    now = time.time()
+    if (cached.get("folder") == folder and cached.get("stamp") == stamp
+            and now - float(cached.get("time") or 0.0) < 20
+            and cached.get("index")):
         return dict(cached["index"])  # type: ignore[arg-type]
-    try:
-        with os.scandir(folder) as entries:
-            for count, entry in enumerate(entries):
-                if count >= limit:
-                    break
-                try:
-                    if not entry.is_file() or not entry.name.lower().endswith(".pdf"):
-                        continue
-                except OSError:
-                    continue
-                key = normalize_lookup_key(os.path.splitext(entry.name)[0])
-                if key and key not in index:
-                    index[key] = entry.name
-    except Exception as exc:
-        print(f"هشدار در ایندکس پوشهٔ PDF: {exc}")
-    _PDF_INDEX_CACHE.update({"folder": folder, "mtime": folder_mtime, "index": dict(index)})
+
+    index: Dict[str, str] = {}
+    ambiguous = set()
+    for rel in scan_pdf_files(folder, limit=limit):
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        for key in pdf_alias_keys(stem):
+            if key in index and index[key] != rel:
+                ambiguous.add(key)
+            else:
+                index[key] = rel
+    for key in ambiguous:
+        index.pop(key, None)
+    _PDF_INDEX_CACHE.update(
+        {"folder": folder, "stamp": stamp, "time": now, "index": dict(index)}
+    )
     return index
+
+
+def pdf_file_count(folder: str) -> int:
+    """تعداد فایل‌های PDF موجود در پوشه (و زیرپوشه‌ها)."""
+    return len(scan_pdf_files(folder))
 
 
 def empty_dashboard(message: str = "") -> DashboardData:
@@ -5977,9 +6156,25 @@ class DashboardPage(QWidget):
             data.contracts_with_deductions / total,
             badge=f"{fa(round(data.contracts_with_deductions / total * 100))}٪",
         )
-        self.tiles["pdf"].set_values(
-            fa(pdf_count), "قرارداد دارای فایل پیوست PDF", pdf_count / total,
-        )
+        pdf_hint = "قرارداد دارای فایل پیوست PDF"
+        pdf_tip = ""
+        if pdf_count == 0:
+            if not data.pdf_folder:
+                pdf_hint = "پوشهٔ PDF تنظیم نشده"
+                pdf_tip = "پوشهٔ PDF پیدا نشد؛ در تنظیمات، پوشهٔ فایل‌های PDF را انتخاب کنید."
+            elif not data.pdf_total:
+                pdf_hint = "پوشهٔ PDF خالی است"
+                pdf_tip = f"در پوشهٔ \u202a{data.pdf_folder}\u202c هیچ فایل PDF‌ای نیست."
+            else:
+                pdf_hint = f"{fa(data.pdf_total)} فایل بدون تطبیق"
+                pdf_tip = (
+                    f"{fa(data.pdf_total)} فایل PDF در پوشه هست، ولی نام هیچ‌کدام با شمارهٔ "
+                    "قرارداد (مثل MEHR-003-1402.pdf) هم‌خوان نیست."
+                )
+        self.tiles["pdf"].set_values(fa(pdf_count), pdf_hint, pdf_count / total)
+        if not pdf_tip and data.pdf_folder:
+            pdf_tip = f"پوشهٔ PDF: \u202a{data.pdf_folder}\u202c"
+        self.tiles["pdf"].setToolTip(pdf_tip)
         if data.total_contracts == 0:
             for key in ("all", "progress", "deductions", "pdf"):
                 self.tiles[key].set_values("—", "داده‌ای برای نمایش نیست", None, badge="")
@@ -6809,24 +7004,23 @@ class PdfLibraryPage(QWidget):
 
     def set_folder(self, folder: str) -> None:
         self.folder = folder or ""
-        self.subtitle.setText(f"پوشه: \u202a{self.folder}\u202c" if self.folder
-                              else "پوشهٔ PDF تنظیم نشده است.")
         self.refresh_list()
 
     def refresh_list(self) -> None:
         self._files = []
+        error = ""
         if self.folder and os.path.isdir(self.folder):
             try:
-                with os.scandir(self.folder) as entries:
-                    for entry in entries:
-                        try:
-                            if entry.is_file() and entry.name.lower().endswith(".pdf"):
-                                self._files.append(entry.name)
-                        except OSError:
-                            continue
+                self._files = scan_pdf_files(self.folder, depth=2, limit=5000)
             except Exception as exc:
-                self.footer_label.setText(f"خطا در خواندن پوشه: {exc}")
-        self._files.sort(key=normalize_per)
+                error = str(exc)
+        if self.folder:
+            subtitle = f"پوشه: \u202a{self.folder}\u202c — {fa(len(self._files))} فایل PDF (زیرپوشه‌ها هم)"
+        else:
+            subtitle = "پوشهٔ PDF پیدا نشد — با دکمهٔ «انتخاب پوشه» مسیر فایل‌های PDF را بدهید."
+        if error:
+            subtitle = f"خطا در خواندن پوشه: {error}"
+        self.subtitle.setText(subtitle)
         self._apply_filter()
         self.count_chip.setText(bidi(f"{fa(len(self._files))} فایل"))
 
@@ -6847,7 +7041,7 @@ class PdfLibraryPage(QWidget):
             self.list_widget.addItem(item)
         if not shown:
             message = ("پوشه‌ای انتخاب نشده است." if not self.folder
-                       else "فایل PDF‌ای در این پوشه پیدا نشد.")
+                       else "فایل PDF‌ای در این پوشه و زیرپوشه‌ها پیدا نشد.")
             item = QListWidgetItem(message)
             item.setFlags(Qt.NoItemFlags)
             self.list_widget.addItem(item)
@@ -6967,7 +7161,8 @@ class SettingsPage(QWidget):
 
         form.addWidget(QLabel("پوشهٔ PDF:"), 4, 0)
         self.pdf_edit = QLineEdit(str(config.get("pdf_folder") or ""))
-        self.pdf_edit.setPlaceholderText("پوشه‌ای که فایل‌های PDF قراردادها در آن است")
+        resolved_pdf = resolve_pdf_folder(config)
+        self.pdf_edit.setPlaceholderText(resolved_pdf or "پوشه‌ای که فایل‌های PDF قراردادها در آن است")
         self.pdf_edit.setMinimumWidth(96)
         form.addWidget(self.pdf_edit, 4, 1, 1, 2)
         browse_pdf = QPushButton("انتخاب…")
@@ -6975,6 +7170,8 @@ class SettingsPage(QWidget):
         browse_pdf.setCursor(Qt.PointingHandCursor)
         browse_pdf.clicked.connect(self._browse_pdf)
         form.addWidget(browse_pdf, 4, 3)
+        self.pdf_note = _muted("")
+        form.addWidget(self.pdf_note, 5, 0, 1, 4)
         form.setColumnStretch(1, 1)
         form.setColumnStretch(3, 1)
         source_card.body.addLayout(form)
@@ -6996,6 +7193,13 @@ class SettingsPage(QWidget):
         test_btn.setCursor(Qt.PointingHandCursor)
         test_btn.clicked.connect(self.testRequested.emit)
         actions_row.addWidget(test_btn)
+        pdf_btn = QPushButton("پیدا کردن پوشهٔ PDF")
+        pdf_btn.setObjectName("Ghost")
+        pdf_btn.setIcon(make_icon("folder", colors["ink_2"], 15))
+        pdf_btn.setToolTip("پوشهٔ PDF را کنار فایل اکسل، کنار برنامه و در مسیر شبکه جستجو می‌کند.")
+        pdf_btn.setCursor(Qt.PointingHandCursor)
+        pdf_btn.clicked.connect(self._auto_pdf_folder)
+        actions_row.addWidget(pdf_btn)
         actions_row.addStretch(1)
         source_card.body.addLayout(actions_row)
         source_card.body.addWidget(_muted(
@@ -7197,6 +7401,7 @@ class SettingsPage(QWidget):
         self.reload_button.clicked.connect(self.reloadRequested.emit)
         save_bar.addWidget(self.reload_button)
         layout.addLayout(save_bar)
+        self.refresh_pdf_note()
 
     def _browse_excel(self) -> None:
         start = self.excel_edit.text().strip() or str(app_dir())
@@ -7235,11 +7440,35 @@ class SettingsPage(QWidget):
             "در حال بارگذاری…" if active else "بارگذاری در دیتابیس"
         )
 
+    def refresh_pdf_note(self) -> None:
+        folder = str(self.pdf_edit.text() or "").strip() or resolve_pdf_folder(self.config)
+        if not folder:
+            self.pdf_note.setText("پوشهٔ PDF پیدا نشد؛ با «انتخاب…» مسیر آن را بدهید.")
+            return
+        if not os.path.isdir(folder):
+            self.pdf_note.setText(f"این مسیر وجود ندارد: {folder}")
+            return
+        total = len(scan_pdf_files(folder, depth=2, limit=5000))
+        self.pdf_note.setText(
+            f"\u202a{folder}\u202c — {fa(total)} فایل PDF شناسایی شد"
+        )
+
+    def _auto_pdf_folder(self) -> None:
+        folder = resolve_pdf_folder(self.config)
+        if not folder:
+            self.pdf_note.setText("پوشهٔ PDF پیدا نشد؛ با «انتخاب…» مسیر آن را بدهید.")
+            return
+        self.pdf_edit.setText(folder)
+        self.refresh_pdf_note()
+        self.set_status("پوشهٔ PDF انتخاب شد — «ذخیره و اعمال» را بزنید.")
+
     def _browse_pdf(self) -> None:
         start = self.pdf_edit.text() or str(app_dir())
         folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
         if folder:
             self.pdf_edit.setText(folder)
+            self.refresh_pdf_note()
+            self.set_status("پوشهٔ PDF انتخاب شد — «ذخیره و اعمال» را بزنید.")
 
     def connection_values(self) -> Dict[str, Any]:
         """مقادیر فرم اتصال برای آزمایش/ذخیره."""
@@ -7329,6 +7558,7 @@ class SettingsPage(QWidget):
         self.workbook_spin.setValue(int(config.get("db_workbook_id") or 1))
         self.sheet_edit.setText(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
         self.pdf_edit.setText(str(config.get("pdf_folder") or ""))
+        self.refresh_pdf_note()
         theme_index = self.theme_combo.findData(str(config.get("theme") or "light"))
         self.theme_combo.setCurrentIndex(max(0, theme_index))
         self.font_spin.setValue(int(config.get("font_size") or 10))
@@ -7367,7 +7597,9 @@ class HelpPage(QWidget):
             "فیلد رمز را خالی بگذارید (رمز اجباری نیست).",
             "در همان صفحه، فایل اکسل را با «بارگذاری فایل اکسل» انتخاب و در دیتابیس ذخیره کنید؛ "
             "دیتابیس و جدول‌ها در صورت نبود خودکار ساخته می‌شوند.",
-            "پوشهٔ PDF را انتخاب کنید تا ستون «فایل» و پنل جزئیات فعال شود، سپس Ctrl+R را بزنید.",
+            "پوشهٔ PDF را انتخاب کنید (برنامه خودش هم کنار فایل اکسل و کنار برنامه "
+            "می‌گردد)؛ نام هر PDF باید شمارهٔ قرارداد باشد، مثل MEHR-003-1402.pdf — "
+            "پسوندهایی مثل «نسخهٔ نهایی» یا «(1)» هم مشکلی ایجاد نمی‌کند. سپس Ctrl+R را بزنید.",
             "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
         ]
         for number, text in enumerate(steps, start=1):
@@ -8667,7 +8899,10 @@ class MainWindow(QMainWindow):
             self.show_page("settings")
             return
         settings = self.config.db_settings()
-        pdf_folder = str(self.config.get("pdf_folder") or "")
+        pdf_folder = resolve_pdf_folder(self.config)
+        if pdf_folder and not str(self.config.get("pdf_folder") or "").strip():
+            self.config.set("pdf_folder", pdf_folder, save=False)
+            log_event(f"پوشهٔ PDF خودکار شناسایی شد: {pdf_folder}")
         local_path = ""
         if str(self.config.get("data_source") or "database") == "local":
             candidate = str(self.config.get("local_excel_path") or "")
@@ -9124,7 +9359,7 @@ class MainWindow(QMainWindow):
         )
 
     def _pdf_path(self, filename: str) -> str:
-        folder = self.data.pdf_folder or str(self.config.get("pdf_folder") or "")
+        folder = self.data.pdf_folder or resolve_pdf_folder(self.config)
         if not folder:
             return ""
         return os.path.join(folder, filename)
