@@ -55,7 +55,7 @@ import threading
 import time
 import traceback
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.8"
+APP_VERSION = "3.5.9"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1570,6 +1570,8 @@ def import_workbook_to_database(
 # ==========================================================================
 SYSTEM_UPDATE_FIRST_COLUMN = 12   # ستون L
 SYSTEM_UPDATE_LAST_COLUMN = 36    # ستون AJ
+# خلاصهٔ آخرین همگام‌سازی «خروجی کندو ← فایل سامانه» و «colorcode ← خروجی کندو»
+LAST_SYNC_INFO: Dict[str, Any] = {}
 _SYSTEM_UPDATE_OK_WORDS = {"okk", "ok"}
 
 # علامت‌هایی که در ستون‌های وضعیت/کسورات «ثبت‌شده» حساب می‌شوند.
@@ -1821,6 +1823,16 @@ def _guess_contract_column(rows: Sequence[Sequence[Any]], start: int,
 
 
 @dataclass
+class SystemUpdateRecord:
+    """یک ردیف فایل سامانه؛ مقدارها به‌همراه محاسبه‌های خود شیت «خروجی کندو»."""
+
+    key: str
+    values: List[Any]          # ستون‌های L..AJ فایل سامانه، به‌ترتیب سرستون‌ها
+    requirements: List[str]    # ستون‌های AL..BH: M/O/N/A (الزام هر مدرک)
+    combos: List[str]          # ستون‌های BK..CG: «1-M» / «0-M» / ...
+
+
+@dataclass
 class SystemUpdatePlan:
     source_path: str
     source_sheet: str
@@ -1839,6 +1851,8 @@ class SystemUpdatePlan:
     last_column: int
     notes: List[str]
     source_sheets: List[str]
+    source_headers: List[str] = field(default_factory=list)
+    records: List[SystemUpdateRecord] = field(default_factory=list)
 
 
 def _column_letter(index: int) -> str:
@@ -1991,20 +2005,20 @@ def plan_system_update(source_path: str, target_blob: bytes,
             notes.append("ستون شمارهٔ قرارداد از روی داده‌ها شناسایی شد.")
 
     # ۱) تطبیق با شمارهٔ قرارداد
-    contract_mapping: List[Tuple[int, List[Any]]] = []
+    contract_mapping: List[Tuple[int, Sequence[Any]]] = []
     contract_unmatched: List[str] = []
     for row in filtered:
         key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
         target_row = target_rows.get(key) if key else None
         if target_row:
-            contract_mapping.append((target_row, list(row[first_column - 1:last_column])))
+            contract_mapping.append((target_row, row))
         else:
             contract_unmatched.append(
                 txt(row[contract_col] if contract_col < len(row) else "") or "—"
             )
 
     # ۲) تطبیق با نام شرکت (اگر ستون نام در فایل سامانه باشد)
-    name_mapping: List[Tuple[int, List[Any]]] = []
+    name_mapping: List[Tuple[int, Sequence[Any]]] = []
     name_unmatched: List[str] = []
     if target_name_rows and filtered:
         name_col, name_hits = -1, 0
@@ -2021,7 +2035,7 @@ def plan_system_update(source_path: str, target_blob: bytes,
                 key = normalize_lookup_key(txt(row[name_col] if name_col < len(row) else ""))
                 target_row = target_name_rows.get(key) if key else None
                 if target_row:
-                    name_mapping.append((target_row, list(row[first_column - 1:last_column])))
+                    name_mapping.append((target_row, row))
                 else:
                     name_unmatched.append(
                         txt(row[contract_col] if contract_col < len(row) else "") or "—"
@@ -2029,8 +2043,8 @@ def plan_system_update(source_path: str, target_blob: bytes,
 
     # ۳) چسباندن بلوکی به‌همان روش دستی: L..AJ از بالا تا انتها، به‌ترتیب ردیف‌ها
     order_rows = min(len(filtered), len(data_rows))
-    order_mapping: List[Tuple[int, List[Any]]] = [
-        (data_rows[order], list(row[first_column - 1:last_column]))
+    order_mapping: List[Tuple[int, Sequence[Any]]] = [
+        (data_rows[order], row)
         for order, row in enumerate(filtered[:order_rows])
     ]
 
@@ -2039,34 +2053,45 @@ def plan_system_update(source_path: str, target_blob: bytes,
     name_ratio = len(name_mapping) / filtered_count
     equal_rows = len(filtered) == len(data_rows)
 
-    mapping: List[Tuple[int, List[Any]]] = []
+    picked: List[Tuple[int, Sequence[Any]]] = []
     unmatched: List[str] = []
     method = "شمارهٔ قرارداد"
     if contract_ratio >= 0.9:
-        mapping, unmatched = contract_mapping, contract_unmatched
+        picked, unmatched = contract_mapping, contract_unmatched
     elif name_ratio >= 0.9:
-        mapping, unmatched = name_mapping, name_unmatched
+        picked, unmatched = name_mapping, name_unmatched
         method = "نام شرکت"
         notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
     elif equal_rows and order_mapping:
-        mapping = order_mapping
+        picked = order_mapping
         method = "ترتیب ردیف‌ها"
         notes.append(
             "مثل روش دستی، ستون‌های L تا AJ به‌ترتیب ردیف‌ها روی شیت مقصد نوشته می‌شود "
             "(تعداد ردیف‌های «اجرا - مهر» و شیت مقصد برابر است)."
         )
     elif contract_ratio >= 0.5:
-        mapping, unmatched = contract_mapping, contract_unmatched
+        picked, unmatched = contract_mapping, contract_unmatched
     elif name_ratio >= 0.5:
-        mapping, unmatched = name_mapping, name_unmatched
+        picked, unmatched = name_mapping, name_unmatched
         method = "نام شرکت"
         notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
     elif order_mapping:
-        mapping = order_mapping
+        picked = order_mapping
         method = "ترتیب ردیف‌ها"
         notes.append(
             f"تعداد ردیف‌ها برابر نبود (فایل سامانه: {fa(len(filtered))}، شیت مقصد: "
             f"{fa(len(data_rows))})؛ {fa(len(order_mapping))} ردیف اول به‌ترتیب نوشته شد."
+        )
+
+    mapping: List[Tuple[int, List[Any]]] = []
+    records: List[SystemUpdateRecord] = []
+    for target_row, row in picked:
+        values = list(row[first_column - 1:last_column])
+        while len(values) < (last_column - first_column + 1):
+            values.append(None)
+        mapping.append((target_row, values))
+        records.append(
+            _build_update_record(row, values, contract_col, first_column - 1)
         )
     if not filtered:
         raise ExcelDataError(
@@ -2101,7 +2126,41 @@ def plan_system_update(source_path: str, target_blob: bytes,
         last_column=last_column,
         notes=notes,
         source_sheets=source_names,
+        source_headers=_plan_source_headers(rows, header_row, first_column, last_column),
+        records=records,
     )
+
+
+def _plan_source_headers(rows: Sequence[Sequence[Any]], header_row: int,
+                         first_column: int, last_column: int) -> List[str]:
+    """نام ستون‌های L..AJ در فایل سامانه (به‌ترتیب همان ستون‌ها)."""
+    count = max(0, last_column - first_column + 1)
+    header = list(rows[header_row]) if 0 <= header_row < len(rows) else []
+    names = [txt(header[first_column - 1 + offset]) if first_column - 1 + offset < len(header)
+             else "" for offset in range(count)]
+    return names
+
+
+def _build_update_record(row: Sequence[Any], values: List[Any],
+                         contract_col: int, base_index: int) -> SystemUpdateRecord:
+    """ردیف فایل سامانه + ستون‌های محاسبهٔ شیت «خروجی کندو» (AL..BH و BK..CG)."""
+    def slice_of(offset: int) -> List[str]:
+        start = base_index + offset
+        if start + 23 > len(row):
+            return []
+        chunk = [txt(row[start + index]).strip() for index in range(23)]
+        return chunk
+
+    requirements = slice_of(26)   # AL..BH
+    combos = slice_of(51)         # BK..CG
+    codes = {"m", "o", "n", "a", "n/a", "na", "-", ""}
+    if requirements and any(item.lower() not in codes for item in requirements):
+        requirements = []
+    if combos and not any(re.match(r"^[01]\s*-", item) for item in combos):
+        combos = []
+    key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+    return SystemUpdateRecord(key=key, values=values,
+                              requirements=requirements, combos=combos)
 
 
 def _sheet_system_scan(workbook, sheet_name: str, source_keys: set) -> Dict[str, Any]:
@@ -2356,12 +2415,395 @@ def source_contract_keys(source_path: str) -> set:
     return keys
 
 
+# ---------------------------------------------------------------------------
+# محاسبه در شیت «خروجی کندو» و نشستن نتیجه در شیت «colorcode»
+# ---------------------------------------------------------------------------
+# روش دستی کاربر: دادهٔ L..AJ فایل سامانه در ستون‌های هم‌نام شیت «خروجی کندو»
+# پیست می‌شود؛ همان شیت با ماتریس الزامات (AL..BH) و ستون‌های «1-M» وضعیت هر
+# مدرک را حساب می‌کند و ستون درصد را می‌دهد؛ بعد نتیجه در «colorcode» می‌نشیند.
+# این بخش همان زنجیره را بازتولید می‌کند و هیچ‌وقت ستون‌ها را بر اساس «ترتیب»
+# روی شیت داشبورد نمی‌نویسد (ترتیب L..AH در دو شیت یکی نیست).
+
+_PLAN_TOTAL_DOCS_OFFSET = 23    # AI نسبت به L
+_PLAN_PERCENT_OFFSET = 24       # AJ نسبت به L
+_PLAN_REQUIREMENT_OFFSET = 26   # AL نسبت به L
+_PLAN_COMBO_OFFSET = 51         # BK نسبت به L
+
+
+def _header_key(value: Any) -> str:
+    """کلید مقایسهٔ سرستون‌ها (فقط حرف و رقم، بدون فاصله و نیم‌فاصله)."""
+    text = normalize_per(txt(value))
+    return re.sub(r"[^0-9a-z\u0600-\u06ff]+", "", text)
+
+
+def _match_header(name: Any, candidates: Sequence[Any]) -> int:
+    """نمایهٔ سرستونی که با «name» یکی است؛ اگر دقیق نبود، نزدیک‌ترین.
+
+    منفی یعنی هیچ سرستونی هم‌خوان نبود (در آن صورت با ترتیب ستون‌ها جلو می‌رویم).
+    """
+    target = _header_key(name)
+    if not target:
+        return -1
+    for index, candidate in enumerate(candidates):
+        if _header_key(candidate) == target:
+            return index
+    best, best_ratio = -1, 0.0
+    for index, candidate in enumerate(candidates):
+        key = _header_key(candidate)
+        if len(key) < 4 or len(target) < 4:
+            continue
+        if key in target or target in key:
+            ratio = min(len(key), len(target)) / max(len(key), len(target))
+            if ratio >= 0.55 and ratio > best_ratio:
+                best, best_ratio = index, ratio
+    return best
+
+
+def _plan_percent(value: Any) -> Optional[float]:
+    """درصد ۰..۱ از سلول: «۱۰۰٪»، «50%»، 0.5 و 50 همه پذیرفته می‌شوند."""
+    if is_blank(value):
+        return None
+    text = txt(value).replace("%", "").replace("٪", "").strip()
+    number = num(text)
+    if number is None:
+        return None
+    if number > 1.5:
+        number = number / 100.0
+    if number < 0:
+        return None
+    return round(min(1.0, number), 6)
+
+
+def _best_header_row(grid: Sequence[Sequence[Any]], names: Sequence[Any],
+                     minimum: int = 5, limit: int = 12) -> Tuple[int, int]:
+    """ردیفی که بیشترین سرستون هم‌نام را دارد (ردیف سرستون کتاب کار)."""
+    best_row, best_count = -1, 0
+    for row_index, row in enumerate(list(grid)[:limit]):
+        count = 0
+        for name in names:
+            if _match_header(name, row) >= 0:
+                count += 1
+        if count > best_count:
+            best_row, best_count = row_index, count
+    if best_count < minimum:
+        return -1, best_count
+    return best_row, best_count
+
+
+def _sheet_key_rows(sheet, keys: set, width: int = 0) -> Tuple[int, Dict[str, int]]:
+    """ستون شمارهٔ قرارداد (بیشترین هم‌خوانی با keys) و نقشهٔ کلید → ردیف.
+
+    اول با یک نمونهٔ کوچک ستون را پیدا می‌کند و بعد فقط همان ستون را کامل
+    می‌خواند؛ برای شیت‌های ۱۲۰۰ ردیفی خیلی سریع‌تر از اسکن کامل است.
+    """
+    if not keys:
+        return -1, {}
+    width = width or max(1, min(int(sheet.max_column or 1), 90))
+    max_row = min(int(sheet.max_row or 0), 20000)
+
+    def key_of(value: Any) -> str:
+        if value is None or isinstance(value, (bool, int, float)):
+            return ""
+        text = txt(value)
+        if len(text) < 4 or len(text) > 60:
+            return ""
+        return normalize_lookup_key(text)
+
+    hits: Dict[int, int] = {}
+    for row in sheet.iter_rows(min_row=1, max_row=min(max_row, 80),
+                               max_col=width, values_only=True):
+        for column, value in enumerate(row):
+            key = key_of(value)
+            if key and key in keys:
+                hits[column] = hits.get(column, 0) + 1
+    if not hits:
+        return -1, {}
+    best = max(hits, key=lambda column: (hits[column], -column))
+    rows: Dict[str, int] = {}
+    for row_number, (value,) in enumerate(
+        sheet.iter_rows(min_row=1, max_row=max_row, min_col=best + 1, max_col=best + 1,
+                        values_only=True),
+        start=1,
+    ):
+        key = key_of(value)
+        if key and key in keys:
+            rows.setdefault(key, row_number)
+    return best, rows
+
+
+def _find_export_sheet(workbook, keys: set) -> str:
+    """شیت «خروجی کندو» (یا هر شیتی که خروجی سامانه در آن پیست می‌شود)."""
+    best_name, best_score = "", 0
+    for name in workbook.sheetnames:
+        sheet_name = str(name)
+        if is_dashboard_sheet_name(sheet_name):
+            continue
+        sheet = workbook[sheet_name]
+        width = max(1, min(int(sheet.max_column or 1), 90))
+        grid = [list(row) for row in sheet.iter_rows(
+            min_row=1, max_row=8, max_col=width, values_only=True)]
+        sub_project = any(
+            _looks_like_sub_project_header(value)
+            for row in grid for value in row
+        )
+        _column, key_rows = _sheet_key_rows(sheet, keys, width)
+        score = len(key_rows)
+        if sub_project:
+            score += 12
+        text = normalize_per(sheet_name)
+        if "کندو" in text or "kandoo" in text or "export" in text:
+            score += 8
+        if score > best_score:
+            best_name, best_score = sheet_name, score
+    return best_name if best_score >= 5 else ""
+
+
+def _doc_state(count_value: Any, required: Any, combo: Any, unknown: str = "") -> str:
+    """وضعیت یک مدرک: «OK» یعنی ثبت شده/لازم نیست، «M» یعنی لازم و ثبت‌نشده.
+
+    ترتیب تصمیم همان ترتیب فرمول‌های شیت «خروجی کندو» است: اول ستون «1-M/0-M»
+    (BK..CG)، بعد ماتریس الزامات (AL..BH) و در آخر شمارش خود مدرک.
+    """
+    number = num(count_value)
+    if number is not None and abs(number) > 0:
+        return "OK"
+    text = txt(combo).strip()
+    if text:
+        if re.match(r"^0\s*-\s*M$", text, re.IGNORECASE):
+            return "M"
+        if re.match(r"^[01]\s*-", text):
+            return "OK"
+    code = txt(required).strip().upper()
+    if code:
+        return "M" if code == "M" else "OK"
+    if is_blank(count_value) and unknown:
+        return unknown
+    if number is not None and abs(number) <= 0 and unknown:
+        return unknown
+    return ""
+
+
+def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
+                        headers: List[str], records: List[SystemUpdateRecord],
+                        keys: set, info: Dict[str, Any]) -> None:
+    """دادهٔ فایل سامانه را در ستون‌های هم‌نام شیت «خروجی کندو» می‌نویسد."""
+    sheet = workbook[sheet_name]
+    width = max(1, min(int(sheet.max_column or 1), 90))
+    grid = [list(row) for row in sheet.iter_rows(
+        min_row=1, max_row=12, max_col=width, values_only=True)]
+    header_row, _count = _best_header_row(grid, headers, minimum=5)
+    contract_column, key_rows = _sheet_key_rows(sheet, keys, width)
+    if not key_rows:
+        info["notes"].append(
+            f"در شیت «{sheet_name}» هیچ شمارهٔ قراردادی از فایل سامانه پیدا نشد؛ "
+            "داده در آن شیت نوشته نشد."
+        )
+        return
+    if header_row < 0:
+        first_data = min(key_rows.values()) if key_rows else 1
+        header_row = max(0, first_data - 2)
+    header_values = grid[header_row] if header_row < len(grid) else []
+    mapping = [_match_header(name, header_values) for name in headers]
+    precise = sum(1 for column in mapping if column >= 0)
+    positional = precise < max(4, len(headers) // 2)
+    info["export_sheet"] = sheet_name
+    info["export_mapping"] = "ترتیب ستون‌ها" if positional else "نام سرستون"
+    info["export_contract_column"] = _column_letter(contract_column + 1) if contract_column >= 0 else ""
+    written = 0
+    formulas = 0
+    record_rows: List[int] = []
+    for record in records:
+        row_number = key_rows.get(record.key) or 0
+        record_rows.append(int(row_number))
+        if not row_number:
+            continue
+        for offset, value in enumerate(record.values):
+            column = (plan.first_column + offset) if positional else (mapping[offset] + 1
+                                                                     if offset < len(mapping) and mapping[offset] >= 0
+                                                                     else 0)
+            if column <= 0:
+                continue
+            cell = sheet.cell(row=int(row_number), column=int(column))
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                formulas += 1
+                continue
+            if is_blank(value):
+                continue
+            current = txt(cell.value)
+            if current == txt(value):
+                continue
+            try:
+                cell.value = value
+            except AttributeError:
+                continue
+            written += 1
+    info["export_written"] = written
+    info["export_formulas"] = formulas
+    info["export_record_rows"] = record_rows
+    if positional:
+        info["notes"].append(
+            f"سرستون‌های شیت «{sheet_name}» با فایل سامانه هم‌نام نبود؛ داده مثل روش "
+            "دستی به‌ترتیب ستون‌ها (L تا AJ) نوشته شد."
+        )
+
+
+def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str],
+                             records: List[SystemUpdateRecord],
+                             info: Dict[str, Any]) -> None:
+    """نتیجهٔ محاسبه (وضعیت هر مدرک و درصد) در شیت colorcode می‌نشیند."""
+    name = plan.sheet_name if (plan.sheet_name in workbook.sheetnames
+                              and is_dashboard_sheet_name(plan.sheet_name)) else ""
+    if not name:
+        for candidate in workbook.sheetnames:
+            if is_dashboard_sheet_name(str(candidate)):
+                name = str(candidate)
+                break
+    if not name:
+        info["notes"].append("شیت colorcode در کتاب کار نبود؛ نتیجهٔ محاسبه جایی ننشست.")
+        return
+    sheet = workbook[name]
+    width = max(1, min(int(sheet.max_column or 1), 90))
+    grid = [list(row) for row in sheet.iter_rows(
+        min_row=1, max_row=12, max_col=width, values_only=True)]
+    header_row, _count = _best_header_row(grid, headers[:_PLAN_TOTAL_DOCS_OFFSET],
+                                          minimum=5)
+    if header_row < 0:
+        header_row = 2 if len(grid) > 2 else 0
+    header_values = grid[header_row] if header_row < len(grid) else []
+    doc_columns: List[Tuple[int, int]] = []
+    for index in range(min(_PLAN_TOTAL_DOCS_OFFSET, len(headers))):
+        column = _match_header(headers[index], header_values)
+        if not (DASHBOARD_DOC_FIRST_COLUMN - 1 <= column <= DASHBOARD_DOC_LAST_COLUMN - 1):
+            column = DASHBOARD_DOC_FIRST_COLUMN - 1 + index
+        doc_columns.append((index, column + 1))
+    progress_column = 0
+    for index in range(max(0, DASHBOARD_DOC_LAST_COLUMN - 1), len(header_values)):
+        key = _header_key(header_values[index])
+        if "درصد" in key and "پیشرفت" in key:
+            progress_column = index + 1
+            break
+    if not progress_column:
+        progress_column = 37  # ستون AK در کتاب کار اصلی (درصد پیشرفت جدید)
+    keys = {record.key for record in records if record.key}
+    _contract_column, key_rows = _sheet_key_rows(sheet, keys, width)
+    use_plan_rows = (is_dashboard_sheet_name(plan.sheet_name)
+                     and plan.sheet_name == name and bool(plan.rows))
+    # اگر ستون شناسهٔ شیت داشبورد فرمول باشد (مثل «=خروجی کندو!D5») کلید خوانده
+    # نمی‌شود؛ در آن حالت مثل روش دستی، ردیف‌ها به‌ترتیب کنار هم می‌نشینند.
+    order_rows: List[int] = []
+    if len(key_rows) < max(3, len(records) // 2):
+        first_data = header_row + 2
+        max_row = min(int(sheet.max_row or 0), 20000)
+        for row_number, row in enumerate(
+            sheet.iter_rows(min_row=first_data, max_row=max_row,
+                            max_col=width, values_only=True),
+            start=first_data,
+        ):
+            if any(not is_blank(value) for value in row[:11]):
+                order_rows.append(row_number)
+        if len(order_rows) >= max(3, len(records) // 2):
+            info["notes"].append(
+                f"ستون شناسهٔ «{name}» فرمول است؛ ردیف‌ها به‌ترتیب (مثل پیست دستی) "
+                "کنار هم قرار گرفتند."
+            )
+        else:
+            order_rows = []
+    marks = kept = progress_rows = 0
+    progress_values: List[float] = []
+    for index, record in enumerate(records):
+        row_number = 0
+        if use_plan_rows and index < len(plan.rows):
+            row_number = int(plan.rows[index][0])
+        if not row_number:
+            row_number = key_rows.get(record.key, 0)
+        if not row_number and order_rows and index < len(order_rows):
+            row_number = order_rows[index]
+        if not row_number:
+            continue
+        for source_index, column in doc_columns:
+            value = record.values[source_index] if source_index < len(record.values) else None
+            required = (record.requirements[source_index]
+                        if source_index < len(record.requirements) else "")
+            combo = (record.combos[source_index]
+                     if source_index < len(record.combos) else "")
+            state = _doc_state(value, required, combo, unknown="M")
+            if not state:
+                continue
+            cell = sheet.cell(row=int(row_number), column=int(column))
+            current = cell.value
+            if isinstance(current, str) and current.startswith("="):
+                continue
+            current_text = txt(current).strip().upper()
+            if state == "OK":
+                if current_text == "OK":
+                    continue
+                cell.value = "OK"
+            else:
+                if current_text == "OK" or is_status_mark(current):
+                    kept += 1
+                    continue
+                cell.value = "M"
+            marks += 1
+        percent = _plan_percent(
+            record.values[_PLAN_PERCENT_OFFSET]
+            if _PLAN_PERCENT_OFFSET < len(record.values) else None
+        )
+        if percent is not None:
+            sheet.cell(row=int(row_number), column=int(progress_column), value=percent)
+            progress_rows += 1
+            if percent > 0:
+                progress_values.append(percent)
+    info["dashboard_sheet"] = name
+    info["dashboard_marks"] = marks
+    info["dashboard_kept"] = kept
+    info["progress_rows"] = progress_rows
+    if progress_values:
+        total = round(sum(progress_values) / len(progress_values), 4)
+        sheet.cell(row=2, column=int(progress_column), value=total)
+        info["progress_total"] = total
+
+
+def sync_workbook_from_system(workbook, plan: SystemUpdatePlan) -> Dict[str, Any]:
+    """زنجیرهٔ «خروجی کندو ← فایل سامانه» و «colorcode ← خروجی کندو» را اجرا می‌کند.
+
+    دادهٔ L..AJ بر اساس **نام سرستون** در شیت خروجی نوشته می‌شود (نه بر اساس
+    ترتیب؛ ترتیب برچیدن/فصل مشترک و ادعاها/لایحه در دو شیت جابه‌جاست) و بعد
+    وضعیت هر مدرک (OK/M) و درصد پیشرفت در شیت colorcode می‌نشیند.
+    """
+    info: Dict[str, Any] = {
+        "export_sheet": "", "export_written": 0, "export_formulas": 0,
+        "export_mapping": "", "export_contract_column": "",
+        "dashboard_sheet": "", "dashboard_marks": 0, "dashboard_kept": 0,
+        "progress_rows": 0, "progress_total": None,
+        "requirements": 0, "notes": [],
+    }
+    headers = [str(name) for name in (plan.source_headers or [])]
+    records = list(plan.records or [])
+    if not headers or not records:
+        info["notes"].append(
+            "نام سرستون‌های فایل سامانه خوانده نشد؛ برای همین فقط ردیف‌ها به ترتیب نوشته می‌شوند."
+        )
+        return info
+    info["requirements"] = sum(1 for record in records if record.requirements)
+    keys = {record.key for record in records if record.key}
+    export_name = ""
+    if plan.sheet_name in workbook.sheetnames and not is_dashboard_sheet_name(plan.sheet_name):
+        export_name = str(plan.sheet_name)
+    else:
+        export_name = _find_export_sheet(workbook, keys)
+    if export_name:
+        _write_export_sheet(workbook, export_name, plan, headers, records, keys, info)
+    _apply_dashboard_results(workbook, plan, headers, records, info)
+    return info
+
+
 def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
                         out_path: str) -> Dict[str, Any]:
-    """نسخهٔ تازه‌ای از کتاب کار می‌سازد که فقط مقادیر L..AJ در شیت سامانه عوض شده‌اند.
+    """نسخهٔ تازه‌ای از کتاب کار می‌سازد: «خروجی کندو» از فایل سامانه پر می‌شود و
+    نتیجهٔ محاسبه (OK/M و درصد) در شیت colorcode می‌نشیند.
 
     فایل اصلی هرگز بازنویسی نمی‌شود و سلول‌هایی که فرمول دارند دست‌نخورده می‌مانند؛
-    بنابراین فرمول‌ها و ساختار کتاب کار سالم می‌ماند.
+    بنابراین فرمول‌های خود کتاب کار (ماتریس AL..BH و ستون‌های 1-M) سالم می‌مانند.
     """
     if openpyxl is None:
         raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
@@ -2372,41 +2814,8 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
     try:
         if plan.sheet_name not in workbook.sheetnames:
             raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
-        sheet = workbook[plan.sheet_name]
-        dashboard_target = is_dashboard_sheet_name(plan.sheet_name)
-        written = 0
-        formula_cells = 0
-        merged_cells = 0
+        info = sync_workbook_from_system(workbook, plan)
         cleaned = 0
-        for target_row, values in plan.rows:
-            for offset, value in enumerate(values):
-                column = plan.first_column + offset
-                if dashboard_target:
-                    if column > DASHBOARD_DOC_LAST_COLUMN:
-                        continue  # ستون‌های جمع/درصد جای دیگری در شیت داشبورد دارند
-                    if column >= DASHBOARD_DOC_FIRST_COLUMN:
-                        value = status_mark_value(value)
-                cell = sheet.cell(row=int(target_row), column=int(column))
-                current = getattr(cell, "value", None)
-                if isinstance(current, str) and current.startswith("="):
-                    formula_cells += 1
-                    continue
-                if is_blank(value):
-                    continue
-                if current == value:
-                    continue
-                try:
-                    cell.value = value
-                except AttributeError:
-                    merged_cells += 1  # سلول ادغام‌شده در اکسل قابل نوشتن نیست
-                    continue
-                written += 1
-        # آسیب نسخه‌های قبل (۰/۱ در ستون‌های وضعیت) در همهٔ شیت‌های داشبورد
-        # ترمیم می‌شود؛ حتی وقتی مقصد پیست شیت دیگری باشد.
-        try:
-            cleaned = repair_dashboard_marks(workbook)
-        except Exception as exc:
-            log_event(f"ترمیم علامت‌های وضعیت ممکن نشد: {type(exc).__name__}: {exc}")
         try:
             workbook.calculation.fullCalcOnLoad = True
         except Exception:
@@ -2419,53 +2828,58 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
             workbook.close()
         except Exception:
             pass
+    for note in info.get("notes", []):
+        log_event(f"همگام‌سازی با فایل سامانه: {note}")
+    log_event(
+        "نسخهٔ به‌روز: شیت «{export}» ({mapping}) {written} مقدار · "
+        "colorcode: {marks} علامت، {progress} درصد، میانگین {total}".format(
+            export=info.get("export_sheet") or "—",
+            mapping=info.get("export_mapping") or "—",
+            written=info.get("export_written", 0),
+            marks=info.get("dashboard_marks", 0),
+            progress=info.get("progress_rows", 0),
+            total=info.get("progress_total"),
+        )
+    )
     return {
         "output_path": str(target),
-        "written_cells": written,
-        "formula_cells": formula_cells,
-        "merged_cells": merged_cells,
+        "written_cells": int(info.get("export_written", 0)) + int(info.get("dashboard_marks", 0)),
+        "formula_cells": int(info.get("export_formulas", 0)),
+        "merged_cells": 0,
         "cleaned_marks": cleaned,
         "skipped_formulas_sheet": plan.sheet_name,
+        "sync": info,
+        "summary": "\n".join(sync_summary_lines(info)),
     }
 
 
 def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[bytes, int]:
-    """مقادیر L..AJ را روی کتاب کار اعمال می‌کند و بایت‌های تازه را برمی‌گرداند."""
+    """دادهٔ فایل سامانه را روی کتاب کار اعمال می‌کند و بایت‌های تازه را برمی‌گرداند.
+
+    همان زنجیرهٔ روش دستی: «خروجی کندو» از فایل سامانه پر می‌شود، محاسبهٔ همان
+    شیت (الزام مدارک + درصد) انجام می‌شود و نتیجه در «colorcode» می‌نشیند.
+    """
+    global LAST_SYNC_INFO
     if openpyxl is None:
         raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
     workbook = openpyxl.load_workbook(io.BytesIO(target_blob), data_only=False)
     try:
         if plan.sheet_name not in workbook.sheetnames:
             raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
-        sheet = workbook[plan.sheet_name]
-        updated = 0
-        for target_row, values in plan.rows:
-            for offset, value in enumerate(values):
-                column = plan.first_column + offset
-                if column > plan.last_column:
-                    break
-                if isinstance(value, str):
-                    value = value.strip()
-                    if value.lower() in _SYSTEM_UPDATE_OK_WORDS:
-                        value = "ok"
-                if is_dashboard_sheet_name(plan.sheet_name):
-                    if column > DASHBOARD_DOC_LAST_COLUMN:
-                        continue
-                    if column >= DASHBOARD_DOC_FIRST_COLUMN:
-                        value = status_mark_value(value)
-                cell = sheet.cell(row=target_row, column=column)
-                if is_blank(value):
-                    # مقدار خالی در فایل سامانه، دادهٔ موجود کتاب کار را پاک نمی‌کند
-                    # (همان رفتار نسخهٔ اولیه) تا اعداد داشبورد تغییر نکنند.
-                    continue
-                if cell.value == value:
-                    continue
-                cell.value = value
-                updated += 1
+        info = sync_workbook_from_system(workbook, plan)
+        updated = int(info.get("export_written", 0)) + int(info.get("dashboard_marks", 0))
         # اکسل بعد از ذخیره، ستون‌های خالی انتهایی را حذف می‌کند و عرض شیت به ۵۶
         # می‌رسد؛ برنامه ۵۸ ستون انتظار دارد، پس یک سلول خالی برای حفظ عرض می‌گذاریم.
-        if int(sheet.max_column or 0) < REQUIRED_COLUMNS:
-            sheet.cell(row=1, column=REQUIRED_COLUMNS, value="")
+        for sheet_name in (plan.sheet_name, info.get("dashboard_sheet") or ""):
+            if not sheet_name or sheet_name not in workbook.sheetnames:
+                continue
+            sheet = workbook[sheet_name]
+            if int(sheet.max_column or 0) < REQUIRED_COLUMNS:
+                sheet.cell(row=1, column=REQUIRED_COLUMNS, value="")
+        try:
+            workbook.calculation.fullCalcOnLoad = True
+        except Exception:
+            pass
         buffer = io.BytesIO()
         workbook.save(buffer)
     finally:
@@ -2473,7 +2887,58 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
             workbook.close()
         except Exception:
             pass
+    LAST_SYNC_INFO = dict(info)
+    log_event(
+        "به‌روزرسانی: شیت «{export}» ({mapping}) {written} مقدار · "
+        "colorcode: {marks} علامت (»{kept}« علامت دستی حفظ شد)، {progress} درصد، "
+        "میانگین {total}".format(
+            export=info.get("export_sheet") or "—",
+            mapping=info.get("export_mapping") or "—",
+            written=info.get("export_written", 0),
+            marks=info.get("dashboard_marks", 0),
+            kept=info.get("dashboard_kept", 0),
+            progress=info.get("progress_rows", 0),
+            total=info.get("progress_total"),
+        )
+    )
     return buffer.getvalue(), updated
+
+
+def sync_summary_lines(info: Dict[str, Any]) -> List[str]:
+    """خلاصهٔ خواندنی زنجیرهٔ «خروجی کندو → colorcode» برای دیالوگ‌ها."""
+    lines: List[str] = []
+    if not info:
+        return lines
+    export = str(info.get("export_sheet") or "")
+    if export:
+        lines.append(
+            "شیت «{sheet}» ({mapping}): {count} مقدار از فایل سامانه نوشته شد.".format(
+                sheet=export,
+                mapping=info.get("export_mapping") or "بر اساس نام سرستون",
+                count=fa(int(info.get("export_written") or 0)),
+            )
+        )
+    dashboard = str(info.get("dashboard_sheet") or "")
+    if dashboard:
+        lines.append(
+            "شیت «{sheet}»: {marks} وضعیت مدرک (OK/M) و {rows} درصد پیشرفت.".format(
+                sheet=dashboard,
+                marks=fa(int(info.get("dashboard_marks") or 0)),
+                rows=fa(int(info.get("progress_rows") or 0)),
+            )
+        )
+        total = info.get("progress_total")
+        if isinstance(total, (int, float)):
+            lines.append("میانگین درصد پیشرفت: {value}٪".format(
+                value=fa("{0:.2f}".format(float(total) * 100))))
+        kept = int(info.get("dashboard_kept") or 0)
+        if kept:
+            lines.append(
+                f"{fa(kept)} علامت «M» که خودتان ثبت کرده بودید حفظ شد."
+            )
+    for note in info.get("notes") or []:
+        lines.append(f"یادداشت: {note}")
+    return lines
 
 
 def preview_system_update(plan: SystemUpdatePlan) -> str:
@@ -2486,7 +2951,9 @@ def preview_system_update(plan: SystemUpdatePlan) -> str:
         f"ردیف‌های داده: {fa(plan.total_rows)} — «اجرا - مهر»: {fa(plan.filtered_rows)}",
         f"تطبیق‌شده با کتاب کار: {fa(plan.matched_rows)} ردیف (روش: {plan.method})",
         f"ستون‌های {_column_letter(plan.first_column)} تا {_column_letter(plan.last_column)} "
-        f"در شیت «{plan.sheet_name}» به‌روزرسانی می‌شوند.",
+        f"در شیت «{plan.sheet_name}» (بر اساس نام سرستون) به‌روزرسانی می‌شوند.",
+        "بعد از نوشتن، وضعیت هر مدرک (OK/M) و درصد پیشرفت در شیت colorcode می‌نشیند "
+        "و میانگین درصد از همان ستون محاسبه می‌شود.",
     ]
     if plan.unmatched:
         lines.append(
@@ -3090,30 +3557,45 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
         )
         progress_raw = cell(row, progress_col)
         sheet.cell(row=target_row, column=11, value=progress_raw)
-        progress_number = num(progress_raw) if progress_col >= 0 else None
-        if progress_number is not None and 0 <= progress_number <= 100:
-            fraction = progress_number / 100.0 if progress_number > 1.5 else progress_number
-            progress_values.append(fraction)
+        fraction = _plan_percent(progress_raw) if progress_col >= 0 else None
+        if fraction is not None:
             sheet.cell(row=target_row, column=SYSTEM_UPDATE_LAST_COLUMN + 1, value=fraction)
+            if fraction > 0:
+                progress_values.append(fraction)
+        # همان محاسبهٔ شیت «خروجی کندو»: «0-M» یعنی مدرک لازم است و ثبت نشده،
+        # پس در شیت داشبورد «M» می‌شود و بقیه «OK».
+        required = [txt(row[11 + _PLAN_REQUIREMENT_OFFSET + index])
+                    if 11 + _PLAN_REQUIREMENT_OFFSET + index < len(row) else ""
+                    for index in range(23)]
+        combos = [txt(row[11 + _PLAN_COMBO_OFFSET + index])
+                  if 11 + _PLAN_COMBO_OFFSET + index < len(row) else ""
+                  for index in range(23)]
         for offset in range(max(0, last_column - first_column + 1)):
             column = first_column + offset
             value = cell(row, column - 1)
             if isinstance(value, str) and value.lower() in _SYSTEM_UPDATE_OK_WORDS:
                 value = "ok"
             if DASHBOARD_DOC_FIRST_COLUMN <= column <= DASHBOARD_DOC_LAST_COLUMN:
-                value = status_mark_value(value)
+                index = column - DASHBOARD_DOC_FIRST_COLUMN
+                value = _doc_state(value,
+                                   required[index] if index < len(required) else "",
+                                   combos[index] if index < len(combos) else "",
+                                   unknown="M") or None
+                if value == "M":
+                    status_marks += 1
             if value is None:
                 continue
             sheet.cell(row=target_row, column=column, value=value)
             written += 1
         target_row += 1
     if progress_values:
-        # ردیف ۲ ستون ۳۷ در کتاب کار اصلی، درصد پیشرفت کل است؛ همان را می‌گذاریم.
+        # ردیف ۲ ستون ۳۷ در کتاب کار اصلی، درصد پیشرفت کل است؛ همان فرمول
+        # (میانگین ردیف‌های بزرگ‌تر از صفر) را می‌گذاریم.
         sheet.cell(row=2, column=37,
                    value=round(sum(progress_values) / len(progress_values), 4))
         notes.append(
             f"درصد پیشرفت از ستون «{txt(rows[header_row][progress_col])}» "
-            f"فایل سامانه محاسبه شد (میانگین {fa(len(progress_values))} ردیف)."
+            f"فایل سامانه محاسبه شد (میانگین {fa(len(progress_values))} ردیف بزرگ‌تر از صفر)."
         )
     # اکسل ستون‌های خالی انتهایی را می‌اندازد؛ یک سلول برای حفظ عرض ۵۷ می‌گذاریم.
     if int(sheet.max_column or 0) < REQUIRED_COLUMNS:
@@ -13269,8 +13751,9 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Question)
         box.setText(
             "دیتابیس با همین فایل ۰۱ به‌روزرسانی می‌شود — همان کاری که دستی انجام "
-            "می‌دادید، خودکار: فیلتر ستون Sub Project («اجرا - مهر»)، سپس نوشتن "
-            "ستون‌های L تا AJ در شیت colorcode و بارگذاری دوبارهٔ همان شیت در دیتابیس."
+            "می‌دادید، خودکار: فیلتر ستون Sub Project («اجرا - مهر»)، نوشتن "
+            "ستون‌های L تا AJ در شیت «خروجی کندو» (بر اساس نام سرستون)، محاسبهٔ "
+            "وضعیت مدارک و درصد در همان شیت، و نشستن نتیجه در شیت colorcode."
         )
         note = str(getattr(self, "_system_update_note", "") or "")
         self._system_update_note = ""
@@ -13317,6 +13800,7 @@ class MainWindow(QMainWindow):
             f"شیت مقصد: «{result.get('sheet') or plan.sheet_name}» "
             "(همان شیتی که خروجی سامانه در آن پیست می‌شود)",
         ]
+        lines += sync_summary_lines(result.get("sync") or {})
         if not written:
             lines += [
                 "",
@@ -13380,6 +13864,7 @@ class MainWindow(QMainWindow):
             "فایل با خودِ اکسل بازمحاسبه و ذخیره شد و داشبورد از همان نسخه "
             "خوانده می‌شود؛ کتاب کار اصلی شما دست‌نخورده است.",
         ]
+        lines += sync_summary_lines(result.get("sync") or {})
         if imported.get("error"):
             lines.append("")
             lines.append(
