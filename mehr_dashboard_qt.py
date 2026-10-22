@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.7"
+APP_VERSION = "3.5.8"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -3495,32 +3495,245 @@ def _settings_search_paths(settings: Dict[str, Any]) -> List[str]:
     return [str(settings.get(key) or "") for key in keys]
 
 
+def list_database_workbooks(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """همهٔ کتاب کارهای ذخیره‌شده در دیتابیس را با مشخصات کوتاه برمی‌گرداند."""
+    connection = connect_database(settings)
+    items: List[Dict[str, Any]] = []
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT workbook_id, original_filename, file_size, imported_at "
+                "FROM excel_workbooks ORDER BY workbook_id"
+            )
+            rows = list(cursor.fetchall() or [])
+            counts: Dict[int, int] = {}
+            try:
+                cursor.execute(
+                    "SELECT workbook_id, COUNT(*) FROM mehr_contracts GROUP BY workbook_id"
+                )
+                counts = {int(r[0]): int(r[1]) for r in (cursor.fetchall() or [])}
+            except Exception:
+                counts = {}
+        finally:
+            cursor.close()
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    for row in rows:
+        try:
+            wid = int(row[0])
+        except Exception:
+            continue
+        items.append({
+            "workbook_id": wid,
+            "filename": str(row[1] or f"workbook-{wid}.xlsx"),
+            "file_size": int(row[2] or 0),
+            "imported_at": str(row[3] or ""),
+            "rows": int(counts.get(wid, 0)),
+        })
+    return items
+
+
+def inspect_database_workbook(settings: Dict[str, Any], workbook_id: int) -> Dict[str, Any]:
+    """کیفیت یک کتاب کار ذخیره‌شده در دیتابیس (شیت‌ها، درصد، علامت‌ها)."""
+    target = dict(settings)
+    target["workbook_id"] = int(workbook_id)
+    try:
+        info = fetch_workbook_blob(target)
+    except Exception as exc:
+        return {"workbook_id": int(workbook_id), "ok": False, "error": str(exc)}
+    blob = info.get("data") or b""
+    quality = inspect_workbook_bytes(blob)
+    health = workbook_health(blob)
+    rows = 0
+    try:
+        rows = int(load_rows_from_database({**target})["data_rows"])
+    except Exception:
+        rows = 0
+    return {
+        "workbook_id": int(workbook_id),
+        "ok": True,
+        "rows": rows,
+        "filename": str(info.get("filename") or ""),
+        "size": len(blob),
+        "blob": blob,
+        "colorcode": bool(quality.get("colorcode")),
+        "generated": bool(quality.get("generated")),
+        "has_progress": bool(quality.get("has_progress")),
+        "mark_rows": int(quality.get("mark_rows") or 0),
+        "damaged": bool(health.get("damaged")),
+    }
+
+
+_WORKBOOK_SCAN_CACHE: Dict[Any, Dict[str, Any]] = {}
+
+
+def best_database_workbook(settings: Dict[str, Any],
+                           skip_ids: Sequence[int] = ()) -> Optional[Dict[str, Any]]:
+    """بهترین کتاب کار واقعی دیتابیس به‌عنوان پایه (مثل فایل ۰۲ با شناسهٔ ۳)."""
+    try:
+        items = list_database_workbooks(settings)
+    except Exception as exc:
+        log_event(f"فهرست کتاب کارهای دیتابیس خوانده نشد: {exc}")
+        return None
+    skip = {int(value) for value in skip_ids}
+    fingerprint = (
+        str(settings.get("host") or ""), int(settings.get("port") or 3306),
+        str(settings.get("database") or ""),
+        tuple(sorted((int(item["workbook_id"]), str(item.get("imported_at") or ""))
+                     for item in items)),
+        tuple(sorted(skip)),
+    )
+    cached = _WORKBOOK_SCAN_CACHE.get(fingerprint)
+    if cached is not None:
+        return cached or None
+    # برای اینکه انتخاب خودکار کند نشود، فقط جدیدترین‌ها بررسی می‌شوند.
+    items = sorted(
+        items, key=lambda entry: (str(entry.get("imported_at") or ""),
+                                  int(entry.get("workbook_id") or 0)),
+        reverse=True,
+    )[:8]
+    reports: List[Tuple[float, Dict[str, Any]]] = []
+    for item in items:
+        wid = int(item["workbook_id"])
+        if wid in skip:
+            continue
+        report = inspect_database_workbook(settings, wid)
+        if not report.get("ok"):
+            log_event(
+                f"کتاب کار {wid} باز نشد: {str(report.get('error') or '')[:160]}"
+            )
+            continue
+        score = 0.0
+        if report["generated"]:
+            score -= 1000.0
+        else:
+            score += 100.0
+        if report["colorcode"]:
+            score += 60.0
+        else:
+            score -= 200.0
+        if report["has_progress"]:
+            score += 40.0
+        else:
+            score -= 80.0
+        if report["damaged"]:
+            score -= 150.0
+        counted = int(report.get("rows") or item.get("rows") or 0)
+        score += min(300.0, counted * 0.25)
+        score += min(60.0, report["mark_rows"] * 0.1)
+        reports.append((score, {**item, **report, "score": score, "rows": counted}))
+        log_event(
+            "بررسی کتاب کار دیتابیس: شناسهٔ {wid} «{name}» — colorcode={cc}، "
+            "درصد={pg}، ساختهٔ برنامه={gen}، ناقص={dmg}، امتیاز={score:.1f}".format(
+                wid=fa(wid), name=report.get("filename") or item.get("filename"),
+                cc="بله" if report["colorcode"] else "خیر",
+                pg="بله" if report["has_progress"] else "خیر",
+                gen="بله" if report["generated"] else "خیر",
+                dmg="بله" if report["damaged"] else "خیر",
+                score=score,
+            )
+        )
+    if not reports:
+        _WORKBOOK_SCAN_CACHE[fingerprint] = {}
+        return None
+    reports.sort(key=lambda pair: pair[0], reverse=True)
+    best = reports[0][1]
+    if best["score"] <= 0:
+        _WORKBOOK_SCAN_CACHE[fingerprint] = {}
+        return None
+    _WORKBOOK_SCAN_CACHE[fingerprint] = best
+    return best
+
+
+def next_database_workbook_id(settings: Dict[str, Any]) -> int:
+    """شناسهٔ آزاد بعدی برای ذخیرهٔ نسخهٔ به‌روز (کتاب کار پایه دست‌نخورده می‌ماند)."""
+    try:
+        items = list_database_workbooks(settings)
+        used = [int(item["workbook_id"]) for item in items]
+    except Exception:
+        used = []
+    return (max(used) + 1) if used else 1
+
+
 def resolve_update_base(settings: Dict[str, Any],
                         source_path: str = "") -> Dict[str, Any]:
     """کتاب کار پایه برای اعمال فایل ۰۱ را برمی‌گرداند.
 
-    اگر کتاب کار ذخیره‌شده در دیتابیس ساختهٔ خود برنامه از فایل ۰۱ باشد
-    (بدون ستون‌های وضعیت/درصد)، به‌جای آن کتاب کار اصلی کاربر جست‌وجو می‌شود
-    تا اعداد داشبورد صفر نشوند.
+    ترتیب انتخاب:
+    ۱) کتاب کار تنظیم‌شده در دیتابیس (مثلاً شناسهٔ ۳ = فایل ۰۲ خودتان)،
+    ۲) اگر آن ساختهٔ برنامه یا ناقص/موجود نبود، بهترین کتاب کار واقعی دیتابیس،
+    ۳) اگر دیتابیس در دسترس نبود، همان کتاب کار روی دیسک.
     """
+    configured = int(settings.get("workbook_id") or 1)
     info = None
     try:
         info = fetch_workbook_blob(settings)
     except Exception as exc:
         log_event(f"خواندن کتاب کار دیتابیس برای پایهٔ به‌روزرسانی ممکن نشد: {exc}")
     if info:
-        quality = inspect_workbook_bytes(info.get("data") or b"")
-        if not quality.get("generated"):
+        blob = info.get("data") or b""
+        quality = inspect_workbook_bytes(blob)
+        health = workbook_health(blob)
+        usable = (
+            not quality.get("generated")
+            and bool(quality.get("colorcode"))
+            and not health.get("damaged")
+        )
+        if usable:
+            current = inspect_database_workbook(settings, configured)
+            best_choice = best_database_workbook(settings, skip_ids=[configured])
+            if (
+                best_choice
+                and float(best_choice.get("score") or 0)
+                > float(current.get("score") or 0) + 20
+            ):
+                log_event(
+                    f"کتاب کار کامل‌تر در دیتابیس پیدا شد: شناسهٔ "
+                    f"{fa(best_choice['workbook_id'])} «{best_choice.get('filename')}» "
+                    f"({best_choice.get('rows')} قرارداد) به‌جای شناسهٔ "
+                    f"{fa(configured)} ({current.get('rows')} قرارداد)"
+                )
+                return {
+                    "blob": best_choice["blob"],
+                    "filename": str(best_choice.get("filename") or "workbook.xlsx"),
+                    "base_source": "database",
+                    "base_path": "",
+                    "base_workbook_id": int(best_choice["workbook_id"]),
+                }
+            log_event(
+                f"کتاب کار پایه از دیتابیس انتخاب شد: شناسهٔ {fa(configured)} "
+                f"«{info.get('filename')}»"
+            )
             return {
-                "blob": info["data"],
+                "blob": blob,
                 "filename": str(info.get("filename") or "workbook.xlsx"),
                 "base_source": "database",
                 "base_path": "",
+                "base_workbook_id": configured,
             }
         log_event(
-            "کتاب کار ذخیره‌شده در دیتابیس «ساخته‌شده از فایل ۰۱» است؛ "
-            "کتاب کار اصلی جست‌وجو می‌شود"
+            "کتاب کار تنظیم‌شده برای پایه مناسب نیست "
+            f"(ساختهٔ برنامه={quality.get('generated')}، "
+            f"colorcode={quality.get('colorcode')}، ناقص={health.get('damaged')})؛ "
+            "بهترین کتاب کار دیتابیس جست‌وجو می‌شود"
         )
+    best = best_database_workbook(settings, skip_ids=[configured])
+    if best:
+        log_event(
+            "کتاب کار پایه از دیتابیس انتخاب شد: شناسهٔ "
+            f"{fa(best['workbook_id'])} «{best.get('filename') or best.get('filename')}»"
+        )
+        return {
+            "blob": best["blob"],
+            "filename": str(best.get("filename") or "workbook.xlsx"),
+            "base_source": "database",
+            "base_path": "",
+            "base_workbook_id": int(best["workbook_id"]),
+        }
     real = find_real_workbook(source_path, extra_paths=_settings_search_paths(settings))
     if real:
         try:
@@ -3533,15 +3746,15 @@ def resolve_update_base(settings: Dict[str, Any],
             "filename": Path(real).name,
             "base_source": "file",
             "base_path": str(real),
+            "base_workbook_id": 0,
         }
     raise ExcelDataError(
         "کتاب کار اصلی (فایل دارای شیت colorcode که ستون‌های وضعیت و درصد را دارد) "
         "پیدا نشد.\n\n"
         "فایل ۰۱ سامانه فقط ستون‌های کارکرد را دارد؛ اگر آن را جای کتاب کار اصلی "
         "بگذاریم کارت‌های وضعیت و درصد صفر می‌شوند.\n"
-        "یک بار دکمهٔ «کتاب کار اصلی (۰۲)» در تنظیمات را بزنید و همان فایل اصلی "
-        "خودتان (مثل \u202aF.O.C(Mehr).xlsx\u202c) را انتخاب کنید؛ از آن به بعد "
-        "به‌روزرسانی فایل ۰۱ روی همان انجام می‌شود."
+        "کتاب کار ۰۲ را در دیتابیس با یک شناسه (مثلاً ۳) ذخیره کنید و همان شناسه را "
+        "در تنظیمات بگذارید، یا دکمهٔ «انتخاب کتاب کار از دیتابیس» را بزنید."
     )
 
 
@@ -3701,8 +3914,12 @@ def migrate_blob_to_tables(settings: Dict[str, Any], info: Dict[str, Any]) -> No
             pass
 
 
-def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> DashboardData:
-    """اتصال به دیتابیس مرکزی، خواندن کتاب کار و ساخت داده‌های داشبورد.
+LAST_WORKBOOK_CHOICE: Dict[str, int] = {}
+
+
+def _read_database_workbook_once(settings: Dict[str, Any],
+                                 pdf_folder: str = "") -> DashboardData:
+    """یک بار خواندن از دیتابیس با شناسهٔ داده‌شده (بدون انتخاب خودکار).
 
     اول از جدول‌های نرمال‌شده (mehr_contracts) خوانده می‌شود؛ اگر خالی بودند،
     فایل ذخیره‌شده (blob) خوانده و همان‌جا به جدول‌ها منتقل می‌شود.
@@ -3787,6 +4004,85 @@ def _flag_damaged_rows(settings: Dict[str, Any], data: DashboardData) -> None:
             "کتاب کار ذخیره‌شده فرمول‌هایی بدون مقدار دارد: "
             f"{health.get('missing')} از {health.get('formulas')}"
         )
+
+
+def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> DashboardData:
+    """خواندن داشبورد از دیتابیس؛ اگر شناسهٔ تنظیم‌شده مناسب نبود، بهترین را برمی‌دارد.
+
+    مهم: اگر کتاب کار ۰۲ با شناسهٔ دیگری (مثلاً ۳) ذخیره شده باشد و شناسهٔ
+    تنظیمات شناسهٔ دیگری باشد، برنامه خودش کتاب کار واقعی/کامل را پیدا و
+    استفاده می‌کند و شناسهٔ انتخابی را در LAST_WORKBOOK_CHOICE می‌گذارد.
+    """
+    configured = int(settings.get("workbook_id") or 1)
+    data = _read_database_workbook_once(settings, pdf_folder)
+    if data.total_contracts and not data.damaged:
+        # اگر شناسهٔ فعلی درست است ولی کتاب کار کامل‌تری (مثلاً ۰۲ با شناسهٔ ۳)
+        # در دیتابیس هست، همان کامل‌تر استفاده می‌شود.
+        try:
+            best_now = best_database_workbook(settings, skip_ids=[configured])
+        except Exception:
+            best_now = None
+        if best_now and int(best_now.get("rows") or 0) >= int(
+            data.total_contracts * 1.25 + 1
+        ):
+            alternative = dict(settings)
+            alternative["workbook_id"] = int(best_now["workbook_id"])
+            try:
+                other = _read_database_workbook_once(alternative, pdf_folder)
+            except Exception:
+                other = None
+            if other and other.total_contracts > data.total_contracts:
+                log_event(
+                    f"کتاب کار کامل‌تر انتخاب شد: شناسهٔ {fa(best_now['workbook_id'])} "
+                    f"({other.total_contracts} قرارداد) به‌جای شناسهٔ {fa(configured)} "
+                    f"({data.total_contracts} قرارداد)"
+                )
+                LAST_WORKBOOK_CHOICE.clear()
+                LAST_WORKBOOK_CHOICE.update({
+                    "workbook_id": int(best_now["workbook_id"]),
+                    "switched": 1,
+                    "previous": configured,
+                })
+                other.source_note = (other.source_note or "") + " • انتخاب خودکار"
+                return other
+        LAST_WORKBOOK_CHOICE.clear()
+        LAST_WORKBOOK_CHOICE.update({"workbook_id": configured, "switched": 0})
+        return data
+    try:
+        best = best_database_workbook(settings, skip_ids=[configured])
+    except Exception as exc:
+        log_event(f"انتخاب خودکار کتاب کار ممکن نشد: {exc}")
+        best = None
+    if best:
+        alternative = dict(settings)
+        alternative["workbook_id"] = int(best["workbook_id"])
+        try:
+            other = _read_database_workbook_once(alternative, pdf_folder)
+        except Exception as exc:
+            log_event(f"خواندن کتاب کار جایگزین ناموفق بود: {exc}")
+            other = None
+        if other and (
+            other.total_contracts > data.total_contracts
+            or (data.damaged and not other.damaged)
+            or (data.damaged and other.total_contracts >= data.total_contracts)
+        ):
+            log_event(
+                "کتاب کار جایگزین انتخاب شد: شناسهٔ "
+                f"{fa(best['workbook_id'])} «{best.get('filename')}» "
+                f"({other.total_contracts} قرارداد) به‌جای شناسهٔ {fa(configured)} "
+                f"({data.total_contracts} قرارداد)"
+            )
+            LAST_WORKBOOK_CHOICE.clear()
+            LAST_WORKBOOK_CHOICE.update({
+                "workbook_id": int(best["workbook_id"]),
+                "switched": 1,
+                "previous": configured,
+            })
+            other.source_note = (other.source_note or "") + " • انتخاب خودکار"
+            return other
+    LAST_WORKBOOK_CHOICE.clear()
+    LAST_WORKBOOK_CHOICE.update({"workbook_id": configured, "switched": 0})
+    return data
 
 
 def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
@@ -7154,14 +7450,20 @@ class SystemCopyWorker(QThread):
                 )
                 if recalculated and healthy and str(self.settings.get("host") or "").strip():
                     try:
+                        target_id = next_database_workbook_id(self.settings)
                         imported = import_workbook_to_database(
                             self.settings, info["output_path"],
                             sheet_name=str(self.settings.get("sheet_name") or ""),
-                            workbook_id=int(self.settings.get("workbook_id") or 1),
+                            workbook_id=target_id,
+                        )
+                        imported["workbook_id"] = target_id
+                        imported["base_workbook_id"] = int(
+                            base.get("base_workbook_id") or 0
                         )
                         log_event(
-                            "نسخهٔ به‌روز خودکار در دیتابیس ذخیره شد: "
-                            f"{imported.get('data_rows')} ردیف"
+                            "نسخهٔ به‌روز خودکار در دیتابیس ذخیره شد: شناسهٔ "
+                            f"{target_id} — {imported.get('data_rows')} ردیف "
+                            "(کتاب کار پایه دست‌نخورده ماند)"
                         )
                     except Exception as exc:
                         log_event(f"ذخیرهٔ خودکار نسخهٔ به‌روز در دیتابیس ناموفق بود: {exc}")
@@ -7174,6 +7476,7 @@ class SystemCopyWorker(QThread):
                 "sheet": target_sheet,
                 "base_source": base.get("base_source"),
                 "base_filename": base.get("filename"),
+                "base_workbook_id": int(base.get("base_workbook_id") or 0),
                 "recalculated": recalculated,
                 "cleaned_marks": info.get("cleaned_marks", 0),
                 "healthy": healthy,
@@ -9987,6 +10290,7 @@ class SettingsPage(QWidget):
     systemUpdateRequested = pyqtSignal(str)
     diagnoseRequested = pyqtSignal(str)
     sourceWorkbookRequested = pyqtSignal()
+    workbookPickRequested = pyqtSignal()
 
     def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -10064,9 +10368,23 @@ class SettingsPage(QWidget):
         self.workbook_spin.setRange(1, 999999)
         self.workbook_spin.setValue(int(config.get("db_workbook_id") or 1))
         self.workbook_spin.setToolTip(
-            "شمارهٔ ردیف کتاب کار در دیتابیس (همان فایل اکسلی که با شناسهٔ ۱ بارگذاری شده است)."
+            "شناسهٔ کتاب کار در دیتابیس؛ کتاب کار ۰۲ خودتان را با هر شناسه‌ای "
+            "(مثلاً ۳) ذخیره کرده‌اید، همان را بگذارید. اگر شناسه درست نباشد، "
+            "برنامه خودش بهترین کتاب کار واقعی را انتخاب می‌کند."
         )
-        form.addWidget(self.workbook_spin, 3, 1)
+        workbook_row = QHBoxLayout()
+        workbook_row.setSpacing(6)
+        workbook_row.addWidget(self.workbook_spin, 1)
+        self.workbook_pick_button = QPushButton("کتاب کارها…")
+        self.workbook_pick_button.setObjectName("Ghost")
+        self.workbook_pick_button.setCursor(Qt.PointingHandCursor)
+        self.workbook_pick_button.setToolTip(
+            "فهرست کتاب کارهای ذخیره‌شده در دیتابیس را نشان می‌دهد تا شناسهٔ "
+            "کتاب کار ۰۲ (مثلاً ۳) را انتخاب کنید."
+        )
+        self.workbook_pick_button.clicked.connect(self.workbookPickRequested.emit)
+        workbook_row.addWidget(self.workbook_pick_button, 0)
+        form.addLayout(workbook_row, 3, 1)
         form.addWidget(QLabel("نام شیت:"), 3, 2)
         self.sheet_edit = QLineEdit(str(config.get("sheet_name") or SHEET_NAME_DEFAULT))
         self.sheet_edit.setPlaceholderText(SHEET_NAME_DEFAULT)
@@ -11759,6 +12077,7 @@ class MainWindow(QMainWindow):
         self.settings.systemUpdateRequested.connect(self.start_system_update)
         self.settings.diagnoseRequested.connect(self.show_diagnosis)
         self.settings.sourceWorkbookRequested.connect(self.pick_source_workbook)
+        self.settings.workbookPickRequested.connect(self.pick_database_workbook)
         self.settings.localRunRequested.connect(self.open_local_excel)
         self.dashboard.importRequested.connect(self.import_excel_dialog)
         self.dashboard.localRunRequested.connect(self.open_local_excel_dialog)
@@ -11990,6 +12309,26 @@ class MainWindow(QMainWindow):
                 "داده‌ها از جدول‌های دیتابیس MySQL (mehr_contracts) خوانده می‌شود"
             )
         self.data = data
+        choice = dict(LAST_WORKBOOK_CHOICE or {})
+        if choice.get("switched") and choice.get("workbook_id"):
+            new_id = int(choice["workbook_id"])
+            if int(self.config.get("db_workbook_id") or 0) != new_id:
+                self.config.set("db_workbook_id", new_id, save=False)
+                self.config.save()
+            try:
+                self.settings.workbook_spin.setValue(new_id)
+            except Exception:
+                pass
+            self.settings.set_status(
+                f"کتاب کار کامل‌تر پیدا شد — شناسهٔ {fa(new_id)} استفاده می‌شود"
+            )
+            self.statusBar().showMessage(
+                "شناسهٔ کتاب کار به‌طور خودکار به "
+                f"{fa(new_id)} تغییر کرد (کتاب کار کامل‌تر دیتابیس)", 12000,
+            )
+            log_event(
+                f"شناسهٔ کتاب کار در تنظیمات به {new_id} تغییر کرد (انتخاب خودکار)"
+            )
         self._watch_contract_count(data)
         # هر بخش جدا به‌روزرسانی می‌شود؛ خطا در یک بخش نباید بقیهٔ داشبورد را
         # صفر/خالی بگذارد (همین باگ باعث می‌شد همهٔ کارت‌ها صفر بمانند).
@@ -12430,6 +12769,63 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "اجرای محلی: داده‌ها از فایل اکسل خوانده می‌شود (بدون دیتابیس).", 6000
         )
+        self.load_data()
+
+    @guarded("pick_database_workbook")
+    def pick_database_workbook(self) -> None:
+        """فهرست کتاب کارهای دیتابیس را نشان می‌دهد و شناسه انتخاب‌شده را ذخیره می‌کند."""
+        values = self.settings.connection_values()
+        settings = {
+            "host": values["host"], "port": values["port"],
+            "database": values["database"], "user": values["user"],
+            "password": values["password"], "workbook_id": values["workbook_id"],
+        }
+        try:
+            items = list_database_workbooks(settings)
+        except Exception as exc:
+            self._notify("خواندن فهرست کتاب کارها ممکن نشد", "alert")
+            QMessageBox.warning(
+                self, "کتاب کارهای دیتابیس",
+                "اتصال به دیتابیس برقرار نشد یا جدول‌ها ساخته نشده‌اند:\n\n"
+                + str(exc)[:600],
+            )
+            return
+        if not items:
+            QMessageBox.information(
+                self, "کتاب کارهای دیتابیس",
+                "هیچ کتاب کاری در دیتابیس ذخیره نشده است.",
+            )
+            return
+        labels = []
+        for item in items:
+            labels.append(
+                "شناسهٔ {wid} — {name} — {rows} ردیف{when}".format(
+                    wid=fa(item["workbook_id"]), name=item["filename"],
+                    rows=fa(item["rows"]),
+                    when=(f" — {item['imported_at']}" if item["imported_at"] else ""),
+                )
+            )
+        current = int(self.settings.workbook_spin.value() or 1)
+        index = next(
+            (i for i, item in enumerate(items) if item["workbook_id"] == current), 0
+        )
+        choice, ok = QInputDialog.getItem(
+            self, "کتاب کارهای دیتابیس",
+            "کتاب کاری که اعداد داشبورد و پایهٔ به‌روزرسانی از آن خوانده می‌شود:\n"
+            "(کتاب کار ۰۲ خودتان را با شناسه‌اش انتخاب کنید)",
+            labels, index, False,
+        )
+        if not ok or not choice:
+            return
+        picked = items[labels.index(choice)]
+        self.settings.workbook_spin.setValue(int(picked["workbook_id"]))
+        self.config.set("db_workbook_id", int(picked["workbook_id"]), save=False)
+        self.config.save()
+        self.settings.set_status(
+            f"کتاب کار انتخاب شد — شناسهٔ {fa(picked['workbook_id'])} "
+            f"«{picked['filename']}»"
+        )
+        self._notify("کتاب کار انتخاب شد؛ داده‌ها بازخوانی می‌شود", "database")
         self.load_data()
 
     def import_excel_dialog(self) -> None:
@@ -13009,8 +13405,15 @@ class MainWindow(QMainWindow):
         self.config.save()
         rows = int(imported.get("data_rows") or 0)
         cells = int(result.get("written_cells") or 0)
+        new_id = int(imported.get("workbook_id") or 0)
+        base_id = int(result.get("base_workbook_id") or 0)
+        if new_id:
+            self.config.set("db_workbook_id", new_id, save=False)
+            self.config.save()
+            self.settings.workbook_spin.setValue(new_id)
         self.settings.set_status(
             f"به‌روزرسانی انجام شد — {fa(rows)} ردیف در دیتابیس، {fa(cells)} سلول"
+            + (f" (شناسهٔ {fa(new_id)})" if new_id else "")
         )
         self._notify("دیتابیس و داشبورد به‌روز شدند", "check")
         self.statusBar().showMessage(
@@ -13023,10 +13426,22 @@ class MainWindow(QMainWindow):
             f"ردیف‌های «اجرا - مهر»: {fa(plan.filtered_rows)} — "
             f"تطبیق‌شده: {fa(plan.matched_rows)} ({plan.method})",
             f"سلول‌های نوشته‌شده: {fa(cells)}",
-            f"ردیف‌های ذخیره‌شده در دیتابیس: {fa(rows)}",
+        ]
+        if base_id:
+            lines.append(
+                f"کتاب کار پایه: شناسهٔ {fa(base_id)} «{result.get('base_filename') or '—'}»"
+            )
+        lines.append(f"ردیف‌های ذخیره‌شده در دیتابیس: {fa(rows)}")
+        if new_id:
+            lines.append(
+                f"نسخهٔ به‌روز با شناسهٔ {fa(new_id)} در دیتابیس ذخیره شد"
+                + (f"؛ کتاب کار پایه (شناسهٔ {fa(base_id)}) دست‌نخورده ماند"
+                   if base_id else "")
+            )
+        lines += [
             "",
             "فایل با خودِ اکسل بازمحاسبه و ذخیره شد، بعد در دیتابیس بارگذاری شد؛ "
-            "داشبورد در حال بازخوانی است. کتاب کار اصلی شما هم دست‌نخورده مانده است.",
+            "داشبورد در حال بازخوانی است.",
         ]
         box = QMessageBox(self)
         box.setWindowTitle("به‌روزرسانی کامل شد")
