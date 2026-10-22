@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.1"
+APP_VERSION = "3.5.2"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1420,6 +1420,34 @@ def import_workbook_to_database(
             f"شیت «{sheet_name or SHEET_NAME_DEFAULT}» در فایل نیست.\n"
             f"شیت‌های موجود: {'، '.join(sheets)}"
         )
+    health = workbook_health(blob)
+    repaired: Dict[str, Any] = {}
+    if health.get("damaged"):
+        # ذخیرهٔ فایلی که فرمول‌هایش مقدار ندارند داشبورد را صفر می‌کند؛ اول
+        # ستون‌های شناسایی/درصد را از شیت خروجی سامانه همان فایل بازسازی می‌کنیم.
+        try:
+            book = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
+            try:
+                rows = [list(row) for row in book[target_sheet].iter_rows(values_only=True)]
+                repaired = repair_rows_from_companion(book, target_sheet, rows)
+            finally:
+                book.close()
+        except Exception as exc:
+            repaired = {"filled": 0, "error": str(exc)}
+        if not repaired.get("filled"):
+            raise ExcelDataError(
+                "این فایل سالم نیست: فرمول‌های شیت «"
+                + str(health.get("sheet") or target_sheet)
+                + "» مقدار محاسبه‌شده ندارند ("
+                + fa(round(float(health.get("ratio") or 0) * 100))
+                + "٪ خالی است) و شیت خروجی سامانه هم برای بازسازی پیدا نشد.\n\n"
+                "فایل اصلی را در اکسل باز کنید، یک بار ذخیره کنید (F9 و سپس Ctrl+S) "
+                "و بعد همین فایل را بارگذاری کنید."
+            )
+        log_event(
+            "فایل ناقص پیش از ذخیره بازسازی شد: "
+            f"{repaired.get('filled')} ردیف از شیت «{repaired.get('sheet')}»"
+        )
 
     database = _safe_identifier(settings.get("database") or "master_data", "نام دیتابیس")
     wid = int(workbook_id or settings.get("workbook_id") or 1)
@@ -1487,6 +1515,8 @@ def import_workbook_to_database(
                 book = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
                 try:
                     raw_rows = [list(row) for row in book[target_sheet].iter_rows(values_only=True)]
+                    if repaired.get("filled"):
+                        repair_rows_from_companion(book, target_sheet, raw_rows)
                 finally:
                     book.close()
                 stored = store_rows_in_database(
@@ -1961,6 +1991,126 @@ def plan_system_update(source_path: str, target_blob: bytes,
     )
 
 
+def _sheet_system_score(workbook, sheet_name: str, source_keys: set) -> int:
+    """امتیاز شباهت یک شیت به خروجی سامانه (Contract Close Documet Count Report)."""
+    try:
+        sheet = workbook[sheet_name]
+    except Exception:
+        return -1
+    rows = [list(row) for row in sheet.iter_rows(
+        min_row=1, max_row=15, max_col=40, values_only=True
+    )]
+    header_row, sub_col, contract_col = _detect_header_row(rows)
+    if contract_col < 0:
+        return -1
+    score = 10 if sub_col >= 0 else 0
+    lowered = normalize_per(sheet_name).strip().lower()
+    if "کندو" in sheet_name or "kandoo" in lowered:
+        score += 30
+    elif "خروجی" in sheet_name:
+        score += 20
+    elif "sheet 1" in lowered or "sheet1" in lowered:
+        score += 15
+    hits = 0
+    for row in sheet.iter_rows(
+        min_row=header_row + 2, max_col=contract_col + 1, values_only=True
+    ):
+        key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+        if key and key in source_keys:
+            hits += 1
+            if hits >= 50:
+                break
+    return score + min(40, hits // 5)
+
+
+def detect_system_sheet(workbook, source_keys: set) -> str:
+    """شیتی از کتاب کار که خروجی سامانه در آن پیست می‌شود (مثل «خروجی کندو»)."""
+    best, best_score = "", -1
+    for name in workbook.sheetnames:
+        score = _sheet_system_score(workbook, str(name), source_keys)
+        if score > best_score:
+            best, best_score = str(name), score
+    return best if best_score > 0 else ""
+
+
+def source_contract_keys(source_path: str) -> set:
+    """کلید شمارهٔ قراردادهای فایل سامانه (برای پیدا کردن شیت مقصد)."""
+    try:
+        _, _, rows = _open_rows(source_path)
+    except Exception:
+        return set()
+    if not rows:
+        return set()
+    header_row, _sub_col, contract_col = _detect_header_row(rows)
+    if contract_col < 0:
+        contract_col = 4
+    keys = set()
+    for row in rows[header_row + 1:]:
+        key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
+                        out_path: str) -> Dict[str, Any]:
+    """نسخهٔ تازه‌ای از کتاب کار می‌سازد که فقط مقادیر L..AJ در شیت سامانه عوض شده‌اند.
+
+    فایل اصلی هرگز بازنویسی نمی‌شود و سلول‌هایی که فرمول دارند دست‌نخورده می‌مانند؛
+    بنابراین فرمول‌ها و ساختار کتاب کار سالم می‌ماند.
+    """
+    if openpyxl is None:
+        raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(base_blob), data_only=False)
+    except Exception as exc:
+        raise ExcelDataError(f"کتاب کار باز نشد:\n{exc}") from exc
+    try:
+        if plan.sheet_name not in workbook.sheetnames:
+            raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
+        sheet = workbook[plan.sheet_name]
+        written = 0
+        formula_cells = 0
+        merged_cells = 0
+        for target_row, values in plan.rows:
+            for offset, value in enumerate(values):
+                column = plan.first_column + offset
+                cell = sheet.cell(row=int(target_row), column=int(column))
+                current = getattr(cell, "value", None)
+                if isinstance(current, str) and current.startswith("="):
+                    formula_cells += 1
+                    continue
+                if is_blank(value):
+                    continue
+                if current == value:
+                    continue
+                try:
+                    cell.value = value
+                except AttributeError:
+                    merged_cells += 1  # سلول ادغام‌شده در اکسل قابل نوشتن نیست
+                    continue
+                written += 1
+        try:
+            workbook.calculation.fullCalcOnLoad = True
+        except Exception:
+            pass
+        target = Path(str(out_path)).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        workbook.save(str(target))
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    return {
+        "output_path": str(target),
+        "written_cells": written,
+        "formula_cells": formula_cells,
+        "merged_cells": merged_cells,
+        "skipped_formulas_sheet": plan.sheet_name,
+    }
+
+
 def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[bytes, int]:
     """مقادیر L..AJ را روی کتاب کار اعمال می‌کند و بایت‌های تازه را برمی‌گرداند."""
     if openpyxl is None:
@@ -2124,6 +2274,253 @@ def is_generated_workbook(path: str) -> bool:
             workbook.close()
         except Exception:
             pass
+
+
+_COMPANION_HINTS = {
+    "contract_id": ("Contract ID", "شناسه قرارداد"),
+    "subcontractor": ("SubContractor", "Sub Contractor", "پیمانکار جزء", "نام شرکت"),
+    "contract_no": ("Contract No", "شماره قرارداد", "Contract Number"),
+    "subject": ("Contract Subject", "موضوع قرارداد"),
+    "exec_type": ("Excution Type", "Execution Type", "نوع اجرا", "نوع قرارداد"),
+    "progress": ("درصد پیشرفت مدارک اختتام", "درصد پیشرفت", "progress"),
+}
+
+_COMPANION_TARGET_COLUMNS = {
+    "contract_id": 2,      # ستون C
+    "subcontractor": 3,    # ستون D
+    "contract_no": 4,      # ستون E
+    "exec_type": 5,        # ستون F
+    "subject": 6,          # ستون G
+    "progress": 36,        # ستون AK
+}
+
+
+def _find_companion_sheet(workbook, target_name: str, target_rows: int = 0):
+    """شیت خروجی سامانه (با ستون Sub Project، شمارهٔ قرارداد و ستون درصد) در همان فایل.
+
+    بین شیت‌های کاندید، شیتی انتخاب می‌شود که تعداد ردیف‌هایش به شیت اصلی نزدیک
+    باشد و ستون درصدش واقعاً کسری بین ۰ و ۱ داشته باشد.
+    """
+    best = (None, -1, [], -1)
+    best_score = -1
+    for name in workbook.sheetnames:
+        if str(name) == str(target_name):
+            continue
+        try:
+            sheet = workbook[name]
+            rows = [list(r) for r in sheet.iter_rows(min_row=1, max_row=15, max_col=60,
+                                                     values_only=True)]
+        except Exception:
+            continue
+        header_row, sub_col, contract_col = _detect_header_row(rows)
+        if header_row < 0 or sub_col < 0 or contract_col < 0:
+            continue
+        header = rows[header_row]
+        if not _looks_like_sub_project_header(
+            header[sub_col] if sub_col < len(header) else ""
+        ):
+            continue
+        percent_col = _header_column([header], 0, _COMPANION_HINTS["progress"])
+        if percent_col < 0:
+            continue
+        data_rows = 0
+        fractions = 0
+        numbers = 0
+        try:
+            for index, row in enumerate(sheet.iter_rows(min_row=header_row + 2,
+                                                        max_col=percent_col + 1,
+                                                        values_only=True)):
+                if any(not is_blank(value) for value in row[:8]):
+                    data_rows += 1
+                value = row[percent_col] if percent_col < len(row) else None
+                number = num(value)
+                if number is not None:
+                    numbers += 1
+                    if 0 <= number <= 1:
+                        fractions += 1
+                if index > 1500:
+                    break
+        except Exception:
+            continue
+        if data_rows < 10:
+            continue
+        ratio = fractions / numbers if numbers else 0.0
+        if ratio < 0.6:
+            continue
+        score = 100.0 * ratio
+        if target_rows:
+            score += 100.0 * max(0.0, 1.0 - abs(data_rows - target_rows) / max(1, target_rows))
+        lowered = normalize_per(str(name)).strip().lower()
+        if "کندو" in str(name):
+            score += 30
+        elif "خروجی" in str(name):
+            score += 20
+        elif "sheet 1" in lowered or "sheet1" in lowered:
+            score += 10
+        if score > best_score:
+            best_score = score
+            best = (sheet, header_row, header, percent_col)
+    return best
+
+
+def repair_rows_from_companion(workbook, target_name: str,
+                               raw_rows: List[List[Any]]) -> Dict[str, Any]:
+    """ستون‌های شناسایی و درصد را از شیت خروجی سامانه همان فایل بازسازی می‌کند.
+
+    وقتی کتاب کار با ابزاری بیرون از اکسل ذخیره شده باشد، ستون‌های فرمولی
+    (نام شرکت، شمارهٔ قرارداد، درصد) مقدار ندارند. این مقادیر در همان فایل و در
+    شیت «خروجی کندو» موجودند؛ فقط همان‌ها در حافظه جای خالی‌ها گذاشته می‌شوند
+    (هیچ فایلی نوشته نمی‌شود). درصد کل هم همان فرمول خود کتاب کار
+    (میانگین ستون ACK) روی همین مقادیر است.
+    """
+    result: Dict[str, Any] = {"filled": 0, "progress": 0, "sheet": "", "total": None}
+    if not raw_rows or len(raw_rows) < 4:
+        return result
+    sheet, companion_header_row, header_values, percent_col = _find_companion_sheet(
+        workbook, target_name, max(0, len(raw_rows) - 3)
+    )
+    if sheet is None:
+        return result
+    result["sheet"] = str(sheet.title)
+    columns: Dict[str, int] = {}
+    for key, hints in _COMPANION_HINTS.items():
+        if key == "progress":
+            columns[key] = percent_col
+            continue
+        column = _header_column([header_values], 0, hints)
+        if column >= 0:
+            columns[key] = column
+    if "contract_no" not in columns or "subcontractor" not in columns:
+        return result
+
+    companion_start = companion_header_row + 1
+    target_header_row, _sub, _contract = _detect_header_row(raw_rows[:12])
+    if target_header_row < 0:
+        target_header_row = 2
+    target_start = target_header_row + 1
+    delta = companion_start - target_start
+    companion_rows = [list(r) for r in sheet.iter_rows(values_only=True)]
+    progress_values: List[float] = []
+    filled = 0
+    progress_rows = 0
+    for index in range(target_start, len(raw_rows)):
+        companion_index = index + delta
+        if companion_index >= len(companion_rows) or companion_index < 0:
+            continue
+        source = companion_rows[companion_index]
+        target = raw_rows[index]
+        if not any(not is_blank(value) for value in target[:7]):
+            continue
+        changed = False
+        for key, target_column in _COMPANION_TARGET_COLUMNS.items():
+            if key not in columns:
+                continue
+            source_column = columns[key]
+            value = source[source_column] if source_column < len(source) else None
+            if is_blank(value):
+                continue
+            while len(target) <= target_column:
+                target.append(None)
+            if not is_blank(target[target_column]):
+                continue
+            number = num(value) if key == "progress" else None
+            if key == "progress" and (number is None or not 0 <= number <= 1):
+                continue  # ستون درصد نیست (مثلاً مبلغ)
+            target[target_column] = value
+            changed = True
+            if key == "progress" and number is not None and number > 0:
+                progress_values.append(number)
+                progress_rows += 1
+        if changed:
+            filled += 1
+    total = None
+    if progress_values and len(raw_rows) > 1:
+        if len(raw_rows[1]) <= 36:
+            raw_rows[1].extend([None] * (37 - len(raw_rows[1])))
+        if is_blank(raw_rows[1][36]):
+            # همان فرمول کتاب کار: SUBTOTAL(101) یعنی میانگین همان ستون
+            total = round(sum(progress_values) / len(progress_values), 6)
+            raw_rows[1][36] = total
+    result.update({"filled": filled, "progress": progress_rows, "total": total})
+    return result
+
+
+def workbook_health(blob: bytes, max_rows: int = 4000) -> Dict[str, Any]:
+    """سالم بودن کتاب کار: آیا فرمول‌ها مقدار محاسبه‌شده (cached) دارند؟
+
+    وقتی فایلی با ابزاری غیر از اکسل (مثل openpyxl) دوباره ذخیره شود، فرمول‌ها
+    می‌مانند ولی مقدار محاسبه‌شده‌شان پاک می‌شود؛ نتیجه این است که همهٔ ستون‌های
+    فرمولی (نام شرکت، شمارهٔ قرارداد، درصد، وضعیت) در خواندن، خالی/صفر می‌شوند.
+    """
+    result: Dict[str, Any] = {
+        "ok": False, "formulas": 0, "missing": 0, "ratio": 0.0,
+        "damaged": False, "sheet": "", "sheets": [],
+    }
+    if not blob or openpyxl is None:
+        return result
+    try:
+        formulas_book = openpyxl.load_workbook(
+            io.BytesIO(blob), data_only=False, read_only=True
+        )
+        values_book = openpyxl.load_workbook(
+            io.BytesIO(blob), data_only=True, read_only=True
+        )
+    except Exception:
+        return result
+    try:
+        result["sheets"] = [str(name) for name in formulas_book.sheetnames]
+        target = ""
+        for name in formulas_book.sheetnames:
+            if str(name).strip().lower() == SHEET_NAME_DEFAULT:
+                target = name
+                break
+        if not target and formulas_book.sheetnames:
+            target = formulas_book.sheetnames[0]
+        if not target:
+            return result
+        result["sheet"] = str(target)
+        result["ok"] = True
+        formulas = 0
+        missing = 0
+        rows_f = formulas_book[target].iter_rows(values_only=True)
+        rows_v = values_book[target].iter_rows(values_only=True)
+        for index, (row_f, row_v) in enumerate(zip(rows_f, rows_v)):
+            if index >= max_rows:
+                break
+            for column, value in enumerate(row_f or ()):
+                if isinstance(value, str) and value.startswith("="):
+                    formulas += 1
+                    other = row_v[column] if column < len(row_v or ()) else None
+                    if other is None or (isinstance(other, str) and not other.strip()):
+                        missing += 1
+        result["formulas"] = formulas
+        result["missing"] = missing
+        result["ratio"] = round(missing / formulas, 3) if formulas else 0.0
+        result["damaged"] = bool(formulas >= 20 and result["ratio"] >= 0.5)
+        return result
+    finally:
+        for book in (formulas_book, values_book):
+            try:
+                book.close()
+            except Exception:
+                pass
+
+
+DAMAGED_WORKBOOK_TITLE = "کتاب کار ذخیره‌شده ناقص است"
+
+
+def damaged_workbook_message(health: Dict[str, Any]) -> str:
+    """توضیح روشن برای کتاب کاری که فرمول‌هایش مقدار ندارند."""
+    percent = fa(round(float(health.get("ratio") or 0) * 100))
+    return (
+        "این کتاب کار با ابزاری بیرون از اکسل دوباره ذخیره شده و "
+        f"{percent}٪ فرمول‌هایش مقدار محاسبه‌شده ندارند؛ به همین دلیل ستون‌های "
+        "فرمولی (نام شرکت، شمارهٔ قرارداد، درصد پیشرفت و وضعیت‌ها) خالی خوانده "
+        "می‌شوند و کارت‌ها صفر می‌شوند.\n\n"
+        "کتاب کار اصلی خودتان را (همان فایل ۰۲ با شیت colorcode) یک بار باز کنید "
+        "و ذخیره کنید، بعد در برنامه «بارگذاری فایل اکسل» را بزنید. "
+        "از این نسخه به بعد برنامه هیچ کتاب کاری را بازنویسی نمی‌کند."
+    )
 
 
 def inspect_workbook_bytes(blob: bytes) -> Dict[str, Any]:
@@ -3004,7 +3401,7 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
             f"داشبورد از جدول‌های دیتابیس ساخته می‌شود: "
             f"{stored['data_rows']} سطر / شیت {stored['sheet_name']}"
         )
-        return parse_workbook_rows(
+        data = parse_workbook_rows(
             stored["raw_rows"],
             workbook_name=stored["filename"] or "کتاب کار دیتابیس",
             source_sheet=str(settings.get("sheet_name") or stored["sheet_name"]),
@@ -3014,11 +3411,14 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
             source_note=note + " • جدول contracts",
             source_kind=str(stored.get("source_kind") or "excel"),
         )
+        _flag_damaged_rows(settings, data)
+        return data
     info = fetch_workbook_blob(settings)
     note = "دیتابیس {} • شناسهٔ {}".format(
         settings.get("database") or "master_data", fa(int(settings.get("workbook_id") or 1))
     )
     quality = inspect_workbook_bytes(info["data"])
+    health = workbook_health(info["data"])
     data = parse_workbook_bytes(
         info["filename"],
         info["data"],
@@ -3029,12 +3429,38 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
         source_note=note,
         source_kind="generated" if quality.get("generated") else "excel",
     )
-    try:
-        migrate_blob_to_tables(settings, info)
-        log_event("کتاب کار ذخیره‌شده به جدول‌های نرمال‌شده منتقل شد")
-    except Exception as exc:
-        log_event(f"انتقال کتاب کار به جدول‌ها ناموفق بود: {type(exc).__name__}: {exc}")
+    if health.get("damaged"):
+        data.damaged = True
+        data.damaged_reason = damaged_workbook_message(health)
+        log_event(
+            "کتاب کار ذخیره‌شده فرمول‌هایی بدون مقدار دارد: "
+            f"{health.get('missing')} از {health.get('formulas')}"
+        )
+    if not data.damaged:
+        try:
+            migrate_blob_to_tables(settings, info)
+            log_event("کتاب کار ذخیره‌شده به جدول‌های نرمال‌شده منتقل شد")
+        except Exception as exc:
+            log_event(f"انتقال کتاب کار به جدول‌ها ناموفق بود: {type(exc).__name__}: {exc}")
     return data
+
+
+def _flag_damaged_rows(settings: Dict[str, Any], data: DashboardData) -> None:
+    """اگر کتاب کار ذخیره‌شده ناقص باشد، داده را علامت می‌زند (فقط در صورت نیاز)."""
+    if data.progress_percent_text != "—" or any(data.flag_counts.values()):
+        return
+    try:
+        info = fetch_workbook_blob(settings)
+    except Exception:
+        return
+    health = workbook_health(info.get("data") or b"")
+    if health.get("damaged"):
+        data.damaged = True
+        data.damaged_reason = damaged_workbook_message(health)
+        log_event(
+            "کتاب کار ذخیره‌شده فرمول‌هایی بدون مقدار دارد: "
+            f"{health.get('missing')} از {health.get('formulas')}"
+        )
 
 
 def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
@@ -3051,7 +3477,8 @@ def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
         raise ExcelDataError(f"خواندن فایل اکسل ممکن نشد:\n{exc}") from exc
     note = f"فایل محلی: {file_path.name}"
     quality = inspect_workbook_bytes(blob)
-    return parse_workbook_bytes(
+    health = workbook_health(blob)
+    data = parse_workbook_bytes(
         file_path.name,
         blob,
         sheet_name=str(sheet_name or SHEET_NAME_DEFAULT),
@@ -3061,6 +3488,15 @@ def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
         source_note=note,
         source_kind="generated" if quality.get("generated") else "excel",
     )
+    if health.get("damaged"):
+        data.damaged = True
+        data.damaged_reason = damaged_workbook_message(health)
+        if data.repaired:
+            data.damaged_reason += (
+                f"\n\n{fa(data.repaired)} ردیف از شیت سامانهٔ همین فایل بازسازی شد، "
+                "اما وضعیت‌های علامت‌دار و درصد کل را فقط نسخهٔ سالم کتاب کار دارد."
+            )
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -3255,6 +3691,9 @@ class DashboardData:
     source_kind: str = "excel"
     pdf_total: int = 0
     metric_note: str = ""
+    damaged: bool = False
+    damaged_reason: str = ""
+    repaired: int = 0
 
     @property
     def excel_path(self) -> str:
@@ -3380,15 +3819,37 @@ def parse_workbook_bytes(
             )
         sheet = workbook[target]
         raw_rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+        repair = {"filled": 0, "progress": 0, "sheet": "", "total": None}
+        if raw_rows and any(
+            is_blank(raw_rows[index][column])
+            for index in range(3, min(len(raw_rows), 60))
+            for column in (3, 4)
+            if column < len(raw_rows[index])
+        ):
+            try:
+                repair = repair_rows_from_companion(workbook, target, raw_rows)
+            except Exception as exc:
+                log_event(f"بازسازی ستون‌های خالی از شیت سامانه ممکن نشد: {exc}")
+        if repair.get("filled"):
+            log_event(
+                "ستون‌های خالی از شیت «{}» بازسازی شد: {} ردیف، {} درصد".format(
+                    repair.get("sheet"), repair.get("filled"), repair.get("progress")
+                )
+            )
     finally:
         try:
             workbook.close()
         except Exception:
             pass
+    if repair.get("filled"):
+        source_note = (source_note + " • " if source_note else "") + (
+            f"ستون‌های شناسایی/درصد از شیت «{repair.get('sheet')}» همان فایل بازسازی شد"
+        )
+        source_kind = source_kind or "excel"
     kind = source_kind or (
         "generated" if inspect_workbook_bytes(blob).get("generated") else "excel"
     )
-    return parse_workbook_rows(
+    data = parse_workbook_rows(
         raw_rows,
         workbook_name=str(filename or "کتاب کار"),
         source_sheet=target,
@@ -3398,6 +3859,8 @@ def parse_workbook_bytes(
         source_note=source_note,
         source_kind=kind,
     )
+    data.repaired = int(repair.get("filled") or 0)
+    return data
 
 
 def parse_workbook_rows(
@@ -6267,6 +6730,60 @@ class ManagedUpdateWorker(QThread):
         except Exception as exc:
             write_error_log(traceback.format_exc())
             self.failed.emit(f"خطای پیش‌بینی‌نشده در ساخت کتاب کار داخلی:\n{exc}")
+
+
+class SystemCopyWorker(QThread):
+    """نسخهٔ به‌روزشدهٔ کتاب کار را از فایل ۰۱ می‌سازد (بدون دست‌زدن به فایل اصلی)."""
+
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: Dict[str, Any], source_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.source_path = str(source_path)
+
+    def run(self) -> None:
+        try:
+            base = resolve_update_base(self.settings, self.source_path)
+            keys = source_contract_keys(self.source_path)
+            try:
+                probe = openpyxl.load_workbook(io.BytesIO(base["blob"]), data_only=False)
+                target_sheet = detect_system_sheet(probe, keys)
+                probe.close()
+            except Exception as exc:
+                raise ExcelDataError(f"کتاب کار باز نشد:\n{exc}") from exc
+            if not target_sheet:
+                raise ExcelDataError(
+                    "در کتاب کار شیتی پیدا نشد که خروجی سامانه در آن پیست شود "
+                    "(شیتی با سرستون‌های Contract No و Sub Project).\n"
+                    "اگر کتاب کار شما شیت «خروجی کندو» دارد، همان را بررسی کنید."
+                )
+            plan = plan_system_update(self.source_path, base["blob"],
+                                      sheet_name=target_sheet)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M")
+            stem = Path(str(base.get("filename") or "workbook.xlsx")).stem
+            out_path = data_dir() / f"{stem}-به‌روز-{stamp}.xlsx"
+            info = prepare_system_copy(plan, base["blob"], str(out_path))
+            log_event(
+                f"نسخهٔ به‌روز ساخته شد: {info['output_path']} — "
+                f"{plan.matched_rows} ردیف، {info['written_cells']} سلول، "
+                f"{info['formula_cells']} سلول فرمولی دست‌نخورده"
+            )
+            self.done.emit({
+                "plan": plan,
+                "output_path": info["output_path"],
+                "written_cells": info["written_cells"],
+                "formula_cells": info["formula_cells"],
+                "sheet": target_sheet,
+                "base_source": base.get("base_source"),
+                "base_filename": base.get("filename"),
+            })
+        except ExcelDataError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در ساخت نسخهٔ به‌روز:\n{exc}")
 
 
 class SystemUpdateApplyWorker(QThread):
@@ -9673,7 +10190,8 @@ class HelpPage(QWidget):
             "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
             "هر بار فایل ۰۱ سامانه را گرفتید، همان فایل را با «به‌روزرسانی از فایل سامانه "
             "(01)» بدهید؛ برنامه ردیف‌های «اجرا - مهر» ستون Sub Project را جدا می‌کند و "
-            "ستون‌های L تا AJ را روی کتاب کار دیتابیس می‌نویسد — بدون کپی‌پیست در فایل ۰۲.",
+            "ستون‌های L تا AJ را در شیت «خروجی کندو» (شیت سامانه) در یک نسخهٔ تازه می‌نویسد "
+            "— فایل اصلی شما بازنویسی نمی‌شود.",
         ]
         for number, text in enumerate(steps, start=1):
             start_card.body.addWidget(page_step_label(text, number, colors))
@@ -11075,9 +11593,17 @@ class MainWindow(QMainWindow):
             self._notify(f"{fa(data.total_contracts)} قرارداد بارگذاری شد", "check")
         self._setup_auto_timer()
         system_only = self._looks_like_system_only(data) if data.records else False
-        if not silent and data.warnings and not system_only:
+        damaged = bool(getattr(data, "damaged", False))
+        if damaged:
+            self.statusBar().showMessage(
+                "کتاب کار ذخیره‌شده ناقص است — اعداد داشبورد معتبر نیست", 10000
+            )
+            self._notify("کتاب کار ذخیره‌شده ناقص است (فرمول‌ها بدون مقدار)", "alert")
+        if not silent and data.warnings and not system_only and not damaged:
             QMessageBox.warning(self, "هشدار داده‌ها", "\n".join(data.warnings))
-        if system_only:
+        if damaged:
+            QTimer.singleShot(50, lambda: self._ask_for_damaged_workbook(data))
+        elif system_only:
             QTimer.singleShot(50, lambda d=data: self._maybe_restore_real_workbook(d))
 
     # ------------------------------------------------------------------
@@ -11173,6 +11699,25 @@ class MainWindow(QMainWindow):
             "کتاب کار اصلی پیدا شد؛ جای کتاب کار ساخته‌شده از فایل ۰۱ نشست", "check"
         )
         self.load_data(silent=True)
+
+    @guarded("_ask_for_damaged_workbook")
+    def _ask_for_damaged_workbook(self, data: DashboardData) -> None:
+        """کتاب کار ذخیره‌شده فرمول‌هایی بدون مقدار دارد؛ فایل اصلی خواسته می‌شود."""
+        if getattr(self, "_damaged_prompted", False):
+            return
+        self._damaged_prompted = True
+        box = QMessageBox(self)
+        box.setWindowTitle(DAMAGED_WORKBOOK_TITLE)
+        box.setIcon(QMessageBox.Warning)
+        box.setText("کتاب کار ذخیره‌شده در دیتابیس ناقص است و اعداد آن معتبر نیست.")
+        box.setInformativeText(
+            getattr(data, "damaged_reason", "") or damaged_workbook_message({})
+        )
+        load_btn = box.addButton("بارگذاری کتاب کار اصلی", QMessageBox.AcceptRole)
+        box.addButton("بعداً", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is load_btn:
+            self.import_excel_dialog()
 
     @guarded("_ask_for_real_workbook")
     def _ask_for_real_workbook(self) -> None:
@@ -11476,9 +12021,14 @@ class MainWindow(QMainWindow):
     # به‌روزرسانی از فایل سامانه (فایل ۰۱)
     # ------------------------------------------------------------------
     def start_system_update(self, path: str) -> None:
-        """فایل ۰۱ را می‌خواند، فیلتر می‌کند و پس از تأیید، دیتابیس را به‌روز می‌کند."""
+        """فایل ۰۱ را می‌خواند و یک «نسخهٔ به‌روز» از کتاب کار می‌سازد (سالم).
+
+        کتاب کار اصلی هرگز بازنویسی نمی‌شود: فقط مقادیر L..AJ در شیتی که خروجی
+        سامانه در آن پیست می‌شود (مثل «خروجی کندو») در یک فایل تازه نوشته می‌شود
+        و فرمول‌ها دست‌نخورده می‌مانند.
+        """
         if self._system_update_running():
-            self._notify("یک به‌روزرسانی در حالاجراست؛ کمی صبر کنید", "clock")
+            self._notify("یک به‌روزرسانی در حال‌اجراست؛ کمی صبر کنید", "clock")
             return
         if not str(path or "").strip():
             self.pick_system_update_file()
@@ -11488,7 +12038,7 @@ class MainWindow(QMainWindow):
             return
         self.show_page("settings")
         self._pending_system_source = path
-        self.settings.set_status("در حال خواندن فایل سامانه و تطبیق ردیف‌ها…")
+        self.settings.set_status("در حال خواندن فایل سامانه و ساخت نسخهٔ به‌روز…")
         settings = dict(self.config.db_settings())
         settings.update({
             "source_workbook_path": self.config.get("source_workbook_path"),
@@ -11496,10 +12046,8 @@ class MainWindow(QMainWindow):
             "last_excel_path": self.config.get("last_excel_path"),
             "extra_excel_path": self.settings.excel_edit.text().strip(),
         })
-        worker = SystemUpdatePlanWorker(settings, path,
-                                        str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT),
-                                        self)
-        worker.planned.connect(self._on_system_plan_ready)
+        worker = SystemCopyWorker(settings, path, self)
+        worker.done.connect(self._on_system_copy_done)
         worker.failed.connect(self._on_system_update_failed)
         worker.finished.connect(lambda: self._set_system_update_busy(False))
         self._system_update_worker = worker
@@ -11523,15 +12071,33 @@ class MainWindow(QMainWindow):
             return
         self.show_page("settings")
         self._pending_system_source = source_path
-        seed = find_seed_workbook(
-            source_path,
-            extra_paths=(
-                self.config.get("source_workbook_path"),
-                self.config.get("local_excel_path"),
-                self.config.get("last_excel_path"),
-                self.settings.excel_edit.text().strip(),
-            ),
+        base_paths = (
+            self.config.get("source_workbook_path"),
+            self.config.get("local_excel_path"),
+            self.config.get("last_excel_path"),
+            self.settings.excel_edit.text().strip(),
         )
+        real = find_real_workbook(source_path, extra_paths=base_paths)
+        if real:
+            # کتاب کار اصلی موجود است؛ برنامه آن را بازنویسی نمی‌کند و فقط یک
+            # نسخهٔ به‌روز از روی آن می‌سازد (فرمول‌ها دست‌نخورده می‌مانند).
+            settings = dict(self.config.db_settings())
+            settings.update({
+                "source_workbook_path": real,
+                "local_excel_path": real,
+                "last_excel_path": str(self.config.get("last_excel_path") or ""),
+                "extra_excel_path": self.settings.excel_edit.text().strip(),
+            })
+            self.settings.set_status("در حال ساخت نسخهٔ به‌روز از کتاب کار اصلی…")
+            worker = SystemCopyWorker(settings, source_path, self)
+            worker.done.connect(self._on_system_copy_done)
+            worker.failed.connect(self._on_system_update_failed)
+            worker.finished.connect(lambda: self._set_system_update_busy(False))
+            self._system_update_worker = worker
+            self._system_update_busy = True
+            worker.start()
+            return
+        seed = find_seed_workbook(source_path, extra_paths=base_paths)
         self.settings.set_status("در حال ساخت/به‌روزرسانی کتاب کار داخلی از فایل ۰۱…")
         worker = ManagedUpdateWorker(
             source_path, str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT), self,
@@ -11849,6 +12415,49 @@ class MainWindow(QMainWindow):
         self._system_update_worker = worker
         self._system_update_busy = True
         worker.start()
+
+    @guarded("_on_system_copy_done")
+    def _on_system_copy_done(self, result: Dict[str, Any]) -> None:
+        plan: SystemUpdatePlan = result["plan"]
+        self._pending_system_source = ""
+        output = str(result.get("output_path") or "")
+        self.settings.set_status(
+            f"نسخهٔ به‌روز ساخته شد — {fa(int(result.get('written_cells') or 0))} سلول"
+        )
+        self._notify("نسخهٔ به‌روز کتاب کار ساخته شد", "check")
+        lines = [
+            f"فایل سامانه: {Path(plan.source_path).name}",
+            f"ردیف‌های «اجرا - مهر»: {fa(plan.filtered_rows)} — "
+            f"تطبیق‌شده: {fa(plan.matched_rows)} ({plan.method})",
+            f"سلول‌های نوشته‌شده: {fa(int(result.get('written_cells') or 0))}",
+            f"شیت مقصد: «{result.get('sheet') or plan.sheet_name}» "
+            "(همان شیتی که خروجی سامانه در آن پیست می‌شود)",
+        ]
+        if result.get("formula_cells"):
+            lines.append(
+                f"سلول‌های فرمولی دست‌نخورده: {fa(int(result['formula_cells']))}"
+            )
+        lines += [
+            "",
+            "کتاب کار اصلی شما بازنویسی نشد؛ این یک فایل تازه است.",
+            "برای اینکه اعداد داشبورد هم به‌روز شوند: این فایل را در اکسل باز کنید "
+            "(فرمول‌ها خودکار محاسبه می‌شوند)، Ctrl+S بزنید، و بعد از برنامه "
+            "«بارگذاری فایل اکسل» را بزنید و همین فایل را انتخاب کنید.",
+        ]
+        if output:
+            lines += ["", f"فایل تازه: {output}"]
+        box = QMessageBox(self)
+        box.setWindowTitle("نسخهٔ به‌روز کتاب کار ساخته شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("فایل ۰۱ روی یک نسخهٔ تازه از کتاب کار اعمال شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+        if output and os.environ.get("QT_QPA_PLATFORM", "") not in {"offscreen", "minimal"}:
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(output))
+            except Exception:
+                pass
 
     @guarded("_on_system_update_done")
     def _on_system_update_done(self, result: Dict[str, Any]) -> None:
