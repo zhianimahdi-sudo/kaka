@@ -167,7 +167,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.3"
+APP_VERSION = "3.5.4"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -2127,6 +2127,87 @@ def detect_system_sheet(workbook, source_keys: set) -> str:
         if score > best_score:
             best, best_score = str(name), score
     return best if best_score > 0 else ""
+
+
+def count_workbook_contracts(path: str, sheet_name: str = "") -> int:
+    """شمارش سریع ردیف‌های دارای داده در شیت colorcode (پیش از بارگذاری)."""
+    if openpyxl is None:
+        return 0
+    try:
+        book = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+    except Exception:
+        return 0
+    try:
+        target = ""
+        if sheet_name and sheet_name in book.sheetnames:
+            target = sheet_name
+        elif "colorcode" in book.sheetnames:
+            target = "colorcode"
+        else:
+            target = book.sheetnames[0] if book.sheetnames else ""
+        if not target:
+            return 0
+        count = 0
+        for index, row in enumerate(book[target].iter_rows(min_row=4, max_col=7,
+                                                           values_only=True)):
+            if any(not is_blank(value) for value in row):
+                count += 1
+            if index > 20000:
+                break
+        return count
+    except Exception:
+        return 0
+    finally:
+        try:
+            book.close()
+        except Exception:
+            pass
+
+
+def validate_system_source(source_path: str) -> Dict[str, Any]:
+    """فایل ۰۱ را قبل از به‌روزرسانی بررسی می‌کند.
+
+    خروجی: تعداد ردیف‌ها، تعداد ردیف‌های «اجرا - مهر» و شیت/ستون‌های پیداشده.
+    اگر فایل به‌جای خروجی سامانه، خودِ کتاب کار باشد (شیت colorcode داشته باشد)
+    یا هیچ ردیف «اجرا - مهر» نداشته باشد، خطای روشن داده می‌شود.
+    """
+    path = str(source_path or "").strip()
+    if not path or not Path(path).exists():
+        raise ExcelDataError(f"فایل انتخاب‌شده پیدا نشد:\n{path or '—'}")
+    if has_colorcode_sheet(path):
+        raise ExcelDataError(
+            "این فایل خودش «کتاب کار» است (شیت colorcode دارد)، نه خروجی سامانه.\n\n"
+            "برای به‌روزرسانی، فایل خروجی سامانه را انتخاب کنید: "
+            "Contract-Info-Report.xlsx (همان فایلی که ستون Sub Project دارد)."
+        )
+    names, sheet, rows = _open_rows(path)
+    if not rows:
+        raise ExcelDataError("فایل انتخاب‌شده هیچ داده‌ای ندارد.")
+    header_row, sub_col, contract_col = _detect_header_row(rows)
+    if sub_col < 0:
+        sub_col = _guess_sub_project_column(rows, header_row + 1)
+    matched = 0
+    for row in rows[header_row + 1:]:
+        if sub_col >= 0 and sub_col < len(row) and _matches_sub_project(row[sub_col]):
+            matched += 1
+    info = {
+        "path": path,
+        "sheet": sheet,
+        "rows": len(rows),
+        "matched": matched,
+        "sub_col": sub_col + 1 if sub_col >= 0 else 0,
+        "contract_col": contract_col + 1 if contract_col >= 0 else 0,
+    }
+    if matched < 20:
+        raise ExcelDataError(
+            "این فایل به‌نظر خروجی سامانه نیست: فقط "
+            f"{fa(matched)} ردیف با «اجرا - مهر» در آن پیدا شد "
+            f"(از {fa(len(rows))} ردیف، شیت «{sheet}»).\n\n"
+            "فایل درست، خروجی «Contract Close Documet Count Report» است که ستون "
+            "«Sub Project» آن مقدار «اجرا - مهر» دارد و حدود ۱۲۰۰ ردیف است.\n"
+            "همان فایل را انتخاب کنید و دوباره «به‌روزرسانی» را بزنید."
+        )
+    return info
 
 
 def source_contract_keys(source_path: str) -> set:
@@ -6844,7 +6925,22 @@ class SystemCopyWorker(QThread):
 
     def run(self) -> None:
         try:
+            log_event(f"فایل ۰۱ انتخاب‌شده: {self.source_path}")
+            check = validate_system_source(self.source_path)
+            log_event(
+                "فایل ۰۱ سالم است: شیت «{sheet}» — {rows} ردیف، {matched} ردیف "
+                "«اجرا - مهر»، ستون زیرپروژه {sub_col}، ستون قرارداد {contract_col}".format(
+                    sheet=check["sheet"], rows=fa(check["rows"]),
+                    matched=fa(check["matched"]), sub_col=fa(check["sub_col"]),
+                    contract_col=fa(check["contract_col"]),
+                )
+            )
             base = resolve_update_base(self.settings, self.source_path)
+            if check.get("path") and str(base.get("base_path") or "") == str(check["path"]):
+                raise ExcelDataError(
+                    "فایل «۰۱» و کتاب کار پایه یکی هستند؛ چیزی برای به‌روزرسانی نیست.\n"
+                    "فایل خروجی سامانه (Contract-Info-Report) را انتخاب کنید."
+                )
             keys = source_contract_keys(self.source_path)
             report: List[Dict[str, Any]] = []
             try:
@@ -11668,6 +11764,41 @@ class MainWindow(QMainWindow):
         self.topbar.reload_button.setEnabled(True)
         self.loader = None
 
+    def _watch_contract_count(self, data: DashboardData) -> None:
+        """اگر تعداد قراردادهای یک منبع ناگهان کم شود، کاربر را خبر می‌کند."""
+        if getattr(data, "damaged", False) and not getattr(data, "repaired", 0):
+            return
+        source = str(data.source_note or "")
+        previous = int(self.config.get("last_loaded_count") or 0)
+        previous_source = str(self.config.get("last_loaded_source") or "")
+        current = int(data.total_contracts or 0)
+        self.config.set("last_loaded_count", current, save=False)
+        self.config.set("last_loaded_source", source, save=False)
+        self.config.save()
+        if previous < 100 or current <= 0 or previous_source != source:
+            return
+        if current >= previous * 0.7:
+            return
+        message = (
+            f"تعداد قراردادها از {fa(previous)} به {fa(current)} کاهش پیدا کرد.\n\n"
+            "یعنی فایلی که خوانده شد با بار قبل فرق دارد. اگر خودتان فایل را عوض "
+            "نکرده‌اید، نسخهٔ سالم کتاب کار را دوباره بارگذاری کنید."
+        )
+        log_event(
+            f"افت تعداد قراردادها: {previous} → {current} | منبع: {source}"
+        )
+        self._notify("تعداد قراردادهای خوانده‌شده کم شد", "alert")
+        self.statusBar().showMessage(
+            f"توجه: {fa(previous)} → {fa(current)} قرارداد", 15000
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("تعداد قراردادها کم شد")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("فایل خوانده‌شده با بار قبل تفاوت دارد.")
+        box.setInformativeText(message)
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
     @guarded("_on_data_loaded")
     def _on_data_loaded(self, data: DashboardData, silent: bool = False) -> None:
         log_event(f"داده در رابط کاربری — {data.total_contracts} قرارداد")
@@ -11683,6 +11814,7 @@ class MainWindow(QMainWindow):
                 "داده‌ها از جدول‌های دیتابیس MySQL (mehr_contracts) خوانده می‌شود"
             )
         self.data = data
+        self._watch_contract_count(data)
         # هر بخش جدا به‌روزرسانی می‌شود؛ خطا در یک بخش نباید بقیهٔ داشبورد را
         # صفر/خالی بگذارد (همین باگ باعث می‌شد همهٔ کارت‌ها صفر بمانند).
         for label, action in (
@@ -12598,14 +12730,22 @@ class MainWindow(QMainWindow):
             f"نسخهٔ به‌روز ساخته شد — {fa(int(result.get('written_cells') or 0))} سلول"
         )
         self._notify("نسخهٔ به‌روز کتاب کار ساخته شد", "check")
+        written = int(result.get("written_cells") or 0)
         lines = [
             f"فایل سامانه: {Path(plan.source_path).name}",
             f"ردیف‌های «اجرا - مهر»: {fa(plan.filtered_rows)} — "
             f"تطبیق‌شده: {fa(plan.matched_rows)} ({plan.method})",
-            f"سلول‌های نوشته‌شده: {fa(int(result.get('written_cells') or 0))}",
+            f"سلول‌های نوشته‌شده: {fa(written)}",
             f"شیت مقصد: «{result.get('sheet') or plan.sheet_name}» "
             "(همان شیتی که خروجی سامانه در آن پیست می‌شود)",
         ]
+        if not written:
+            lines += [
+                "",
+                "هیچ سلولی تغییر نکرد؛ یعنی مقادیر فایل سامانه با کتاب کار یکی "
+                "بوده‌اند. برای همین نیازی به باز کردن فایل در اکسل و بارگذاری "
+                "دوباره نیست — داشبورد همین اعداد را دارد.",
+            ]
         if result.get("formula_cells"):
             lines.append(
                 f"سلول‌های فرمولی دست‌نخورده: {fa(int(result['formula_cells']))}"
@@ -12744,6 +12884,20 @@ class MainWindow(QMainWindow):
             self._notify("دیتابیس تنظیم نشده؛ فایل به‌صورت محلی اجرا می‌شود", "table")
             self.open_local_excel(path)
             return
+        rows_in_file = count_workbook_contracts(path, str(self.config.get("sheet_name") or ""))
+        current = int(getattr(self.data, "total_contracts", 0) or 0)
+        if rows_in_file and current >= 100 and rows_in_file < current * 0.6:
+            answer = QMessageBox.question(
+                self, "تعداد قراردادها کم است",
+                f"فایل انتخاب‌شده فقط {fa(rows_in_file)} قرارداد دارد، در حالی که "
+                f"کتاب کار فعلی {fa(current)} قرارداد دارد.\n\n"
+                "اگر این فایل را بارگذاری کنید، داشبورد با همین تعداد کم نمایش داده "
+                "می‌شود. مطمئنید همین فایل درست است؟",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.settings.set_status("بارگذاری لغو شد — تعداد قراردادها کمتر بود")
+                return
         self.show_page("settings")
         values = self.settings.connection_values()
         settings = {
