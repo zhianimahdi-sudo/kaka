@@ -13,3 +13,4 @@ mehr_notes.json
 mehr_error.log
 mehr_db_attempt.marker
 *.marker
+backups/

@@ -49,6 +49,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -165,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1212,6 +1213,454 @@ def import_workbook_to_database(
         "sheet_name": target_sheet,
         "database": database,
         "sha256": digest,
+    }
+
+
+# ==========================================================================
+# به‌روزرسانی خودکار از «فایل سامانه» (فایل ۰۱) — بدون کپی‌پیست دستی
+# ==========================================================================
+SYSTEM_UPDATE_FIRST_COLUMN = 12   # ستون L
+SYSTEM_UPDATE_LAST_COLUMN = 36    # ستون AJ
+_SYSTEM_UPDATE_OK_WORDS = {"okk", "ok"}
+
+
+def _norm_words(value: Any) -> str:
+    """متن را برای مقایسهٔ کلمه‌ای ساده می‌کند (بدون فاصله، خط تیره و نیم‌فاصله)."""
+    text = normalize_per(txt(value))
+    return re.sub(r"[\s\-_/\\.,،:;()\[\]{}<>«»\"']+", "", text)
+
+
+def _looks_like_sub_project_header(value: Any) -> bool:
+    text = _norm_words(value)
+    return "subproject" in text or "زیرپروژه" in text
+
+
+def _looks_like_contract_header(value: Any) -> bool:
+    text = _norm_words(value)
+    if not text:
+        return False
+    if "قرارداد" in text and ("شماره" in text or "کد" in text):
+        return True
+    if "contract" in text and ("no" in text or "num" in text or "code" in text):
+        return True
+    return text in {"شمارهقرارداد", "کدقرارداد", "contractno", "contractnumber"}
+
+
+def _looks_like_contract_number(value: Any) -> bool:
+    text = txt(value)
+    if len(text) < 4 or len(text) > 40:
+        return False
+    digits = sum(1 for char in text if char.isdigit())
+    letters = sum(1 for char in text if char.isalpha())
+    return digits >= 3 and (letters >= 2 or "/" in text or "-" in text)
+
+
+def _matches_sub_project(value: Any) -> bool:
+    text = _norm_words(value)
+    return "اجرا" in text and "مهر" in text
+
+
+def _open_rows(path: str) -> Tuple[List[str], str, List[List[Any]]]:
+    """فهرست شیت‌ها، شیت انتخاب‌شده و همهٔ ردیف‌های آن را برمی‌گرداند."""
+    if openpyxl is None:
+        raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
+    workbook = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+    try:
+        names = [str(name) for name in workbook.sheetnames]
+        chosen = ""
+        for name in names:
+            lowered = normalize_per(name)
+            if "colorcode" in lowered or "کندو" in lowered:
+                chosen = name
+                break
+        if not chosen:
+            best = -1
+            for name in names:
+                sheet = workbook[name]
+                size = int(sheet.max_row or 0) * int(sheet.max_column or 0)
+                if size > best:
+                    best, chosen = size, name
+        if not chosen and names:
+            chosen = names[0]
+        if not chosen:
+            raise ExcelDataError("فایل انتخاب‌شده هیچ شیتی ندارد.")
+        rows = [list(row) for row in workbook[chosen].iter_rows(values_only=True)]
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    return names, chosen, rows
+
+
+def _detect_header_row(rows: Sequence[Sequence[Any]], limit: int = 15) -> Tuple[int, int, int]:
+    """ردیف سرستون‌ها و ستون‌های «زیرپروژه» و «شمارهٔ قرارداد» را پیدا می‌کند."""
+    best_row, best_score = -1, 0
+    for index, row in enumerate(rows[:limit]):
+        score = 0
+        for value in row:
+            if _looks_like_sub_project_header(value):
+                score += 3
+            elif _looks_like_contract_header(value):
+                score += 2
+        if score > best_score:
+            best_row, best_score = index, score
+    header_row = best_row if best_row >= 0 else 2
+    sub_col, contract_col = -1, -1
+    for column, value in enumerate(rows[header_row] if header_row < len(rows) else []):
+        if sub_col < 0 and _looks_like_sub_project_header(value):
+            sub_col = column
+        if contract_col < 0 and _looks_like_contract_header(value):
+            contract_col = column
+    return header_row, sub_col, contract_col
+
+
+def _guess_sub_project_column(rows: Sequence[Sequence[Any]], start: int) -> int:
+    best_col, best_hits = -1, 0
+    totals: Dict[int, int] = {}
+    for index in range(start, min(len(rows), start + 500)):
+        for column, value in enumerate(rows[index]):
+            if _matches_sub_project(value):
+                totals[column] = totals.get(column, 0) + 1
+    for column, hits in totals.items():
+        if hits > best_hits:
+            best_col, best_hits = column, hits
+    return best_col
+
+
+def _guess_contract_column(rows: Sequence[Sequence[Any]], start: int,
+                           known: set) -> int:
+    """ستونی که بیشترین هم‌خوانی را با شماره‌های قرارداد کتاب کار دارد."""
+    if not known:
+        return -1
+    totals: Dict[int, int] = {}
+    seen: Dict[int, int] = {}
+    for index in range(start, min(len(rows), start + 400)):
+        row = rows[index]
+        for column, value in enumerate(row):
+            key = normalize_lookup_key(txt(value))
+            if not key:
+                continue
+            seen[column] = seen.get(column, 0) + 1
+            if key in known:
+                totals[column] = totals.get(column, 0) + 1
+    best_col, best_ratio = -1, 0.0
+    for column, hits in totals.items():
+        ratio = hits / max(1, seen.get(column, 1))
+        if hits >= 3 and ratio > best_ratio:
+            best_col, best_ratio = column, ratio
+    return best_col if best_ratio >= 0.35 else -1
+
+
+@dataclass
+class SystemUpdatePlan:
+    source_path: str
+    source_sheet: str
+    header_row: int
+    sub_project_column: int
+    contract_column: int
+    target_contract_column: int
+    total_rows: int
+    filtered_rows: int
+    matched_rows: int
+    method: str
+    unmatched: List[str]
+    rows: List[Tuple[int, List[Any]]]
+    sheet_name: str
+    first_column: int
+    last_column: int
+    notes: List[str]
+    source_sheets: List[str]
+
+
+def _column_letter(index: int) -> str:
+    """شمارهٔ ستون (۱-پایه) به حرف اکسل."""
+    letters = ""
+    value = max(1, int(index))
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def plan_system_update(source_path: str, target_blob: bytes,
+                       sheet_name: str = SHEET_NAME_DEFAULT,
+                       first_column: int = SYSTEM_UPDATE_FIRST_COLUMN,
+                       last_column: int = SYSTEM_UPDATE_LAST_COLUMN) -> SystemUpdatePlan:
+    """نقشهٔ به‌روزرسانی را می‌سازد: فیلتر زیرپروژه + تطبیق ردیف‌ها با کتاب کار."""
+    notes: List[str] = []
+    source_names, source_sheet, rows = _open_rows(source_path)
+    if not rows:
+        raise ExcelDataError("شیت فایل سامانه خالی است.")
+    header_row, sub_col, contract_col = _detect_header_row(rows)
+    if sub_col < 0:
+        sub_col = _guess_sub_project_column(rows, header_row + 1)
+    if sub_col < 0:
+        sub_col = 5  # ستون F
+        notes.append("ستون «sub project» در سرستون‌ها پیدا نشد؛ ستون F استفاده شد.")
+    if contract_col < 0:
+        contract_col = 4  # ستون E به‌عنوان حدس اولیه
+
+    if not target_blob:
+        raise ExcelDataError("محتوای کتاب کار مقصد خالی است.")
+    try:
+        target = openpyxl.load_workbook(io.BytesIO(target_blob), data_only=False)
+    except Exception as exc:
+        raise ExcelDataError(f"کتاب کار دیتابیس باز نشد:\n{exc}") from exc
+    try:
+        names = [str(name) for name in target.sheetnames]
+        target_name = sheet_name if sheet_name in names else ""
+        if not target_name:
+            for name in names:
+                if normalize_per(name) == normalize_per(sheet_name or ""):
+                    target_name = name
+                    break
+        if not target_name:
+            target_name = names[0] if names else ""
+        if not target_name:
+            raise ExcelDataError("کتاب کار دیتابیس هیچ شیتی ندارد.")
+        target_ws = target[target_name]
+        target_header_row, target_contract_col, _ = _detect_header_row(
+            [list(r) for r in target_ws.iter_rows(values_only=True)][:15]
+        )
+        if target_contract_col < 0:
+            target_contract_col = 4  # ستون E
+        target_rows: Dict[str, int] = {}
+        target_name_rows: Dict[str, int] = {}
+        target_name_counts: Dict[str, int] = {}
+        data_rows: List[int] = []
+        width = max(1, int(target_ws.max_column or 1))
+        first_data_row = max(4, target_header_row + 2)
+        for row_number in range(first_data_row, int(target_ws.max_row or 0) + 1):
+            values = [
+                target_ws.cell(row=row_number, column=column).value
+                for column in range(1, width + 1)
+            ]
+            if all(is_blank(value) for value in values):
+                continue
+            data_rows.append(row_number)
+            value = target_ws.cell(row=row_number, column=target_contract_col + 1).value
+            key = normalize_lookup_key(txt(value))
+            if key:
+                target_rows.setdefault(key, row_number)
+            name_key = normalize_lookup_key(txt(
+                target_ws.cell(row=row_number, column=4).value
+            ))
+            if name_key:
+                target_name_counts[name_key] = target_name_counts.get(name_key, 0) + 1
+                target_name_rows.setdefault(name_key, row_number)
+        if not data_rows:
+            raise ExcelDataError("در کتاب کار دیتابیس هیچ ردیف داده‌ای پیدا نشد.")
+        target_name_rows = {
+            key: row for key, row in target_name_rows.items()
+            if target_name_counts.get(key) == 1
+        }
+    finally:
+        try:
+            target.close()
+        except Exception:
+            pass
+
+    filtered: List[List[Any]] = []
+    total = 0
+    for index in range(header_row + 1, len(rows)):
+        row = rows[index]
+        if not any(not is_blank(value) for value in row):
+            continue
+        total += 1
+        if _matches_sub_project(row[sub_col] if sub_col < len(row) else None):
+            filtered.append(row)
+
+    if contract_col < 0 or not any(
+        _looks_like_contract_number(row[contract_col] if contract_col < len(row) else None)
+        for row in filtered
+    ):
+        guess = _guess_contract_column(rows, header_row + 1, set(target_rows))
+        if guess >= 0:
+            contract_col = guess
+            notes.append("ستون شمارهٔ قرارداد از روی داده‌ها شناسایی شد.")
+
+    mapping: List[Tuple[int, List[Any]]] = []
+    unmatched: List[str] = []
+    for row in filtered:
+        key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+        target_row = target_rows.get(key) if key else None
+        if target_row:
+            mapping.append((target_row, list(row[first_column - 1:last_column])))
+        else:
+            unmatched.append(txt(row[contract_col] if contract_col < len(row) else "") or "—")
+
+    method = "شمارهٔ قرارداد"
+    if len(mapping) < max(1, int(len(filtered) * 0.5)) and target_name_rows:
+        name_col, name_hits = -1, 0
+        for column in range(len(filtered[0]) if filtered else 0):
+            hits = sum(
+                1 for row in filtered
+                if column < len(row)
+                and normalize_lookup_key(txt(row[column])) in target_name_rows
+            )
+            if hits > name_hits:
+                name_col, name_hits = column, hits
+        if name_col >= 0 and name_hits >= max(3, int(len(filtered) * 0.5)):
+            named: List[Tuple[int, List[Any]]] = []
+            still_unmatched: List[str] = []
+            for row in filtered:
+                key = normalize_lookup_key(txt(row[name_col] if name_col < len(row) else ""))
+                target_row = target_name_rows.get(key) if key else None
+                if target_row:
+                    named.append((target_row, list(row[first_column - 1:last_column])))
+                else:
+                    still_unmatched.append(
+                        txt(row[contract_col] if contract_col < len(row) else "") or "—"
+                    )
+            if len(named) > len(mapping):
+                mapping, unmatched = named, still_unmatched
+                method = "نام شرکت"
+                notes.append("تطبیق از روی نام شرکت انجام شد (شمارهٔ قرارداد هم‌خوان نبود).")
+
+    if len(mapping) < max(1, int(len(filtered) * 0.5)) and len(filtered) == len(data_rows):
+        mapping = [
+            (data_rows[order], list(row[first_column - 1:last_column]))
+            for order, row in enumerate(filtered)
+        ]
+        unmatched = []
+        method = "ترتیب ردیف‌ها"
+        notes.append(
+            "تطبیق با شمارهٔ قرارداد کافی نبود؛ چون تعداد ردیف‌ها برابر است، "
+            "به‌ترتیب ردیف‌ها به‌روزرسانی شد."
+        )
+    if not mapping:
+        raise ExcelDataError(
+            "هیچ ردیفی از فایل سامانه با کتاب کار دیتابیس تطبیق پیدا نکرد.\n"
+            f"ردیف‌های «اجرا - مهر»: {fa(len(filtered))} — شماره‌های نمونه: "
+            + "، ".join(unmatched[:5])
+        )
+
+    return SystemUpdatePlan(
+        source_path=str(source_path),
+        source_sheet=source_sheet,
+        header_row=header_row + 1,
+        sub_project_column=sub_col,
+        contract_column=contract_col,
+        target_contract_column=target_contract_col,
+        total_rows=total,
+        filtered_rows=len(filtered),
+        matched_rows=len(mapping),
+        method=method,
+        unmatched=unmatched[:50],
+        rows=mapping,
+        sheet_name=target_name,
+        first_column=first_column,
+        last_column=last_column,
+        notes=notes,
+        source_sheets=source_names,
+    )
+
+
+def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[bytes, int]:
+    """مقادیر L..AJ را روی کتاب کار اعمال می‌کند و بایت‌های تازه را برمی‌گرداند."""
+    if openpyxl is None:
+        raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
+    workbook = openpyxl.load_workbook(io.BytesIO(target_blob), data_only=False)
+    try:
+        if plan.sheet_name not in workbook.sheetnames:
+            raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
+        sheet = workbook[plan.sheet_name]
+        updated = 0
+        for target_row, values in plan.rows:
+            for offset, value in enumerate(values):
+                column = plan.first_column + offset
+                if column > plan.last_column:
+                    break
+                if isinstance(value, str):
+                    value = value.strip()
+                    if value.lower() in _SYSTEM_UPDATE_OK_WORDS:
+                        value = "ok"
+                cell = sheet.cell(row=target_row, column=column)
+                if is_blank(value):
+                    if cell.value is None:
+                        continue
+                    value = None
+                cell.value = value
+                updated += 1
+        # اکسل بعد از ذخیره، ستون‌های خالی انتهایی را حذف می‌کند و عرض شیت به ۵۶
+        # می‌رسد؛ برنامه ۵۸ ستون انتظار دارد، پس یک سلول خالی برای حفظ عرض می‌گذاریم.
+        if int(sheet.max_column or 0) < REQUIRED_COLUMNS:
+            sheet.cell(row=1, column=REQUIRED_COLUMNS, value="")
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    return buffer.getvalue(), updated
+
+
+def preview_system_update(plan: SystemUpdatePlan) -> str:
+    """متن خلاصهٔ عملیات برای نمایش به کاربر."""
+    lines = [
+        f"فایل سامانه: {Path(plan.source_path).name}",
+        f"شیت: {plan.source_sheet} — ردیف سرستون: {fa(plan.header_row)}",
+        f"ستون زیرپروژه: {_column_letter(plan.sub_project_column + 1)} · "
+        f"ستون شمارهٔ قرارداد: {_column_letter(plan.contract_column + 1)}",
+        f"ردیف‌های داده: {fa(plan.total_rows)} — «اجرا - مهر»: {fa(plan.filtered_rows)}",
+        f"تطبیق‌شده با کتاب کار: {fa(plan.matched_rows)} ردیف (روش: {plan.method})",
+        f"ستون‌های {_column_letter(plan.first_column)} تا {_column_letter(plan.last_column)} "
+        f"در شیت «{plan.sheet_name}» به‌روزرسانی می‌شوند.",
+    ]
+    if plan.unmatched:
+        lines.append(
+            f"بدون تطبیق: {fa(len(plan.unmatched))} ردیف — نمونه: "
+            + "، ".join(plan.unmatched[:4])
+        )
+    for note in plan.notes:
+        lines.append(f"یادداشت: {note}")
+    return "\n".join(lines)
+
+
+def backup_workbook(blob: bytes, filename: str = "workbook") -> str:
+    """نسخهٔ پشتیبان کتاب کار فعلی را در پوشهٔ data نگه می‌دارد."""
+    try:
+        folder = data_dir() / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = Path(str(filename or "workbook")).stem
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = folder / f"{stem}-{stamp}.xlsx"
+        path.write_bytes(blob)
+        return str(path)
+    except Exception as exc:
+        log_event(f"ذخیرهٔ نسخهٔ پشتیبان ناموفق بود: {exc}")
+        return ""
+
+
+def update_database_from_system(settings: Dict[str, Any], source_path: str,
+                                sheet_name: str = SHEET_NAME_DEFAULT) -> Dict[str, Any]:
+    """فایل ۰۱ را می‌خواند، فیلتر می‌کند و کتاب کار دیتابیس را به‌روز می‌کند."""
+    info = fetch_workbook_blob(settings)
+    blob = info["data"]
+    plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
+    backup = backup_workbook(blob, info.get("filename") or "workbook")
+    new_blob, cells = apply_system_update(plan, blob)
+    with tempfile.TemporaryDirectory(prefix="mehr-update-") as temp:
+        temp_path = Path(temp) / (info.get("filename") or "workbook.xlsx")
+        if temp_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            temp_path = temp_path.with_suffix(".xlsx")
+        temp_path.write_bytes(new_blob)
+        imported = import_workbook_to_database(
+            settings, str(temp_path), sheet_name=plan.sheet_name,
+            workbook_id=int(settings.get("workbook_id") or 1),
+        )
+    log_event(
+        f"به‌روزرسانی از فایل سامانه: {plan.filtered_rows} ردیف «اجرا - مهر»، "
+        f"{plan.matched_rows} تطبیق، {cells} سلول"
+    )
+    return {
+        "plan": plan,
+        "updated_cells": cells,
+        "backup_path": backup,
+        "imported": imported,
+        "summary": preview_system_update(plan),
     }
 
 
@@ -4392,6 +4841,76 @@ class DataLoader(QThread):
 ExcelLoader = DataLoader
 
 
+class SystemUpdatePlanWorker(QThread):
+    """خواندن فایل سامانه و ساخت نقشهٔ به‌روزرسانی (بدون نوشتن)."""
+
+    planned = pyqtSignal(object, object, str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: Dict[str, Any], source_path: str,
+                 sheet_name: str = SHEET_NAME_DEFAULT, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.source_path = str(source_path)
+        self.sheet_name = sheet_name
+
+    def run(self) -> None:
+        try:
+            info = fetch_workbook_blob(self.settings)
+            blob = info["data"]
+            plan = plan_system_update(self.source_path, blob, sheet_name=self.sheet_name)
+            self.planned.emit(plan, blob, str(info.get("filename") or "workbook.xlsx"))
+        except ExcelDataError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در خواندن فایل سامانه:\n{exc}")
+
+
+class SystemUpdateApplyWorker(QThread):
+    """اعمال نقشه روی کتاب کار، گرفتن نسخهٔ پشتیبان و ذخیره در دیتابیس."""
+
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: Dict[str, Any], plan: SystemUpdatePlan, blob: bytes,
+                 filename: str, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.plan = plan
+        self.blob = blob
+        self.filename = filename
+
+    def run(self) -> None:
+        try:
+            backup = backup_workbook(self.blob, self.filename)
+            new_blob, cells = apply_system_update(self.plan, self.blob)
+            with tempfile.TemporaryDirectory(prefix="mehr-update-") as temp:
+                temp_path = Path(temp) / self.filename
+                if temp_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+                    temp_path = temp_path.with_suffix(".xlsx")
+                temp_path.write_bytes(new_blob)
+                imported = import_workbook_to_database(
+                    self.settings, str(temp_path), sheet_name=self.plan.sheet_name,
+                    workbook_id=int(self.settings.get("workbook_id") or 1),
+                )
+            log_event(
+                f"به‌روزرسانی از فایل سامانه: {self.plan.filtered_rows} ردیف، "
+                f"{self.plan.matched_rows} تطبیق، {cells} سلول"
+            )
+            self.done.emit({
+                "plan": self.plan,
+                "updated_cells": cells,
+                "backup_path": backup,
+                "imported": imported,
+            })
+        except ExcelDataError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            write_error_log(traceback.format_exc())
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در به‌روزرسانی:\n{exc}")
+
+
 class ImportWorker(QThread):
     """بارگذاری فایل اکسل در دیتابیس در رشتهٔ جداگانه (بدون قفل‌شدن پنجره)."""
 
@@ -4761,6 +5280,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="اجرای برنامه با فایل اکسل محلی، بدون دیتابیس")
     parser.add_argument("--import-excel", metavar="PATH",
                         help="بارگذاری فایل اکسل در دیتابیس (ساخت دیتابیس و جدول‌ها از ابتدا) و خروج")
+    parser.add_argument("--update-excel", metavar="PATH",
+                        help="به‌روزرسانی کتاب کار دیتابیس از فایل سامانه (فایل ۰۱) و خروج")
     parser.add_argument("--check", action="store_true",
                         help="فقط بررسی اتصال و خواندن داده‌ها؛ پنجره باز نمی‌شود")
     parser.add_argument("--theme", choices=["light", "dark"], help="پوستهٔ برنامه")
@@ -4830,6 +5351,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"فایل: {info['filename']} ({fa(info['size'])} بایت)")
         print(f"شیت هدف: {info['sheet_name']}")
         print("شیت‌های موجود: " + "، ".join(info["sheets"]))
+        return 0
+
+    if args.update_excel:
+        config = AppConfig()
+        _apply_args(config, args)
+        try:
+            result = update_database_from_system(
+                config.db_settings(), args.update_excel,
+                sheet_name=str(config.get("sheet_name") or SHEET_NAME_DEFAULT),
+            )
+        except ExcelDataError as exc:
+            print(f"خطا: {exc}")
+            return 1
+        config.save()
+        plan = result["plan"]
+        print(preview_system_update(plan))
+        print(f"سلول‌های به‌روزرسانی‌شده: {fa(result['updated_cells'])}")
+        if result.get("backup_path"):
+            print(f"نسخهٔ پشتیبان: {result['backup_path']}")
+        print("کتاب کار دیتابیس با موفقیت به‌روزرسانی شد.")
         return 0
 
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
@@ -7073,6 +7614,7 @@ class SettingsPage(QWidget):
     detectRequested = pyqtSignal()
     importRequested = pyqtSignal(str)
     localRunRequested = pyqtSignal(str)
+    systemUpdateRequested = pyqtSignal(str)
 
     def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -7239,16 +7781,31 @@ class SettingsPage(QWidget):
             "فایل اکسل را مستقیم از دیسک می‌خواند؛ به MySQL نیازی نیست."
         )
         self.local_button.clicked.connect(self._emit_local)
+        self.update_button = QPushButton("به‌روزرسانی از فایل سامانه (01)")
+        self.update_button.setObjectName("Soft")
+        self.update_button.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        self.update_button.setCursor(Qt.PointingHandCursor)
+        self.update_button.setToolTip(
+            "فایل خام سامانه را می‌خواند، فقط ردیف‌های «اجرا - مهر» ستون Sub Project را "
+            "نگه می‌دارد و ستون‌های L تا AJ را روی کتاب کار دیتابیس اعمال می‌کند."
+        )
+        self.update_button.clicked.connect(self._emit_system_update)
         import_row = QHBoxLayout()
         import_row.setSpacing(8)
         import_row.addWidget(self.import_button, 0)
         import_row.addWidget(self.local_button, 0)
+        import_row.addWidget(self.update_button, 0)
         import_row.addStretch(1)
         import_card.body.addLayout(import_row)
         import_card.body.addWidget(_muted(
             "دیتابیس و جدول‌های لازم خودکار ساخته می‌شوند و فایل به‌عنوان کتاب کار "
             "شمارهٔ ۱ ذخیره می‌شود. اگر کاربر MySQL شما رمز ندارد، فیلد رمز را "
             "خالی بگذارید؛ رمز اجباری نیست."
+        ))
+        import_card.body.addWidget(_muted(
+            "«به‌روزرسانی از فایل سامانه (01)» فایل خام سامانه را می‌خواند، فقط ردیف‌های "
+            "«اجرا - مهر» را نگه می‌دارد و ستون‌های L تا AJ را روی کتاب کار فعلی دیتابیس "
+            "اعمال می‌کند؛ قبل از نوشتن، یک نسخهٔ پشتیبان هم ذخیره می‌شود."
         ))
         right_column.addWidget(import_card)
 
@@ -7431,6 +7988,15 @@ class SettingsPage(QWidget):
             self.set_status("در حال خواندن فایل اکسل بدون دیتابیس…")
             self.localRunRequested.emit(path)
 
+    def _emit_system_update(self) -> None:
+        path = self.excel_edit.text().strip()
+        if not path:
+            self._browse_excel()
+            path = self.excel_edit.text().strip()
+        if path:
+            self.set_status("در حال خواندن فایل سامانه و تطبیق با کتاب کار…")
+            self.systemUpdateRequested.emit(path)
+
     def set_importing(self, active: bool, path: str = "") -> None:
         """قفل‌کردن دکمهٔ بارگذاری هنگام اجرای عملیات."""
         if path:
@@ -7601,6 +8167,9 @@ class HelpPage(QWidget):
             "می‌گردد)؛ نام هر PDF باید شمارهٔ قرارداد باشد، مثل MEHR-003-1402.pdf — "
             "پسوندهایی مثل «نسخهٔ نهایی» یا «(1)» هم مشکلی ایجاد نمی‌کند. سپس Ctrl+R را بزنید.",
             "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
+            "هر بار فایل ۰۱ سامانه را گرفتید، همان فایل را با «به‌روزرسانی از فایل سامانه "
+            "(01)» بدهید؛ برنامه ردیف‌های «اجرا - مهر» ستون Sub Project را جدا می‌کند و "
+            "ستون‌های L تا AJ را روی کتاب کار دیتابیس می‌نویسد — بدون کپی‌پیست در فایل ۰۲.",
         ]
         for number, text in enumerate(steps, start=1):
             start_card.body.addWidget(page_step_label(text, number, colors))
@@ -8769,6 +9338,7 @@ class MainWindow(QMainWindow):
         self.settings.testRequested.connect(self.test_database)
         self.settings.detectRequested.connect(self.detect_database_settings)
         self.settings.importRequested.connect(self.import_excel)
+        self.settings.systemUpdateRequested.connect(self.start_system_update)
         self.settings.localRunRequested.connect(self.open_local_excel)
         self.dashboard.importRequested.connect(self.import_excel_dialog)
         self.dashboard.localRunRequested.connect(self.open_local_excel_dialog)
@@ -9140,6 +9710,137 @@ class MainWindow(QMainWindow):
             self.import_excel(path)
 
     @guarded("import_excel")
+    # ------------------------------------------------------------------
+    # به‌روزرسانی از فایل سامانه (فایل ۰۱)
+    # ------------------------------------------------------------------
+    def start_system_update(self, path: str) -> None:
+        """فایل ۰۱ را می‌خواند، فیلتر می‌کند و پس از تأیید، دیتابیس را به‌روز می‌کند."""
+        if self._system_update_running():
+            self._notify("یک به‌روزرسانی در حالاجراست؛ کمی صبر کنید", "clock")
+            return
+        if not str(path or "").strip():
+            self.pick_system_update_file()
+            return
+        if not str(self.config.get("db_host") or "").strip():
+            QMessageBox.information(
+                self, "به‌روزرسانی از فایل سامانه",
+                "برای به‌روزرسانی کتاب کار دیتابیس، ابتدا اتصال دیتابیس را در "
+                "تنظیمات کامل کنید.\n\n"
+                "اگر بدون دیتابیس کار می‌کنید، فایل اکسل را با «اجرای محلی» باز کنید.",
+            )
+            return
+        self.show_page("settings")
+        self.settings.set_status("در حال خواندن فایل سامانه و تطبیق ردیف‌ها…")
+        worker = SystemUpdatePlanWorker(self.config.db_settings(), path,
+                                        str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT),
+                                        self)
+        worker.planned.connect(self._on_system_plan_ready)
+        worker.failed.connect(self._on_system_update_failed)
+        worker.finished.connect(lambda: self._set_system_update_busy(False))
+        self._system_update_worker = worker
+        self._system_update_busy = True
+        worker.start()
+
+    def pick_system_update_file(self) -> None:
+        start = str(
+            self.config.get("last_excel_path")
+            or self.settings.excel_edit.text().strip()
+            or app_dir()
+        )
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "انتخاب فایل سامانه (فایل ۰۱)", start,
+            "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+        )
+        if path:
+            self.start_system_update(path)
+
+    def _system_update_running(self) -> bool:
+        worker = getattr(self, "_system_update_worker", None)
+        if worker is None:
+            return False
+        try:
+            return bool(worker.isRunning())
+        except RuntimeError:
+            self._system_update_worker = None
+            return False
+
+    def _set_system_update_busy(self, busy: bool) -> None:
+        self._system_update_busy = busy
+        try:
+            self.settings.update_button.setEnabled(not busy)
+        except Exception:
+            pass
+
+    @guarded("_on_system_plan_ready")
+    def _on_system_plan_ready(self, plan: SystemUpdatePlan, blob: bytes,
+                              filename: str) -> None:
+        self._pending_system_update = {"plan": plan, "blob": blob, "filename": filename}
+        box = QMessageBox(self)
+        box.setWindowTitle("تأیید به‌روزرسانی از فایل سامانه")
+        box.setIcon(QMessageBox.Question)
+        box.setText("این تغییرات روی کتاب کار دیتابیس اعمال می‌شود:")
+        box.setInformativeText(preview_system_update(plan))
+        apply_btn = box.addButton("اعمال و به‌روزرسانی", QMessageBox.AcceptRole)
+        box.addButton("لغو", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is not apply_btn:
+            self.settings.set_status("به‌روزرسانی لغو شد.")
+            self._set_system_update_busy(False)
+            return
+        self.settings.set_status("در حال نوشتن مقادیر روی کتاب کار و ذخیره در دیتابیس…")
+        worker = SystemUpdateApplyWorker(self.config.db_settings(), plan, blob, filename, self)
+        worker.done.connect(self._on_system_update_done)
+        worker.failed.connect(self._on_system_update_failed)
+        worker.finished.connect(lambda: self._set_system_update_busy(False))
+        self._system_update_worker = worker
+        self._system_update_busy = True
+        worker.start()
+
+    @guarded("_on_system_update_done")
+    def _on_system_update_done(self, result: Dict[str, Any]) -> None:
+        plan: SystemUpdatePlan = result["plan"]
+        self.config.set("last_excel_path", plan.source_path, save=False)
+        self.settings.excel_edit.setText(plan.source_path)
+        self.settings.set_status(
+            f"به‌روزرسانی انجام شد — {fa(result['updated_cells'])} سلول در "
+            f"{fa(plan.matched_rows)} ردیف"
+        )
+        self._notify("کتاب کار دیتابیس به‌روزرسانی شد", "check")
+        self.load_data()
+        lines = [
+            f"{fa(plan.matched_rows)} ردیف از «اجرا - مهر» روی شیت «{plan.sheet_name}» اعمال شد.",
+            f"سلول‌های نوشته‌شده: {fa(result['updated_cells'])}",
+            f"تطبیق: {plan.method}",
+        ]
+        if plan.unmatched:
+            lines.append(
+                f"بدون تطبیق: {fa(len(plan.unmatched))} ردیف — نمونه: "
+                + "، ".join(plan.unmatched[:4])
+            )
+        if result.get("backup_path"):
+            lines.append(f"نسخهٔ پشتیبان: {result['backup_path']}")
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی انجام شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("کتاب کار دیتابیس با فایل سامانه به‌روزرسانی شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
+    @guarded("_on_system_update_failed")
+    def _on_system_update_failed(self, message: str) -> None:
+        self.settings.set_status("به‌روزرسانی از فایل سامانه انجام نشد.")
+        self._set_system_update_busy(False)
+        log_event("به‌روزرسانی از فایل سامانه ناموفق: "
+                  + " / ".join((message or "").splitlines()[:3]))
+        box = QMessageBox(self)
+        box.setWindowTitle("به‌روزرسانی از فایل سامانه")
+        box.setIcon(QMessageBox.Warning)
+        box.setText("به‌روزرسانی انجام نشد.")
+        box.setInformativeText(f"{message}\n\nفایل گزارش:\n{log_path()}")
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
     def import_excel(self, path: str) -> None:
         if self._import_worker_running():
             self._notify("یک بارگذاری در حال اجراست؛ کمی صبر کنید", "clock")
