@@ -164,7 +164,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -728,6 +728,49 @@ def log_path() -> Path:
         return Path.home() / LOG_FILENAME
 
 
+ATTEMPT_FILENAME = "mehr_db_attempt.marker"
+ATTEMPT_MAX_AGE = 20 * 60  # ثانیه
+
+
+def attempt_marker_path() -> Path:
+    """فایل نشانهٔ «در حال خواندن از دیتابیس» (برای تشخیص بسته‌شدن ناگهانی)."""
+    try:
+        return data_dir() / ATTEMPT_FILENAME
+    except Exception:
+        return Path.home() / ATTEMPT_FILENAME
+
+
+def mark_db_attempt() -> None:
+    """قبل از اتصال نوشته می‌شود؛ اگر برنامه کرش کند باقی می‌ماند."""
+    try:
+        attempt_marker_path().write_text(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def clear_db_attempt() -> None:
+    try:
+        attempt_marker_path().unlink()
+    except Exception:
+        pass
+
+
+def previous_attempt_crashed() -> bool:
+    """آیا اجرای قبلی وسطِ اتصال به دیتابیس ناگهانی بسته شد؟"""
+    path = attempt_marker_path()
+    try:
+        if not path.exists():
+            return False
+        age = datetime.now().timestamp() - path.stat().st_mtime
+        if age > ATTEMPT_MAX_AGE:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def log_event(message: str) -> None:
     """ثبت یک رویداد یا خطا در فایل لاگ (برای عیب‌یابی)."""
     try:
@@ -770,6 +813,33 @@ def login_candidates(settings: Dict[str, Any]) -> List[Tuple[str, str]]:
     return candidates
 
 
+CONNECTOR_ENGINE = "pure"
+
+
+def connector_engine_label() -> str:
+    """نام موتور اتصالی که استفاده می‌شود (برای لاگ و صفحهٔ راهنما)."""
+    return "پایتون خالص (use_pure)"
+
+
+def _mysql_connect(**kwargs):
+    """اتصال به MySQL با موتور خالصِ پایتون (use_pure=True).
+
+    موتور C کتابخانهٔ mysql-connector (فایل connection_cext) روی ویندوز + Python 3.13
+    با خطای «access violation» کل برنامه را می‌بندد و با try/except هم گرفتنِ آن ممکن
+    نیست؛ بنابراین همیشه نسخهٔ پایتونی استفاده می‌شود.
+    """
+    kwargs = dict(kwargs)
+    kwargs["use_pure"] = True
+    try:
+        connection = mysql_connector.connect(**kwargs)
+    except TypeError as exc:  # نسخه‌های قدیمی‌تر که این گزینه را نمی‌شناسند
+        if "use_pure" not in str(exc):
+            raise
+        kwargs.pop("use_pure", None)
+        connection = mysql_connector.connect(**kwargs)
+    return connection
+
+
 def _is_network_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(token in text for token in (
@@ -796,10 +866,11 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8,
     for index, (user, password) in enumerate(candidates):
         log_event(
             f"اتصال به MySQL: {host}:{port}/{database} کاربر={user} "
-            f"({'بدون رمز' if not password else 'با رمز'})"
+            f"({'بدون رمز' if not password else 'با رمز'}) "
+            f"| موتور {connector_engine_label()}"
         )
         try:
-            connection = mysql_connector.connect(
+            connection = _mysql_connect(
                 host=host,
                 port=port,
                 user=user,
@@ -856,7 +927,7 @@ def connect_server(settings: Dict[str, Any], timeout: int = 8):
             f"({'بدون رمز' if not try_password else 'با رمز'})"
         )
         try:
-            connection = mysql_connector.connect(
+            connection = _mysql_connect(
                 host=host,
                 port=port,
                 user=try_user,
@@ -4119,12 +4190,16 @@ class DataLoader(QThread):
                     pdf_folder=self.pdf_folder,
                 )
             else:
+                mark_db_attempt()
                 data = read_database_workbook(self.settings, self.pdf_folder)
+                clear_db_attempt()
         except ExcelDataError as exc:
+            clear_db_attempt()
             log_event(f"DataLoader: خطای داده — {exc}")
             self.failed.emit(str(exc))
             return
         except Exception as exc:  # خطای پیش‌بینی‌نشده
+            clear_db_attempt()
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
             write_error_log(traceback.format_exc())
             log_event(f"DataLoader: خطای غیرمنتظره — {detail}")
@@ -4547,6 +4622,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     log_event(
         "mysql-connector: " + ("نصب است" if mysql_connector is not None else "نصب نیست")
+        + (f" | موتور: {connector_engine_label()}" if mysql_connector is not None else "")
     )
 
     if args.check:
@@ -8515,6 +8591,22 @@ class MainWindow(QMainWindow):
         log_event("بارگذاری اولیه آغاز شد")
         if str(self.config.get("data_source") or "database") == "local":
             self.load_data(silent=True)
+            return
+        if previous_attempt_crashed():
+            log_event(
+                "اجرای قبلی وسط اتصال به دیتابیس بسته شد؛ اتصال خودکار غیرفعال شد"
+            )
+            self.show_page("settings")
+            self.settings.set_status(
+                "اجرای قبلی هنگام اتصال به دیتابیس بسته شد — «بارگذاری فایل اکسل» "
+                "یا «اجرای محلی (بدون دیتابیس)» را بزنید."
+            )
+            self.dashboard.show_error(
+                "اجرای قبلی هنگام اتصال به دیتابیس بسته شد؛ از «بارگذاری فایل اکسل» "
+                "یا «اجرای محلی» استفاده کنید."
+            )
+            self.topbar.set_connection(False)
+            self._notify("اتصال خودکار غیرفعال شد — راهنمای تنظیمات", "alert")
             return
         if not str(self.config.get("db_host") or "").strip():
             self.show_page("settings")

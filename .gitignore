@@ -11,3 +11,5 @@ mehr_notes.json
 *.xlsm
 *.pdf
 mehr_error.log
+mehr_db_attempt.marker
+*.marker
