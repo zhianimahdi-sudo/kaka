@@ -7,9 +7,15 @@
 این برنامه تبدیل نسخهٔ Flask/dashboard.html به یک برنامهٔ دسکتاپ تک‌فایلی است:
 
 * دیگر به Flask، مرورگر، dashboard.html یا فایل mehr_optimized.py نیاز ندارد.
-* داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شوند: کتاب کار اکسل با شناسهٔ
-  مشخص (پیش‌فرض ۱) که در جدول‌های excel_workbooks / excel_original_files
-  ذخیره شده است؛ دیگر هیچ فایل اکسل محلی لازم نیست.
+* داده‌ها به‌طور پیش‌فرض از دیتابیس مرکزی (MySQL) خوانده می‌شوند: کتاب کار اکسل
+  با شناسهٔ مشخص (پیش‌فرض ۱) که در جدول‌های excel_workbooks / excel_original_files
+  ذخیره شده است.
+* اگر دیتابیس آماده نیست، دو راه بدون دردسر وجود دارد:
+  ۱) «بارگذاری فایل اکسل» در صفحهٔ تنظیمات: فایل را در دیتابیس ذخیره می‌کند و
+     دیتابیس/جدول‌های لازم را در صورت نبود خودکار می‌سازد.
+  ۲) «اجرای محلی (بدون دیتابیس)»: فایل اکسل مستقیم از دیسک خوانده می‌شود.
+* رمز دیتابیس اجباری نیست؛ اگر رمز وارد نشود یا رد شود، ورودهای بدون رمز
+  (مثل root با رمز خالی) هم امتحان می‌شوند.
 * نمودارها، فیلترها، جستجو، جزئیات قرارداد، یادداشت‌ها، خروجی اکسل، گزارش
   مدیریتی و اتصال فایل PDF همه درون همین فایل پیاده‌سازی شده‌اند.
 
@@ -22,6 +28,8 @@
 گزینه‌های خط فرمان:
     --db-host / --db-port / --db-name / --db-user / --db-password
     --workbook-id    شناسهٔ کتاب کار در دیتابیس (پیش‌فرض ۱)
+    --import-excel   بارگذاری فایل اکسل در دیتابیس (ساخت دیتابیس از ابتدا) و خروج
+    --local-excel    اجرای برنامه با فایل اکسل محلی، بدون دیتابیس
     --check          فقط اتصال به دیتابیس و آمار را بررسی کن (بدون باز کردن پنجره)
 """
 
@@ -32,6 +40,7 @@ import base64
 import ctypes
 import faulthandler
 import functools
+import hashlib
 import html as html_module
 import io
 import json
@@ -122,12 +131,18 @@ try:
         QWidget,
     )
 except ImportError as exc:  # pragma: no cover
-    sys.stderr.write(
-        "خطا: کتابخانهٔ PyQt5 نصب نیست.\n"
-        "لطفاً با دستور زیر نصب کنید:\n"
-        "    pip install PyQt5 openpyxl\n"
-        f"جزئیات: {exc}\n"
+    _message = (
+        "خطا: کتابخانهٔ PyQt5 نصب نیست یا بارگذاری نشد.\n\n"
+        "در پنجرهٔ فرمان (CMD) این دستور را اجرا کنید:\n"
+        "    pip install PyQt5 openpyxl mysql-connector-python\n\n"
+        f"جزئیات فنی: {exc}"
     )
+    sys.stderr.write(_message + "\n")
+    try:  # پنجرهٔ خطای ویندوز تا پیام با بستن کنسول گم نشود
+        if os.name == "nt":
+            ctypes.windll.user32.MessageBoxW(None, _message, "داشبورد مهر — خطای اجرا", 0x10)
+    except Exception:
+        pass
     raise SystemExit(1)
 
 try:
@@ -149,7 +164,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -625,6 +640,9 @@ class AppConfig:
         "db_user": "master_app",
         "db_workbook_id": 1,
         "db_remember_password": True,
+        "data_source": "database",
+        "local_excel_path": "",
+        "last_excel_path": "",
         "sheet_name": SHEET_NAME_DEFAULT,
         "pdf_folder": "",
         "theme": "light",
@@ -737,7 +755,32 @@ class DatabaseError(ExcelDataError):
     """خطای اتصال یا خواندن از دیتابیس مرکزی."""
 
 
-def connect_database(settings: Dict[str, Any], timeout: int = 8):
+# آخرین اتصال موفق (برای اینکه اگر ورودِ جایگزین جواب داد، همان ذخیره شود)
+LAST_CONNECTION: Dict[str, Any] = {}
+
+
+def login_candidates(settings: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """ترتیب تلاش برای ورود: ابتدا تنظیمات کاربر، سپس گزینه‌های بدون رمز."""
+    user = str(settings.get("user") or "master_app").strip() or "master_app"
+    password = str(settings.get("password") or "")
+    candidates: List[Tuple[str, str]] = [(user, password)]
+    for extra in (("root", ""), ("root", password), (user, "")):
+        if extra not in candidates:
+            candidates.append(extra)
+    return candidates
+
+
+def _is_network_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in (
+        "can't connect", "cannot connect", "2003", "10061", "timed out",
+        "unknown host", "getaddrinfo", "connection refused",
+    ))
+
+
+def connect_database(settings: Dict[str, Any], timeout: int = 8,
+                     allow_fallback: bool = True):
+    """اتصال به دیتابیس؛ اگر رمز/کاربر جواب نداد، ورودهای بدون رمز هم امتحان می‌شود."""
     if mysql_connector is None:
         raise DatabaseError(
             "کتابخانهٔ mysql-connector-python نصب نیست.\n"
@@ -746,26 +789,269 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8):
     host = settings.get("host") or "127.0.0.1"
     port = int(settings.get("port") or 3306)
     database = settings.get("database") or "master_data"
-    user = settings.get("user") or "master_app"
-    log_event(f"اتصال به MySQL: {host}:{port}/{database} کاربر={user}")
-    try:
-        connection = mysql_connector.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=settings.get("password") or "",
-            database=database,
-            charset="utf8mb4",
-            connection_timeout=timeout,
-            autocommit=False,
+    candidates = login_candidates(settings) if allow_fallback else [
+        (str(settings.get("user") or "master_app"), str(settings.get("password") or ""))
+    ]
+    errors: List[str] = []
+    for index, (user, password) in enumerate(candidates):
+        log_event(
+            f"اتصال به MySQL: {host}:{port}/{database} کاربر={user} "
+            f"({'بدون رمز' if not password else 'با رمز'})"
         )
-        log_event("اتصال به MySQL برقرار شد")
+        try:
+            connection = mysql_connector.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                charset="utf8mb4",
+                connection_timeout=timeout,
+                autocommit=False,
+            )
+        except Exception as exc:
+            text = f"{user}: {type(exc).__name__}: {exc}"
+            errors.append(text)
+            log_event("خطای اتصال به MySQL — " + text)
+            if _is_network_error(exc):
+                break
+            continue
+        log_event(
+            "اتصال به MySQL برقرار شد"
+            + ("" if index == 0 else f" (با ورود جایگزین {user})")
+        )
+        LAST_CONNECTION.clear()
+        LAST_CONNECTION.update({
+            "host": host, "port": port, "database": database,
+            "user": user, "password": password,
+        })
         return connection
-    except Exception as exc:
-        log_event(f"خطای اتصال به MySQL: {type(exc).__name__}: {exc}")
+    detail = "\n".join(errors[:4]) if errors else "خطای نامشخص"
+    raise DatabaseError(
+        f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{detail}\n\n"
+        "اگر MySQL شما کاربر بدون رمز دارد (مثل root بدون رمز)، همان را وارد کنید؛ "
+        "یا از «اجرای محلی (بدون دیتابیس)» استفاده کنید."
+    )
+
+
+def connect_server(settings: Dict[str, Any], timeout: int = 8):
+    """اتصال به سرور MySQL بدون انتخاب دیتابیس (برای ساخت اولیه یا بارگذاری)."""
+    if mysql_connector is None:
         raise DatabaseError(
-            f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{exc}"
+            "کتابخانهٔ mysql-connector-python نصب نیست.\n"
+            "دستور نصب: pip install mysql-connector-python"
+        )
+    host = settings.get("host") or "127.0.0.1"
+    port = int(settings.get("port") or 3306)
+    user = str(settings.get("user") or "root")
+    password = str(settings.get("password") or "")
+    candidates: List[Tuple[str, str]] = [(user, password)]
+    for extra in (("root", ""), ("root", password), (user, "")):
+        if extra not in candidates:
+            candidates.append(extra)
+    errors: List[str] = []
+    for index, (try_user, try_password) in enumerate(candidates):
+        log_event(
+            f"اتصال به سرور MySQL: {host}:{port} کاربر={try_user} "
+            f"({'بدون رمز' if not try_password else 'با رمز'})"
+        )
+        try:
+            connection = mysql_connector.connect(
+                host=host,
+                port=port,
+                user=try_user,
+                password=try_password,
+                charset="utf8mb4",
+                connection_timeout=timeout,
+                autocommit=False,
+            )
+        except Exception as exc:
+            errors.append(f"{try_user}: {type(exc).__name__}: {exc}")
+            log_event(f"خطای اتصال به سرور MySQL — {try_user}: {exc}")
+            if _is_network_error(exc):
+                break
+            continue
+        log_event(
+            "اتصال به سرور MySQL برقرار شد"
+            + ("" if index == 0 else f" (با ورود جایگزین {try_user})")
+        )
+        LAST_CONNECTION.clear()
+        LAST_CONNECTION.update({
+            "host": host, "port": port, "database": "",
+            "user": try_user, "password": try_password,
+        })
+        return connection
+    detail = "\n".join(errors[:4]) if errors else "خطای نامشخص"
+    raise DatabaseError(
+        f"اتصال به سرور دیتابیس ممکن نشد ({host}:{port}).\n{detail}\n\n"
+        "اگر کاربر MySQL شما رمز ندارد، فیلد رمز را خالی بگذارید "
+        "(مثلاً کاربر root با رمز خالی)."
+    )
+
+
+WORKBOOK_SCHEMA_SQL = (
+    """CREATE TABLE IF NOT EXISTS excel_workbooks (
+        workbook_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        original_filename VARCHAR(255) NOT NULL,
+        original_path TEXT NULL,
+        file_size BIGINT UNSIGNED NOT NULL,
+        sha256 CHAR(64) NOT NULL,
+        imported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        sheet_count INT NOT NULL DEFAULT 0,
+        stored_cell_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        import_status VARCHAR(20) NOT NULL DEFAULT 'importing',
+        workbook_metadata JSON NULL,
+        KEY ix_workbook_filename (original_filename),
+        KEY ix_workbook_sha256 (sha256),
+        KEY ix_workbook_imported_at (imported_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS excel_original_files (
+        workbook_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL,
+        content_type VARCHAR(100) NOT NULL DEFAULT 'application/octet-stream',
+        sha256 CHAR(64) NOT NULL,
+        binary_data LONGBLOB NOT NULL,
+        CONSTRAINT fk_original_workbook FOREIGN KEY (workbook_id)
+            REFERENCES excel_workbooks(workbook_id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+)
+
+
+def _safe_identifier(name: str, label: str) -> str:
+    """نام دیتابیس/جدول را برای درج در دستور SQL امن می‌کند."""
+    clean = str(name or "").strip()
+    if not clean or not re.fullmatch(r"[A-Za-z0-9_$]+", clean):
+        raise DatabaseError(
+            f"{label} «{clean}» معتبر نیست؛ فقط حروف انگلیسی، رقم و زیرخط مجاز است."
+        )
+    return clean
+
+
+def import_workbook_to_database(
+    settings: Dict[str, Any],
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    workbook_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """بارگذاری فایل اکسل در دیتابیس از ابتدا (ساخت جدول‌ها در صورت نیاز).
+
+    این تابع بدون نیاز به «مدیر دیتابیس مرکزی» کار می‌کند: دیتابیس و جدول‌های
+    لازم را می‌سازد و فایل را به‌عنوان کتاب کار شمارهٔ ۱ ذخیره می‌کند.
+    """
+    path = Path(str(file_path)).expanduser()
+    if not path.exists() or not path.is_file():
+        raise ExcelDataError(f"فایل اکسل پیدا نشد:\n{path}")
+    if openpyxl is None:
+        raise ExcelDataError("کتابخانهٔ openpyxl نصب نیست. دستور: pip install openpyxl")
+    blob = path.read_bytes()
+    if not blob:
+        raise ExcelDataError("فایل اکسل خالی است.")
+    try:
+        probe = openpyxl.load_workbook(io.BytesIO(blob), data_only=True, read_only=True)
+        sheets = [str(name) for name in probe.sheetnames]
+        probe.close()
+    except Exception as exc:
+        raise ExcelDataError(f"فایل انتخاب‌شده یک کتاب کار معتبر نیست:\n{exc}") from exc
+    target_sheet = str(sheet_name or SHEET_NAME_DEFAULT).strip() or SHEET_NAME_DEFAULT
+    if target_sheet not in sheets:
+        lowered = {name.strip().lower(): name for name in sheets}
+        target_sheet = lowered.get(target_sheet.lower(), "")
+    if not target_sheet:
+        raise ExcelDataError(
+            f"شیت «{sheet_name or SHEET_NAME_DEFAULT}» در فایل نیست.\n"
+            f"شیت‌های موجود: {'، '.join(sheets)}"
+        )
+
+    database = _safe_identifier(settings.get("database") or "master_data", "نام دیتابیس")
+    wid = int(workbook_id or settings.get("workbook_id") or 1)
+    size = len(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    filename = path.name
+    log_event(f"بارگذاری اکسل در دیتابیس: {filename} ({size} بایت) → {database} #{wid}")
+
+    connection = connect_server(settings)
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{database}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            cursor.execute(f"USE `{database}`")
+            for statement in WORKBOOK_SCHEMA_SQL:
+                cursor.execute(statement)
+            cursor.execute(
+                "SELECT workbook_id FROM excel_workbooks WHERE workbook_id=%s", (wid,)
+            )
+            exists = cursor.fetchone() is not None
+            if exists:
+                cursor.execute(
+                    "UPDATE excel_workbooks SET original_filename=%s, original_path=%s, "
+                    "file_size=%s, sha256=%s, imported_at=NOW(), sheet_count=%s, "
+                    "import_status='completed' WHERE workbook_id=%s",
+                    (filename, str(path), size, digest, len(sheets), wid),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO excel_workbooks (workbook_id, original_filename, "
+                    "original_path, file_size, sha256, imported_at, sheet_count, "
+                    "stored_cell_count, import_status) "
+                    "VALUES (%s,%s,%s,%s,%s,NOW(),%s,0,'completed')",
+                    (wid, filename, str(path), size, digest, len(sheets)),
+                )
+            cursor.execute(
+                "SELECT workbook_id FROM excel_original_files WHERE workbook_id=%s", (wid,)
+            )
+            has_file = cursor.fetchone() is not None
+            if has_file:
+                cursor.execute(
+                    "UPDATE excel_original_files SET filename=%s, content_type=%s, "
+                    "sha256=%s, binary_data=%s WHERE workbook_id=%s",
+                    (filename,
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     digest, blob, wid),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO excel_original_files (workbook_id, filename, "
+                    "content_type, sha256, binary_data) VALUES (%s,%s,%s,%s,%s)",
+                    (wid, filename,
+                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                     digest, blob),
+                )
+            connection.commit()
+        finally:
+            cursor.close()
+    except ExcelDataError:
+        raise
+    except Exception as exc:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        log_event(f"خطای بارگذاری اکسل: {type(exc).__name__}: {exc}")
+        raise DatabaseError(
+            "بارگذاری فایل اکسل در دیتابیس ناموفق بود.\n"
+            f"{exc}\n\n"
+            "اگر کاربر MySQL دسترسی ساخت دیتابیس/جدول ندارد، دیتابیس و جدول‌ها را "
+            "یک‌بار با «مدیریت دیتابیس مرکزی» بسازید و دوباره تلاش کنید."
         ) from exc
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    log_event(f"اکسل در دیتابیس ذخیره شد: {database} / workbook_id={wid}")
+    return {
+        "workbook_id": wid,
+        "filename": filename,
+        "size": size,
+        "sheets": sheets,
+        "sheet_name": target_sheet,
+        "database": database,
+        "sha256": digest,
+    }
 
 
 def fetch_workbook_blob(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -872,6 +1158,30 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
         pdf_folder=pdf_folder,
         source_time=_parse_imported_at(info.get("imported_at")),
         source_size=int(info.get("size") or len(info["data"])),
+        source_note=note,
+    )
+
+
+def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
+                        pdf_folder: str = "") -> DashboardData:
+    """خواندن مستقیم فایل اکسل از دیسک (حالت بدون دیتابیس)."""
+    file_path = Path(str(path)).expanduser()
+    log_event(f"خواندن فایل اکسل محلی: {file_path}")
+    if not file_path.exists() or not file_path.is_file():
+        raise ExcelDataError(f"فایل اکسل پیدا نشد:\n{file_path}")
+    try:
+        blob = file_path.read_bytes()
+        stamp = datetime.fromtimestamp(file_path.stat().st_mtime)
+    except OSError as exc:
+        raise ExcelDataError(f"خواندن فایل اکسل ممکن نشد:\n{exc}") from exc
+    note = f"فایل محلی: {file_path.name}"
+    return parse_workbook_bytes(
+        file_path.name,
+        blob,
+        sheet_name=str(sheet_name or SHEET_NAME_DEFAULT),
+        pdf_folder=pdf_folder,
+        source_time=stamp,
+        source_size=len(blob),
         source_note=note,
     )
 
@@ -3789,15 +4099,27 @@ class DataLoader(QThread):
     loaded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, settings: Dict[str, Any], pdf_folder: str, parent=None) -> None:
+    def __init__(self, settings: Dict[str, Any], pdf_folder: str, parent=None,
+                 local_path: str = "") -> None:
         super().__init__(parent)
         self.settings = dict(settings)
         self.pdf_folder = pdf_folder
+        self.local_path = str(local_path or "")
 
     def run(self) -> None:
-        log_event("DataLoader: شروع خواندن از دیتابیس")
+        if self.local_path:
+            log_event("DataLoader: شروع خواندن فایل اکسل محلی (بدون دیتابیس)")
+        else:
+            log_event("DataLoader: شروع خواندن از دیتابیس")
         try:
-            data = read_database_workbook(self.settings, self.pdf_folder)
+            if self.local_path:
+                data = read_local_workbook(
+                    self.local_path,
+                    sheet_name=str(self.settings.get("sheet_name") or SHEET_NAME_DEFAULT),
+                    pdf_folder=self.pdf_folder,
+                )
+            else:
+                data = read_database_workbook(self.settings, self.pdf_folder)
         except ExcelDataError as exc:
             log_event(f"DataLoader: خطای داده — {exc}")
             self.failed.emit(str(exc))
@@ -3814,6 +4136,38 @@ class DataLoader(QThread):
 
 # سازگاری با نام قدیمی
 ExcelLoader = DataLoader
+
+
+class ImportWorker(QThread):
+    """بارگذاری فایل اکسل در دیتابیس در رشتهٔ جداگانه (بدون قفل‌شدن پنجره)."""
+
+    succeeded = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: Dict[str, Any], file_path: str,
+                 sheet_name: str = SHEET_NAME_DEFAULT, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.file_path = file_path
+        self.sheet_name = sheet_name
+
+    def run(self) -> None:
+        log_event(f"ImportWorker: شروع بارگذاری {self.file_path}")
+        try:
+            info = import_workbook_to_database(
+                self.settings, self.file_path, sheet_name=self.sheet_name
+            )
+        except ExcelDataError as exc:
+            log_event(f"ImportWorker: خطا — {exc}")
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # خطای پیش‌بینی‌نشده
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            write_error_log(traceback.format_exc())
+            log_event(f"ImportWorker: خطای غیرمنتظره — {detail}")
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در بارگذاری اکسل:\n{detail}")
+            return
+        self.succeeded.emit(info)
 
 
 # ---------------------------------------------------------------------------
@@ -4149,6 +4503,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="شناسهٔ کتاب کار در دیتابیس (پیش‌فرض: 1)")
     parser.add_argument("--sheet", help=f"نام شیت (پیش‌فرض: {SHEET_NAME_DEFAULT})")
     parser.add_argument("--pdf-folder", help="مسیر پوشهٔ فایل‌های PDF")
+    parser.add_argument("--local-excel", metavar="PATH",
+                        help="اجرای برنامه با فایل اکسل محلی، بدون دیتابیس")
+    parser.add_argument("--import-excel", metavar="PATH",
+                        help="بارگذاری فایل اکسل در دیتابیس (ساخت دیتابیس و جدول‌ها از ابتدا) و خروج")
     parser.add_argument("--check", action="store_true",
                         help="فقط بررسی اتصال و خواندن داده‌ها؛ پنجره باز نمی‌شود")
     parser.add_argument("--theme", choices=["light", "dark"], help="پوستهٔ برنامه")
@@ -4172,6 +4530,9 @@ def _apply_args(config: AppConfig, args: argparse.Namespace) -> None:
         config.values["db_password"] = args.db_password
     if args.pdf_folder:
         config.values["pdf_folder"] = os.path.abspath(args.pdf_folder)
+    if args.local_excel:
+        config.values["data_source"] = "local"
+        config.values["local_excel_path"] = os.path.abspath(args.local_excel)
     if args.theme:
         config.values["theme"] = args.theme
 
@@ -4195,6 +4556,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         settings["sheet_name"] = str(config.get("sheet_name") or SHEET_NAME_DEFAULT)
         pdf_folder = str(config.get("pdf_folder") or default_pdf_folder(config))
         return run_check(settings, pdf_folder)
+
+    if args.import_excel:
+        config = AppConfig()
+        _apply_args(config, args)
+        try:
+            info = import_workbook_to_database(
+                config.db_settings(),
+                args.import_excel,
+                sheet_name=str(config.get("sheet_name") or SHEET_NAME_DEFAULT),
+            )
+        except ExcelDataError as exc:
+            print(f"خطا: {exc}")
+            return 1
+        config.save()
+        print("فایل اکسل با موفقیت در دیتابیس ذخیره شد.")
+        print(f"دیتابیس: {info['database']} — شناسهٔ کتاب کار: {fa(info['workbook_id'])}")
+        print(f"فایل: {info['filename']} ({fa(info['size'])} بایت)")
+        print(f"شیت هدف: {info['sheet_name']}")
+        print("شیت‌های موجود: " + "، ".join(info["sheets"]))
+        return 0
 
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
@@ -4540,6 +4921,7 @@ class NoticeBar(QFrame):
     """نوار اطلاع‌رسانی ظریف (هشدار یا راهنما)."""
 
     actionClicked = pyqtSignal()
+    secondaryClicked = pyqtSignal()
 
     def __init__(self, colors: Dict[str, str], tone: str = "warning", parent=None) -> None:
         super().__init__(parent)
@@ -4556,6 +4938,12 @@ class NoticeBar(QFrame):
         self.label.setWordWrap(True)
         self.label.setObjectName("Subtle")
         layout.addWidget(self.label, 1)
+        self.secondary_button = QPushButton("")
+        self.secondary_button.setObjectName("Ghost")
+        self.secondary_button.setCursor(Qt.PointingHandCursor)
+        self.secondary_button.clicked.connect(self.secondaryClicked.emit)
+        self.secondary_button.setVisible(False)
+        layout.addWidget(self.secondary_button)
         self.action_button = QPushButton("")
         self.action_button.setObjectName("Ghost")
         self.action_button.setCursor(Qt.PointingHandCursor)
@@ -4573,6 +4961,11 @@ class NoticeBar(QFrame):
         self.label.setText(text)
         self.action_button.setText(action_text)
         self.action_button.setVisible(bool(action_text))
+
+    def set_secondary(self, text: str) -> None:
+        """دکمهٔ دوم نوار (مثلاً «بارگذاری فایل اکسل»)."""
+        self.secondary_button.setText(text)
+        self.secondary_button.setVisible(bool(text))
 
     def set_theme(self, colors: Dict[str, str]) -> None:
         self.colors = colors
@@ -5080,6 +5473,8 @@ class DashboardPage(QWidget):
     navigateRequested = pyqtSignal(str)
     exportRequested = pyqtSignal()
     reloadRequested = pyqtSignal()
+    importRequested = pyqtSignal()
+    localRunRequested = pyqtSignal()
 
     def __init__(self, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -5110,6 +5505,7 @@ class DashboardPage(QWidget):
         self.error_banner = NoticeBar(colors, "warning")
         self.error_banner.setVisible(False)
         self.error_banner.actionClicked.connect(self.reloadRequested.emit)
+        self.error_banner.secondaryClicked.connect(self.localRunRequested.emit)
         self.body.addWidget(self.error_banner)
 
         # --- کارت قهرمان -------------------------------------------------
@@ -5426,6 +5822,7 @@ class DashboardPage(QWidget):
         self.error_banner.set_text(
             bidi(f"خواندن داده از دیتابیس ممکن نشد — {first}"), "تلاش دوباره"
         )
+        self.error_banner.set_secondary("اجرای فایل اکسل (بدون دیتابیس)")
         self.error_banner.setVisible(True)
 
     def set_data(self, data: DashboardData) -> None:
@@ -6357,6 +6754,8 @@ class SettingsPage(QWidget):
     openDataFolderRequested = pyqtSignal()
     testRequested = pyqtSignal()
     detectRequested = pyqtSignal()
+    importRequested = pyqtSignal(str)
+    localRunRequested = pyqtSignal(str)
 
     def __init__(self, config: AppConfig, colors: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -6387,7 +6786,7 @@ class SettingsPage(QWidget):
         source_card = Card(colors, radius=16, padding=18)
         source_card.body.addWidget(_card_title(
             "اتصال دیتابیس",
-            "داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شود؛ نیازی به فایل اکسل نیست",
+            "داده‌ها از دیتابیس مرکزی (MySQL) خوانده می‌شود؛ رمز اختیاری است",
         ))
         form = QGridLayout()
         form.setHorizontalSpacing(6)
@@ -6421,7 +6820,7 @@ class SettingsPage(QWidget):
         form.addWidget(QLabel("رمز عبور:"), 2, 0)
         self.password_edit = QLineEdit(str(config.get_password() or ""))
         self.password_edit.setEchoMode(QLineEdit.Password)
-        self.password_edit.setPlaceholderText("رمز کاربر دیتابیس")
+        self.password_edit.setPlaceholderText("رمز — اگر ندارید خالی بگذارید")
         self.password_edit.setMinimumWidth(96)
         form.addWidget(self.password_edit, 2, 1)
         self.remember_check = CheckBox("ذخیرهٔ رمز")
@@ -6480,6 +6879,51 @@ class SettingsPage(QWidget):
             "داده‌ها فقط خوانده می‌شوند و برنامه هیچ تغییری در دیتابیس یا فایل اصلی نمی‌دهد."
         ))
         right_column.addWidget(source_card)
+
+        # ---- بارگذاری فایل اکسل ----
+        import_card = Card(colors, radius=16, padding=18)
+        import_card.body.addWidget(_card_title(
+            "بارگذاری فایل اکسل",
+            "اگر دیتابیس خالی است یا می‌خواهید داده‌ها را از ابتدا بارگذاری کنید",
+        ))
+        excel_row = QHBoxLayout()
+        excel_row.setSpacing(8)
+        self.excel_edit = QLineEdit(str(config.get("last_excel_path") or ""))
+        self.excel_edit.setPlaceholderText("مسیر فایل \u202a.xlsx\u202c")
+        self.excel_edit.setMinimumWidth(96)
+        excel_row.addWidget(self.excel_edit, 1)
+        browse_excel = QPushButton("انتخاب فایل…")
+        browse_excel.setObjectName("Ghost")
+        browse_excel.setIcon(make_icon("folder", colors["ink_2"], 15))
+        browse_excel.setCursor(Qt.PointingHandCursor)
+        browse_excel.clicked.connect(self._browse_excel)
+        excel_row.addWidget(browse_excel)
+        import_card.body.addLayout(excel_row)
+        self.import_button = QPushButton("بارگذاری در دیتابیس")
+        self.import_button.setObjectName("Primary")
+        self.import_button.setIcon(make_icon("upload", colors["on_brand"], 15))
+        self.import_button.setCursor(Qt.PointingHandCursor)
+        self.import_button.clicked.connect(self._emit_import)
+        self.local_button = QPushButton("اجرای محلی (بدون دیتابیس)")
+        self.local_button.setObjectName("Soft")
+        self.local_button.setIcon(make_icon("table", colors["ink_2"], 15))
+        self.local_button.setCursor(Qt.PointingHandCursor)
+        self.local_button.setToolTip(
+            "فایل اکسل را مستقیم از دیسک می‌خواند؛ به MySQL نیازی نیست."
+        )
+        self.local_button.clicked.connect(self._emit_local)
+        import_row = QHBoxLayout()
+        import_row.setSpacing(8)
+        import_row.addWidget(self.import_button, 0)
+        import_row.addWidget(self.local_button, 0)
+        import_row.addStretch(1)
+        import_card.body.addLayout(import_row)
+        import_card.body.addWidget(_muted(
+            "دیتابیس و جدول‌های لازم خودکار ساخته می‌شوند و فایل به‌عنوان کتاب کار "
+            "شمارهٔ ۱ ذخیره می‌شود. اگر کاربر MySQL شما رمز ندارد، فیلد رمز را "
+            "خالی بگذارید؛ رمز اجباری نیست."
+        ))
+        right_column.addWidget(import_card)
 
         # ---- فایل‌های برنامه ----
         storage_card = Card(colors, radius=16, padding=18)
@@ -6631,6 +7075,43 @@ class SettingsPage(QWidget):
         save_bar.addWidget(self.reload_button)
         layout.addLayout(save_bar)
 
+    def _browse_excel(self) -> None:
+        start = self.excel_edit.text().strip() or str(app_dir())
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "انتخاب فایل اکسل", start,
+            "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+        )
+        if path:
+            self.excel_edit.setText(path)
+            self.set_status("فایل انتخاب شد — «بارگذاری در دیتابیس» را بزنید.")
+
+    def _emit_import(self) -> None:
+        path = self.excel_edit.text().strip()
+        if not path:
+            self._browse_excel()
+            path = self.excel_edit.text().strip()
+        if path:
+            self.set_status("در حال بارگذاری فایل اکسل در دیتابیس…")
+            self.importRequested.emit(path)
+
+    def _emit_local(self) -> None:
+        path = self.excel_edit.text().strip()
+        if not path:
+            self._browse_excel()
+            path = self.excel_edit.text().strip()
+        if path:
+            self.set_status("در حال خواندن فایل اکسل بدون دیتابیس…")
+            self.localRunRequested.emit(path)
+
+    def set_importing(self, active: bool, path: str = "") -> None:
+        """قفل‌کردن دکمهٔ بارگذاری هنگام اجرای عملیات."""
+        if path:
+            self.excel_edit.setText(path)
+        self.import_button.setEnabled(not active)
+        self.import_button.setText(
+            "در حال بارگذاری…" if active else "بارگذاری در دیتابیس"
+        )
+
     def _browse_pdf(self) -> None:
         start = self.pdf_edit.text() or str(app_dir())
         folder = QFileDialog.getExistingDirectory(self, "انتخاب پوشهٔ PDF", start)
@@ -6659,8 +7140,9 @@ class SettingsPage(QWidget):
             self.db_edit.setText(str(values["database"]))
         if values.get("user"):
             self.user_edit.setText(str(values["user"]))
-        if values.get("password"):
-            self.password_edit.setText(str(values["password"]))
+        if "password" in values:
+            self.password_edit.setText(str(values.get("password") or ""))
+        self.remember_check.setChecked(bool(self.config.get("db_remember_password")))
 
     def _emit_save(self) -> None:
         values = self.connection_values()
@@ -6758,9 +7240,11 @@ class HelpPage(QWidget):
         start_card = Card(colors, radius=16, padding=18)
         start_card.body.addWidget(_card_title("شروع سریع", "چهار گام تا اولین گزارش"))
         steps = [
-            "از صفحهٔ تنظیمات، مشخصات اتصال دیتابیس مرکزی را وارد کنید (یا از مدیر دیتابیس بگیرید).",
-            "پوشهٔ PDF را انتخاب کنید تا ستون «فایل» و پنل جزئیات فعال شود.",
-            "دکمهٔ بازخوانی یا Ctrl+R را بزنید تا داده‌ها از دیتابیس خوانده شوند.",
+            "در صفحهٔ تنظیمات، میزبان/دیتابیس/کاربر MySQL را وارد کنید؛ اگر کاربر رمز ندارد "
+            "فیلد رمز را خالی بگذارید (رمز اجباری نیست).",
+            "در همان صفحه، فایل اکسل را با «بارگذاری فایل اکسل» انتخاب و در دیتابیس ذخیره کنید؛ "
+            "دیتابیس و جدول‌ها در صورت نبود خودکار ساخته می‌شوند.",
+            "پوشهٔ PDF را انتخاب کنید تا ستون «فایل» و پنل جزئیات فعال شود، سپس Ctrl+R را بزنید.",
             "روی هر ردیف جدول دو کلیک کنید تا جزئیات، یادداشت و پیگیری باز شود.",
         ]
         for number, text in enumerate(steps, start=1):
@@ -7832,6 +8316,7 @@ class MainWindow(QMainWindow):
         self.notes = notes
         self.data: DashboardData = empty_dashboard()
         self.loader = None
+        self._import_worker = None
         self._current_page = ""
         self._last_error = ""
         self.colors: Dict[str, str] = THEMES["light"]
@@ -7928,6 +8413,10 @@ class MainWindow(QMainWindow):
         self.settings.openDataFolderRequested.connect(self._open_data_folder)
         self.settings.testRequested.connect(self.test_database)
         self.settings.detectRequested.connect(self.detect_database_settings)
+        self.settings.importRequested.connect(self.import_excel)
+        self.settings.localRunRequested.connect(self.open_local_excel)
+        self.dashboard.importRequested.connect(self.import_excel_dialog)
+        self.dashboard.localRunRequested.connect(self.open_local_excel_dialog)
 
         self.show_page("dashboard")
         self.detail.place()
@@ -8024,7 +8513,10 @@ class MainWindow(QMainWindow):
     @guarded("initial_load")
     def initial_load(self) -> None:
         log_event("بارگذاری اولیه آغاز شد")
-        if not str(self.config.get("db_password") or "") and not str(self.config.get("db_host") or ""):
+        if str(self.config.get("data_source") or "database") == "local":
+            self.load_data(silent=True)
+            return
+        if not str(self.config.get("db_host") or "").strip():
             self.show_page("settings")
         self.load_data(silent=True)
 
@@ -8037,8 +8529,18 @@ class MainWindow(QMainWindow):
             return
         settings = self.config.db_settings()
         pdf_folder = str(self.config.get("pdf_folder") or "")
+        local_path = ""
+        if str(self.config.get("data_source") or "database") == "local":
+            candidate = str(self.config.get("local_excel_path") or "")
+            if candidate and Path(candidate).exists():
+                local_path = candidate
+                settings["sheet_name"] = str(
+                    self.config.get("sheet_name") or SHEET_NAME_DEFAULT
+                )
+            else:
+                self.config.set("data_source", "database", save=False)
         self._set_loading(True)
-        loader = DataLoader(settings, pdf_folder, self)
+        loader = DataLoader(settings, pdf_folder, self, local_path=local_path)
         loader.loaded.connect(lambda data, silent=silent: self._on_data_loaded(data, silent))
         loader.failed.connect(lambda message, silent=silent: self._on_load_failed(message, silent))
         loader.finished.connect(self._on_loader_finished)
@@ -8070,7 +8572,14 @@ class MainWindow(QMainWindow):
     @guarded("_on_data_loaded")
     def _on_data_loaded(self, data: DashboardData, silent: bool = False) -> None:
         log_event(f"داده در رابط کاربری — {data.total_contracts} قرارداد")
-        self.topbar.set_connection(True)
+        self._adopt_last_connection()
+        if str(self.config.get("data_source") or "database") == "local":
+            self.topbar.set_connection(True, "فایل محلی")
+            self.topbar.status_pill.setToolTip(
+                "داده‌ها از فایل اکسل محلی خوانده می‌شود (بدون دیتابیس)"
+            )
+        else:
+            self.topbar.set_connection(True)
         self.data = data
         self.dashboard.set_data(data)
         self.contracts.set_data(data)
@@ -8110,8 +8619,14 @@ class MainWindow(QMainWindow):
             self.dashboard.show_error(first)
             self.reports.update_data(empty)
         if silent:
-            if not self.data.records and not self.config.get("db_host"):
-                self.show_page("settings")
+            if not self.data.records:
+                self.settings.set_status(
+                    "اتصال برقرار نشد — تنظیمات را بررسی کنید یا فایل اکسل را بارگذاری کنید."
+                )
+                if not getattr(self, "_auto_settings_shown", False):
+                    self._auto_settings_shown = True
+                    self.show_page("settings")
+                    self._notify("راهنمای اتصال در صفحهٔ تنظیمات است", "info")
             return
         box = QMessageBox(self)
         box.setWindowTitle("خطا در خواندن داده‌ها")
@@ -8120,6 +8635,8 @@ class MainWindow(QMainWindow):
         box.setInformativeText(message + f"\n\nفایل گزارش:\n{log_path()}")
         settings_button = box.addButton("تنظیمات اتصال", QMessageBox.AcceptRole)
         retry_button = box.addButton("تلاش دوباره", QMessageBox.ActionRole)
+        import_button = box.addButton("بارگذاری فایل اکسل", QMessageBox.ActionRole)
+        local_button = box.addButton("اجرای فایل محلی", QMessageBox.ActionRole)
         log_button = box.addButton("باز کردن فایل گزارش", QMessageBox.HelpRole)
         box.addButton("بستن", QMessageBox.RejectRole)
         box.exec_()
@@ -8128,6 +8645,10 @@ class MainWindow(QMainWindow):
             self.show_page("settings")
         elif clicked is retry_button:
             self.load_data()
+        elif clicked is import_button:
+            self.import_excel_dialog()
+        elif clicked is local_button:
+            self.open_local_excel_dialog()
         elif clicked is log_button:
             open_path(str(log_path()))
 
@@ -8187,6 +8708,176 @@ class MainWindow(QMainWindow):
             self.settings.set_status(
                 "میزبان/دیتابیس/کاربر از مدیر دیتابیس خوانده شد — رمز را وارد کنید."
             )
+
+    # ------------------------------------------------------------------
+    # بارگذاری فایل اکسل در دیتابیس (شروع از ابتدا)
+    # ------------------------------------------------------------------
+    def open_local_excel_dialog(self) -> None:
+        """انتخاب فایل اکسل و اجرای برنامه با همان فایل، بدون دیتابیس."""
+        start = str(
+            self.config.get("local_excel_path")
+            or self.settings.excel_edit.text().strip()
+            or self.config.get("last_excel_path")
+            or app_dir()
+        )
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "انتخاب فایل اکسل برای اجرای محلی", start,
+            "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+        )
+        if path:
+            self.open_local_excel(path)
+
+    @guarded("open_local_excel")
+    def open_local_excel(self, path: str) -> None:
+        """خواندن مستقیم فایل اکسل از دیسک (بدون دیتابیس)."""
+        candidate = Path(str(path or "")).expanduser()
+        if not candidate.exists():
+            box = QMessageBox(self)
+            box.setWindowTitle("فایل اکسل")
+            box.setIcon(QMessageBox.Warning)
+            box.setText("فایل اکسل پیدا نشد.")
+            box.setInformativeText(str(candidate))
+            box.addButton("باشه", QMessageBox.AcceptRole)
+            box.exec_()
+            return
+        self.config.set("data_source", "local", save=False)
+        self.config.set("local_excel_path", str(candidate), save=False)
+        self.config.save()
+        self.settings.set_importing(False, str(candidate))
+        self.settings.set_status(f"حالت محلی — {candidate.name}")
+        self.statusBar().showMessage(
+            "اجرای محلی: داده‌ها از فایل اکسل خوانده می‌شود (بدون دیتابیس).", 6000
+        )
+        self.load_data()
+
+    def import_excel_dialog(self) -> None:
+        """انتخاب فایل اکسل و بارگذاری آن در دیتابیس."""
+        self.show_page("settings")
+        start = str(
+            self.settings.excel_edit.text().strip()
+            or self.config.get("last_excel_path")
+            or app_dir()
+        )
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "انتخاب فایل اکسل", start,
+            "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+        )
+        if path:
+            self.import_excel(path)
+
+    @guarded("import_excel")
+    def import_excel(self, path: str) -> None:
+        if self._import_worker_running():
+            self._notify("یک بارگذاری در حال اجراست؛ کمی صبر کنید", "clock")
+            return
+        if not str(path or "").strip():
+            self.import_excel_dialog()
+            return
+        self.show_page("settings")
+        values = self.settings.connection_values()
+        settings = {
+            "host": values["host"],
+            "port": values["port"],
+            "database": values["database"],
+            "user": values["user"],
+            "password": values["password"],
+            "workbook_id": values["workbook_id"],
+            "sheet_name": values["sheet_name"],
+        }
+        self.settings.set_importing(True, path)
+        self.settings.set_status(
+            "در حال بارگذاری فایل در دیتابیس… (اگر کاربر MySQL رمز ندارد، فیلد رمز خالی باشد)"
+        )
+        worker = ImportWorker(settings, path, values["sheet_name"], self)
+        worker.succeeded.connect(
+            lambda info, values=values, path=path: self._on_import_succeeded(info, values, path)
+        )
+        worker.failed.connect(self._on_import_failed)
+        worker.finished.connect(lambda: self.settings.set_importing(False))
+        self._import_worker = worker
+        worker.start()
+
+    def _adopt_last_connection(self) -> None:
+        """اگر ورود جایگزین (مثلاً root بدون رمز) جواب داد، همان را ذخیره می‌کند."""
+        info = dict(LAST_CONNECTION or {})
+        if not info:
+            return
+        user = str(info.get("user") or "")
+        password = str(info.get("password") or "")
+        if not user:
+            return
+        changed = (
+            user != str(self.config.get("db_user") or "")
+            or password != str(self.config.get_password() or "")
+        )
+        if not changed:
+            return
+        self.config.set("db_user", user, save=False)
+        self.config.set_password(password, self.config.get("db_remember_password"))
+        self.config.save()
+        self.settings.apply_connection({"user": user, "password": password})
+        log_event(f"ورود جایگزین ذخیره شد: کاربر={user}")
+        self.settings.set_status(
+            "اتصال با کاربر «" + user + "» برقرار شد"
+            + (" (بدون رمز)" if not password else "")
+        )
+        self._notify(
+            "اتصال برقرار شد — کاربر " + user + (" (بدون رمز)" if not password else ""),
+            "check",
+        )
+
+    def _import_worker_running(self) -> bool:
+        worker = getattr(self, "_import_worker", None)
+        if worker is None:
+            return False
+        try:
+            return bool(worker.isRunning())
+        except RuntimeError:
+            self._import_worker = None
+            return False
+
+    def _on_import_succeeded(self, info: Dict[str, Any],
+                             values: Dict[str, Any], path: str) -> None:
+        mapping = {
+            "db_host": values.get("host"),
+            "db_port": values.get("port"),
+            "db_name": values.get("database"),
+            "db_user": values.get("user"),
+            "db_workbook_id": values.get("workbook_id"),
+            "sheet_name": values.get("sheet_name"),
+        }
+        for key, value in mapping.items():
+            if value not in (None, ""):
+                self.config.set(key, value, save=False)
+        self.config.set_password(
+            str(values.get("password") or ""), self.config.get("db_remember_password")
+        )
+        self.config.set("last_excel_path", path, save=False)
+        self.config.set("data_source", "database", save=False)
+        self.config.save()
+        self.settings.apply_connection(values)
+        self._adopt_last_connection()
+        self.settings.set_status(
+            f"فایل اکسل بارگذاری شد — {fa(info.get('size', 0))} بایت، "
+            f"{fa(len(info.get('sheets') or []))} شیت"
+        )
+        self._notify("فایل اکسل در دیتابیس ذخیره شد", "check")
+        self.statusBar().showMessage("بارگذاری اکسل انجام شد؛ داده‌ها در حال خواندن…", 6000)
+        self.load_data()
+
+    @guarded("_on_import_failed")
+    def _on_import_failed(self, message: str) -> None:
+        self.settings.set_status("بارگذاری فایل اکسل ناموفق بود.")
+        log_event("بارگذاری اکسل ناموفق: "
+                  + " / ".join((message or "").splitlines()[:3]))
+        self._notify("بارگذاری فایل اکسل ناموفق بود", "alert")
+        box = QMessageBox(self)
+        box.setWindowTitle("بارگذاری فایل اکسل")
+        box.setIcon(QMessageBox.Critical)
+        box.setText("ذخیرهٔ فایل اکسل در دیتابیس ممکن نشد.")
+        box.setInformativeText(f"{message}\n\nفایل گزارش:\n{log_path()}")
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
 
     def pick_pdf_folder(self) -> None:
         start = str(self.settings.pdf_edit.text() or app_dir())
