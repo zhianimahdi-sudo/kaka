@@ -166,7 +166,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.0"
+APP_VERSION = "3.5.1"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1306,8 +1306,8 @@ def load_rows_from_database(settings: Dict[str, Any]) -> Optional[Dict[str, Any]
         cursor = connection.cursor()
         try:
             cursor.execute(
-                "SELECT original_filename, sheet_name, sheet_count, data_rows, meta_rows "
-                "FROM mehr_workbooks WHERE workbook_id=%s", (workbook_id,)
+                "SELECT original_filename, sheet_name, sheet_count, data_rows, meta_rows, "
+                "source_kind FROM mehr_workbooks WHERE workbook_id=%s", (workbook_id,)
             )
             meta = cursor.fetchone()
             if not meta:
@@ -1352,6 +1352,7 @@ def load_rows_from_database(settings: Dict[str, Any]) -> Optional[Dict[str, Any]
         "sheet_count": int(meta[2] or 0),
         "data_rows": int(meta[3] or 0),
         "raw_rows": raw_rows,
+        "source_kind": str((meta[5] if len(meta) > 5 else "") or "excel"),
     }
 
 
@@ -1428,6 +1429,7 @@ def import_workbook_to_database(
     log_event(f"بارگذاری اکسل در دیتابیس: {filename} ({size} بایت) → {database} #{wid}")
 
     stored_rows = 0
+    source_kind = "generated" if is_generated_workbook(str(path)) else "excel"
     connection = connect_server(settings)
     try:
         cursor = connection.cursor()
@@ -1489,7 +1491,7 @@ def import_workbook_to_database(
                     book.close()
                 stored = store_rows_in_database(
                     cursor, wid, filename, target_sheet, len(sheets), raw_rows,
-                    source_kind="excel", source_sha=digest,
+                    source_kind=source_kind, source_sha=digest,
                 )
                 stored_rows = int(stored.get("data_rows") or 0)
                 log_event(f"ردیف‌ها در جدول‌های نرمال‌شده ذخیره شد: {fa(stored_rows)} سطر")
@@ -2124,6 +2126,116 @@ def is_generated_workbook(path: str) -> bool:
             pass
 
 
+def inspect_workbook_bytes(blob: bytes) -> Dict[str, Any]:
+    """ویژگی‌های مهم کتاب کار: ساختهٔ برنامه؟ درصد دارد؟ علامت وضعیت دارد؟"""
+    info: Dict[str, Any] = {
+        "generated": False, "has_progress": False, "mark_rows": 0,
+        "sheets": [], "colorcode": False, "ok": False,
+    }
+    if not blob or openpyxl is None:
+        return info
+    try:
+        workbook = openpyxl.load_workbook(
+            io.BytesIO(blob), data_only=True, read_only=True
+        )
+    except Exception:
+        return info
+    try:
+        info["sheets"] = [str(name) for name in workbook.sheetnames]
+        info["ok"] = True
+        props = getattr(workbook, "properties", None)
+        if GENERATED_WORKBOOK_MARK in str(getattr(props, "keywords", "") or ""):
+            info["generated"] = True
+        target = None
+        for name in workbook.sheetnames:
+            if str(name).strip().lower() == SHEET_NAME_DEFAULT:
+                target = name
+                break
+        info["colorcode"] = target is not None
+        if target is None:
+            return info
+        sheet = workbook[target]
+        marks = 0
+        for index, row in enumerate(
+            sheet.iter_rows(min_row=1, max_col=56, values_only=True)
+        ):
+            if index == 0:
+                if str((row or [""])[0] or "").startswith(GENERATED_WORKBOOK_TITLE):
+                    info["generated"] = True
+                continue
+            if index == 1 and len(row) > 36:
+                number = num(row[36])
+                if number is not None and number > 0:
+                    info["has_progress"] = True
+            if any(
+                is_status_mark(row[column] if column < len(row) else None)
+                for column in range(11, 31)
+            ):
+                marks += 1
+            if info["has_progress"] and marks:
+                break  # برای تصمیم‌گیری همین اندازه کافی است
+            if info["generated"] and index > 1:
+                break  # کتاب کار ساخته‌شده از ۰۱ نیازی به شمارش علامت‌ها ندارد
+        info["mark_rows"] = marks
+        return info
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+
+
+def inspect_workbook_file(path: str) -> Dict[str, Any]:
+    """همان بازرسی، اما برای فایل روی دیسک."""
+    try:
+        probe = Path(str(path)).expanduser()
+        if not probe.exists() or not probe.is_file():
+            return {}
+        return inspect_workbook_bytes(probe.read_bytes())
+    except Exception:
+        return {}
+
+
+def find_real_workbook(source_path: str = "",
+                       extra_paths: Sequence[str] = ()) -> str:
+    """کتاب کار اصلی کاربر را پیدا می‌کند (نه کتاب کار ساخته‌شده از فایل ۰۱).
+
+    اول کتاب کاری که واقعاً درصد/علامت دارد؛ اگر نبود، اولین کتاب کار واقعی
+    دارای شیت colorcode.
+    """
+    candidates: List[str] = []
+    seen = set()
+
+    def add(path: Any) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(text)
+
+    for item in extra_paths:
+        add(item)
+    try:
+        seed = find_seed_workbook(source_path, extra_paths)
+        add(seed)
+    except Exception:
+        pass
+    add(ORIGINAL_EXCEL_PATH)
+    for path in candidates:
+        quality = inspect_workbook_file(path)
+        if quality.get("ok") and quality.get("colorcode") and not quality.get("generated"):
+            if quality.get("has_progress") or quality.get("mark_rows"):
+                return path
+    for path in candidates:
+        quality = inspect_workbook_file(path)
+        if quality.get("ok") and quality.get("colorcode") and not quality.get("generated"):
+            return path
+    return ""
+
+
 def _header_column(rows: Sequence[Sequence[Any]], header_row: int,
                    hints: Sequence[str]) -> int:
     """ستونی که سرستونش با یکی از نام‌های داده‌شده هم‌خوان است."""
@@ -2653,16 +2765,73 @@ def backup_workbook(blob: bytes, filename: str = "workbook") -> str:
         return ""
 
 
+def _settings_search_paths(settings: Dict[str, Any]) -> List[str]:
+    """مسیرهای ذخیره‌شدهٔ کتاب کار که ممکن است پایهٔ درست باشند."""
+    keys = ("source_workbook_path", "local_excel_path", "last_excel_path",
+            "extra_excel_path")
+    return [str(settings.get(key) or "") for key in keys]
+
+
+def resolve_update_base(settings: Dict[str, Any],
+                        source_path: str = "") -> Dict[str, Any]:
+    """کتاب کار پایه برای اعمال فایل ۰۱ را برمی‌گرداند.
+
+    اگر کتاب کار ذخیره‌شده در دیتابیس ساختهٔ خود برنامه از فایل ۰۱ باشد
+    (بدون ستون‌های وضعیت/درصد)، به‌جای آن کتاب کار اصلی کاربر جست‌وجو می‌شود
+    تا اعداد داشبورد صفر نشوند.
+    """
+    info = None
+    try:
+        info = fetch_workbook_blob(settings)
+    except Exception as exc:
+        log_event(f"خواندن کتاب کار دیتابیس برای پایهٔ به‌روزرسانی ممکن نشد: {exc}")
+    if info:
+        quality = inspect_workbook_bytes(info.get("data") or b"")
+        if not quality.get("generated"):
+            return {
+                "blob": info["data"],
+                "filename": str(info.get("filename") or "workbook.xlsx"),
+                "base_source": "database",
+                "base_path": "",
+            }
+        log_event(
+            "کتاب کار ذخیره‌شده در دیتابیس «ساخته‌شده از فایل ۰۱» است؛ "
+            "کتاب کار اصلی جست‌وجو می‌شود"
+        )
+    real = find_real_workbook(source_path, extra_paths=_settings_search_paths(settings))
+    if real:
+        try:
+            blob = Path(real).expanduser().read_bytes()
+        except OSError as exc:
+            raise ExcelDataError(f"خواندن کتاب کار اصلی ممکن نشد:\n{exc}") from exc
+        log_event(f"کتاب کار اصلی به‌عنوان پایهٔ به‌روزرسانی انتخاب شد: {real}")
+        return {
+            "blob": blob,
+            "filename": Path(real).name,
+            "base_source": "file",
+            "base_path": str(real),
+        }
+    raise ExcelDataError(
+        "کتاب کار اصلی (فایل دارای شیت colorcode که ستون‌های وضعیت و درصد را دارد) "
+        "پیدا نشد.\n\n"
+        "فایل ۰۱ سامانه فقط ستون‌های کارکرد را دارد؛ اگر آن را جای کتاب کار اصلی "
+        "بگذاریم کارت‌های وضعیت و درصد صفر می‌شوند.\n"
+        "یک بار دکمهٔ «کتاب کار اصلی (۰۲)» در تنظیمات را بزنید و همان فایل اصلی "
+        "خودتان (مثل \u202aF.O.C(Mehr).xlsx\u202c) را انتخاب کنید؛ از آن به بعد "
+        "به‌روزرسانی فایل ۰۱ روی همان انجام می‌شود."
+    )
+
+
 def update_database_from_system(settings: Dict[str, Any], source_path: str,
                                 sheet_name: str = SHEET_NAME_DEFAULT) -> Dict[str, Any]:
     """فایل ۰۱ را می‌خواند، فیلتر می‌کند و کتاب کار دیتابیس را به‌روز می‌کند."""
-    info = fetch_workbook_blob(settings)
-    blob = info["data"]
+    base = resolve_update_base(settings, source_path)
+    blob = base["blob"]
     plan = plan_system_update(source_path, blob, sheet_name=sheet_name)
-    backup = backup_workbook(blob, info.get("filename") or "workbook")
+    backup = backup_workbook(blob, str(base.get("filename") or "workbook"))
     new_blob, cells = apply_system_update(plan, blob)
     with tempfile.TemporaryDirectory(prefix="mehr-update-") as temp:
-        temp_path = Path(temp) / (info.get("filename") or "workbook.xlsx")
+        temp_path = Path(temp) / (str(base.get("filename") or "workbook.xlsx"))
         if temp_path.suffix.lower() not in {".xlsx", ".xlsm"}:
             temp_path = temp_path.with_suffix(".xlsx")
         temp_path.write_bytes(new_blob)
@@ -2793,9 +2962,10 @@ def migrate_blob_to_tables(settings: Dict[str, Any], info: Dict[str, Any]) -> No
                 sheet_count = len(book.sheetnames)
             finally:
                 book.close()
+            kind = "generated" if inspect_workbook_bytes(blob).get("generated") else "excel"
             store_rows_in_database(
                 cursor, workbook_id, str(info.get("filename") or "workbook.xlsx"),
-                target, sheet_count, raw_rows, source_kind="excel",
+                target, sheet_count, raw_rows, source_kind=kind,
                 source_sha=str(info.get("sha256") or ""),
             )
             connection.commit()
@@ -2842,11 +3012,13 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
             source_time=datetime.now(),
             source_size=0,
             source_note=note + " • جدول contracts",
+            source_kind=str(stored.get("source_kind") or "excel"),
         )
     info = fetch_workbook_blob(settings)
     note = "دیتابیس {} • شناسهٔ {}".format(
         settings.get("database") or "master_data", fa(int(settings.get("workbook_id") or 1))
     )
+    quality = inspect_workbook_bytes(info["data"])
     data = parse_workbook_bytes(
         info["filename"],
         info["data"],
@@ -2855,6 +3027,7 @@ def read_database_workbook(settings: Dict[str, Any], pdf_folder: str = "") -> Da
         source_time=_parse_imported_at(info.get("imported_at")),
         source_size=int(info.get("size") or len(info["data"])),
         source_note=note,
+        source_kind="generated" if quality.get("generated") else "excel",
     )
     try:
         migrate_blob_to_tables(settings, info)
@@ -2877,6 +3050,7 @@ def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
     except OSError as exc:
         raise ExcelDataError(f"خواندن فایل اکسل ممکن نشد:\n{exc}") from exc
     note = f"فایل محلی: {file_path.name}"
+    quality = inspect_workbook_bytes(blob)
     return parse_workbook_bytes(
         file_path.name,
         blob,
@@ -2885,6 +3059,7 @@ def read_local_workbook(path: str, sheet_name: str = SHEET_NAME_DEFAULT,
         source_time=stamp,
         source_size=len(blob),
         source_note=note,
+        source_kind="generated" if quality.get("generated") else "excel",
     )
 
 
@@ -3077,6 +3252,7 @@ class DashboardData:
     source_size: int
     warnings: List[str]
     source_note: str = ""
+    source_kind: str = "excel"
     pdf_total: int = 0
     metric_note: str = ""
 
@@ -3177,6 +3353,7 @@ def parse_workbook_bytes(
     source_time: Optional[datetime] = None,
     source_size: int = 0,
     source_note: str = "",
+    source_kind: str = "",
 ) -> DashboardData:
     """ساخت کامل داده‌های داشبورد از بایت‌های کتاب کار (خوانده‌شده از دیتابیس)."""
     if openpyxl is None:
@@ -3208,6 +3385,9 @@ def parse_workbook_bytes(
             workbook.close()
         except Exception:
             pass
+    kind = source_kind or (
+        "generated" if inspect_workbook_bytes(blob).get("generated") else "excel"
+    )
     return parse_workbook_rows(
         raw_rows,
         workbook_name=str(filename or "کتاب کار"),
@@ -3216,6 +3396,7 @@ def parse_workbook_bytes(
         source_time=source_time,
         source_size=source_size or len(blob),
         source_note=source_note,
+        source_kind=kind,
     )
 
 
@@ -3227,6 +3408,7 @@ def parse_workbook_rows(
     source_time: Optional[datetime] = None,
     source_size: int = 0,
     source_note: str = "",
+    source_kind: str = "",
 ) -> DashboardData:
     """همان ساخت داشبورد، اما از ردیف‌های آمادهٔ شیت (فایل یا دیتابیس)."""
     workbook_name = str(workbook_name or "کتاب کار")
@@ -3439,6 +3621,7 @@ def parse_workbook_rows(
         source_size=source_size,
         warnings=warnings,
         source_note=source_note,
+        source_kind=str(source_kind or "excel"),
         pdf_total=pdf_file_count(pdf_folder),
         metric_note=metric_note,
     )
@@ -6024,10 +6207,10 @@ class SystemUpdatePlanWorker(QThread):
 
     def run(self) -> None:
         try:
-            info = fetch_workbook_blob(self.settings)
-            blob = info["data"]
+            base = resolve_update_base(self.settings, self.source_path)
+            blob = base["blob"]
             plan = plan_system_update(self.source_path, blob, sheet_name=self.sheet_name)
-            self.planned.emit(plan, blob, str(info.get("filename") or "workbook.xlsx"))
+            self.planned.emit(plan, blob, str(base.get("filename") or "workbook.xlsx"))
         except ExcelDataError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:
@@ -10891,8 +11074,131 @@ class MainWindow(QMainWindow):
         if not silent:
             self._notify(f"{fa(data.total_contracts)} قرارداد بارگذاری شد", "check")
         self._setup_auto_timer()
-        if not silent and data.warnings:
+        system_only = self._looks_like_system_only(data) if data.records else False
+        if not silent and data.warnings and not system_only:
             QMessageBox.warning(self, "هشدار داده‌ها", "\n".join(data.warnings))
+        if system_only:
+            QTimer.singleShot(50, lambda d=data: self._maybe_restore_real_workbook(d))
+
+    # ------------------------------------------------------------------
+    # بازیابی خودکار وقتی دیتابیس کتاب کارِ ساخته‌شده از فایل ۰۱ را دارد
+    # ------------------------------------------------------------------
+    def _looks_like_system_only(self, data: DashboardData) -> bool:
+        """آیا دادهٔ فعلی همان فایل ۰۱ است (بدون وضعیت/درصد)؟"""
+        if not data.records:
+            return False
+        if data.progress_percent_text != "—":
+            return False
+        if data.source_kind == "generated":
+            # کتاب کار ساخته‌شده از فایل ۰۱ هیچ‌وقت سلول درصد (ردیف ۲ ستون ۳۷) را ندارد.
+            return True
+        # ردیف‌های ذخیره‌شده با نسخهٔ قبل ممکن است نوع منبع را نداشته باشند؛
+        # خود فایل ذخیره‌شده بررسی می‌شود تا «ساخته‌شده از ۰۱» بودنش معلوم شود.
+        try:
+            info = fetch_workbook_blob(self.config.db_settings())
+        except Exception:
+            return False
+        if inspect_workbook_bytes(info.get("data") or b"").get("generated"):
+            return True
+        if any(data.flag_counts.values()):
+            return False
+        return False
+
+    def _maybe_restore_real_workbook(self, data: DashboardData) -> None:
+        """اگر کتاب کار اصلی روی سیستم پیدا شد، جای نسخهٔ ساخته‌شده می‌نشیند."""
+        if getattr(self, "_restore_done", False):
+            return
+        if not self._looks_like_system_only(data):
+            return
+        self._restore_done = True
+        real = find_real_workbook(
+            str(self.config.get("last_excel_path") or ""),
+            extra_paths=(
+                self.config.get("source_workbook_path"),
+                self.config.get("local_excel_path"),
+                self.settings.excel_edit.text().strip(),
+            ),
+        )
+        if not real:
+            log_event("کتاب کار ساخته‌شده از فایل ۰۱ است و کتاب کار اصلی پیدا نشد")
+            if not bool(self.config.get("allow_system_only")):
+                self._ask_for_real_workbook()
+            return
+        log_event(f"کتاب کار اصلی پیدا شد و جای نسخهٔ ساخته‌شده می‌نشیند: {real}")
+        settings = self.config.db_settings()
+        sheet = str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
+        local_mode = str(self.config.get("data_source") or "database") == "local"
+        restored = False
+        blob = b""
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                blob = Path(real).expanduser().read_bytes()
+                last_source = str(self.config.get("last_excel_path") or "")
+                if last_source and Path(last_source).exists() \
+                        and not has_colorcode_sheet(last_source):
+                    # آخرین فایل ۰۱ کاربر هم دوباره روی کتاب کار اصلی اعمال می‌شود
+                    try:
+                        plan = plan_system_update(last_source, blob, sheet_name=sheet)
+                        blob, applied = apply_system_update(plan, blob)
+                        log_event(
+                            f"آخرین فایل ۰۱ روی کتاب کار اصلی اعمال شد: {applied} سلول"
+                        )
+                    except Exception as exc:
+                        log_event(f"اعمال آخرین فایل ۰۱ روی پایه ناموفق بود: {exc}")
+                with tempfile.TemporaryDirectory(prefix="mehr-recover-") as temp:
+                    temp_path = Path(temp) / Path(real).name
+                    if temp_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+                        temp_path = temp_path.with_suffix(".xlsx")
+                    temp_path.write_bytes(blob)
+                    import_workbook_to_database(settings, str(temp_path), sheet_name=sheet)
+                restored = True
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as exc:
+            log_event(f"جایگزینی کتاب کار اصلی در دیتابیس ناموفق بود: {exc}")
+        if (local_mode or not restored) and blob:
+            # نسخهٔ ترمیم‌شده (کتاب کار اصلی + آخرین فایل ۰۱) به‌صورت محلی هم ذخیره می‌شود
+            try:
+                managed_workbook_path().write_bytes(blob)
+                self.config.set("data_source", "local", save=False)
+                self.config.set("local_excel_path", str(managed_workbook_path()), save=False)
+            except Exception as exc:
+                log_event(f"ذخیرهٔ کتاب کار ترمیم‌شده ممکن نشد: {exc}")
+        self.config.set("source_workbook_path", real, save=False)
+        self.config.set("allow_system_only", False, save=False)
+        self.config.save()
+        self.settings.set_importing(False, real)
+        self._notify(
+            "کتاب کار اصلی پیدا شد؛ جای کتاب کار ساخته‌شده از فایل ۰۱ نشست", "check"
+        )
+        self.load_data(silent=True)
+
+    @guarded("_ask_for_real_workbook")
+    def _ask_for_real_workbook(self) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("کتاب کار اصلی لازم است")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "کتاب کار ذخیره‌شده همان خروجی سامانه (۰۱) است و ستون‌های وضعیت و درصد "
+            "پیشرفت را ندارد؛ به همین دلیل کارت‌ها صفر شده‌اند."
+        )
+        box.setInformativeText(
+            "فایل ۰۱ فقط ستون‌های کارکرد را دارد. یک بار فایل اصلی خودتان را بدهید "
+            "(همان فایلی که شیت colorcode دارد، مثل \u202aF.O.C(Mehr).xlsx\u202c)؛ "
+            "از آن به بعد هر فایل ۰۱ روی همان اعمال می‌شود و اعداد دقیقاً مثل قبل "
+            "برمی‌گردند."
+        )
+        pick_btn = box.addButton("انتخاب کتاب کار اصلی", QMessageBox.AcceptRole)
+        box.addButton("بعداً", QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is pick_btn:
+            last_source = str(self.config.get("last_excel_path") or "")
+            if last_source and Path(last_source).exists() \
+                    and not has_colorcode_sheet(last_source):
+                # بعد از انتخاب پایه، همان فایل ۰۱ دوباره روی آن اعمال می‌شود
+                self._pending_system_source = last_source
+            self.pick_source_workbook()
 
     @guarded("_on_load_failed")
     def _on_load_failed(self, message: str, silent: bool = False) -> None:
@@ -11183,7 +11489,14 @@ class MainWindow(QMainWindow):
         self.show_page("settings")
         self._pending_system_source = path
         self.settings.set_status("در حال خواندن فایل سامانه و تطبیق ردیف‌ها…")
-        worker = SystemUpdatePlanWorker(self.config.db_settings(), path,
+        settings = dict(self.config.db_settings())
+        settings.update({
+            "source_workbook_path": self.config.get("source_workbook_path"),
+            "local_excel_path": self.config.get("local_excel_path"),
+            "last_excel_path": self.config.get("last_excel_path"),
+            "extra_excel_path": self.settings.excel_edit.text().strip(),
+        })
+        worker = SystemUpdatePlanWorker(settings, path,
                                         str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT),
                                         self)
         worker.planned.connect(self._on_system_plan_ready)
@@ -11254,13 +11567,29 @@ class MainWindow(QMainWindow):
         created = bool(result.get("created"))
         output = str(result.get("output_path") or "")
         source = str(result.get("source_path") or getattr(plan, "source_path", "") or "")
+        no_base = bool(result.get("no_source_workbook"))
         if source:
             self.config.set("last_excel_path", source, save=False)
-        if output:
+        if output and not no_base:
             self.config.set("local_excel_path", output, save=False)
             self.config.set("data_source", "local", save=False)
             self.config.save()
         self._pending_system_source = ""
+        if no_base and created and not (
+            getattr(self, "_allow_system_only", False)
+            or bool(self.config.get("allow_system_only"))
+        ):
+            # فایل ۰۱ به‌تنهایی ستون‌های وضعیت/درصد را ندارد؛ اجازه نمی‌دهیم
+            # داشبورد با اعداد صفر بالا بیاید و از کاربر کتاب کار اصلی را می‌خواهیم.
+            self._set_system_update_busy(False)
+            self.settings.set_status(
+                "کتاب کار اصلی پیدا نشد — فایل ۰۱ به‌تنهایی وضعیت/درصد ندارد"
+            )
+            log_event("فایل ۰۱ بدون کتاب کار اصلی اعمال شد؛ منتظر انتخاب کتاب کار اصلی")
+            self._pending_system_source = source
+            self._ask_for_real_workbook()
+            return
+        self._allow_system_only = False
         self.settings.set_status(
             ("کتاب کار داخلی ساخته شد" if created else "کتاب کار داخلی به‌روزرسانی شد")
             + f" — {fa(result.get('updated_cells') or 0)} مقدار، "
@@ -11361,10 +11690,16 @@ class MainWindow(QMainWindow):
                 "فایل اصلی خودتان (مثل \u202aF.O.C(Mehr).xlsx\u202c) یا فایل ۰۲ را انتخاب کنید.",
             )
             return
+        if is_generated_workbook(path):
+            QMessageBox.warning(
+                self, "کتاب کار اصلی",
+                "این فایل همان کتاب کار ساخته‌شده توسط برنامه از فایل ۰۱ است و "
+                "ستون‌های وضعیت/درصد را ندارد.\n"
+                "فایل اصلی خودتان (مثل \u202aF.O.C(Mehr).xlsx\u202c) را انتخاب کنید.",
+            )
+            return
         self.config.set("source_workbook_path", path, save=False)
         self.config.set("local_excel_path", path, save=False)
-        self.config.set("data_source", "local", save=False)
-        self.config.save()
         try:
             data = read_local_workbook(
                 path, sheet_name=str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT)
@@ -11375,16 +11710,51 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             summary = f"خواندن فایل ممکن نشد: {exc}"
+        db_mode = bool(str(self.config.get("db_host") or "").strip())
+        stored_in_db = False
+        extra = ""
+        if db_mode:
+            try:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    imported = import_workbook_to_database(
+                        self.config.db_settings(), path,
+                        sheet_name=str(self.config.get("sheet_name") or SHEET_NAME_DEFAULT),
+                    )
+                finally:
+                    QApplication.restoreOverrideCursor()
+                stored_in_db = True
+                extra = (
+                    f"\nدر دیتابیس ذخیره شد: {fa(int(imported.get('data_rows') or 0))} "
+                    "ردیف در mehr_contracts"
+                )
+                log_event(f"کتاب کار اصلی در دیتابیس ذخیره شد: {path}")
+            except Exception as exc:
+                log_event(f"ذخیرهٔ کتاب کار اصلی در دیتابیس ناموفق بود: {exc}")
+                extra = f"\nذخیره در دیتابیس ممکن نشد ({str(exc).splitlines()[0]})."
+        if stored_in_db:
+            self.config.set("data_source", "database", save=False)
+        else:
+            # اگر ذخیره در دیتابیس ممکن نشد، همان فایل به‌صورت محلی اجرا می‌شود؛
+            # داشبورد نباید به‌خاطر در دسترس نبودن دیتابیس خالی بماند.
+            self.config.set("data_source", "local", save=False)
+        self.config.save()
+        self._restore_done = True
+        self.config.set("allow_system_only", False)
         self._notify("کتاب کار اصلی ثبت شد", "check")
         self.settings.set_status(f"کتاب کار اصلی: {Path(path).name}")
         box = QMessageBox(self)
         box.setWindowTitle("کتاب کار اصلی ثبت شد")
         box.setIcon(QMessageBox.Information)
         box.setText("از این به بعد به‌روزرسانی فایل ۰۱ روی همین کتاب کار انجام می‌شود.")
-        box.setInformativeText(f"{Path(path).name}\n{summary}")
+        box.setInformativeText(f"{Path(path).name}\n{summary}{extra}")
         box.addButton("باشه", QMessageBox.AcceptRole)
         box.exec_()
+        pending = str(getattr(self, "_pending_system_source", "") or "")
+        self._pending_system_source = ""
         self.load_data()
+        if pending:
+            QTimer.singleShot(150, lambda p=pending: self.start_system_update(p))
 
     @guarded("show_diagnosis")
     def show_diagnosis(self, path: str) -> None:
@@ -11522,6 +11892,35 @@ class MainWindow(QMainWindow):
             "در دیتابیس پیدا نشد", "ذخیره نشده است", "excel_original_files",
         ))
         source = str(getattr(self, "_pending_system_source", "") or "")
+        if "کتاب کار اصلی" in (message or ""):
+            self._pending_system_source = source
+            box = QMessageBox(self)
+            box.setWindowTitle("کتاب کار اصلی لازم است")
+            box.setIcon(QMessageBox.Warning)
+            box.setText(
+                "فایل ۰۱ سامانه ستون‌های وضعیت و درصد پیشرفت را ندارد. برای اینکه "
+                "کارت‌ها و درصد صفر نشوند، اول باید کتاب کار اصلی شما (فایل دارای "
+                "شیت colorcode) مشخص باشد."
+            )
+            box.setInformativeText(
+                "یک بار دکمهٔ «کتاب کار اصلی (۰۲)» را بزنید و فایل اصلی خودتان "
+                "(مثل \u202aF.O.C(Mehr).xlsx\u202c که شیت colorcode دارد) را انتخاب کنید. "
+                "بعد از آن، همین فایل ۰۱ روی همان اعمال می‌شود و اعداد داشبورد "
+                "مثل قبل برمی‌گردند."
+            )
+            pick_btn = box.addButton("انتخاب کتاب کار اصلی", QMessageBox.AcceptRole)
+            only_btn = box.addButton(
+                "ادامه با فایل ۰۱ (بدون وضعیت/درصد)", QMessageBox.DestructiveRole
+            )
+            box.addButton("بعداً", QMessageBox.RejectRole)
+            box.exec_()
+            if box.clickedButton() is pick_btn:
+                self.pick_source_workbook()
+            elif box.clickedButton() is only_btn and source:
+                self._allow_system_only = True
+                self.config.set("allow_system_only", True)
+                self.start_local_system_update(source)
+            return
         if database_problem and source:
             if ask_confirm(
                 self, "دیتابیس در دسترس نیست",
