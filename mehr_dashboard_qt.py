@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.10"
+APP_VERSION = "3.5.11"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -2667,8 +2667,15 @@ def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
 
 def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str],
                              records: List[SystemUpdateRecord],
-                             info: Dict[str, Any]) -> None:
-    """نتیجهٔ محاسبه (وضعیت هر مدرک و درصد) در شیت colorcode می‌نشیند."""
+                             info: Dict[str, Any],
+                             overwrite_formulas: bool = True) -> None:
+    """نتیجهٔ محاسبه (وضعیت هر مدرک و درصد) در شیت colorcode می‌نشیند.
+
+    اگر `overwrite_formulas=False` باشد، سلول‌هایی که در کتاب کار شما فرمول دارند
+    دست‌نخورده می‌مانند (مثل فایل واقعی خودتان که ستون‌های L..AH و AJ/AK فرمول
+    دارند) و مقدار محاسبه‌شده در فهرست انتظار می‌ماند؛ اگر بازمحاسبهٔ اکسل ممکن
+    نبود، همان مقدارها جای فرمول‌ها نوشته می‌شوند تا داشبورد صفر نشود.
+    """
     name = plan.sheet_name if (plan.sheet_name in workbook.sheetnames
                               and is_dashboard_sheet_name(plan.sheet_name)) else ""
     if not name:
@@ -2727,6 +2734,8 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
         else:
             order_rows = []
     marks = kept = progress_rows = 0
+    formula_cells = 0
+    pending: List[Dict[str, Any]] = info.setdefault("pending_values", [])
     progress_values: List[float] = []
     for index, record in enumerate(records):
         row_number = 0
@@ -2753,29 +2762,49 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
                 continue
             cell = sheet.cell(row=int(row_number), column=int(column))
             current = cell.value
-            # نتیجهٔ محاسبه همیشه می‌نشیند (حتی روی فرمول قدیمی)، چون خود کتاب
-            # کار شما هم همین ستون‌ها را با فرمول حساب می‌کند.
+            is_formula = isinstance(current, str) and current.startswith("=")
+            if is_formula and not overwrite_formulas:
+                pending.append({"sheet": name, "row": int(row_number),
+                                "column": int(column), "value": state})
+                formula_cells += 1
+                continue
             current_text = txt(current).strip().upper()
             if current_text == state:
                 continue
             cell.value = state
             marks += 1
         if percent is not None:
-            sheet.cell(row=int(row_number), column=int(progress_column), value=percent)
+            pcell = sheet.cell(row=int(row_number), column=int(progress_column))
+            pcurrent = getattr(pcell, "value", None)
+            if isinstance(pcurrent, str) and pcurrent.startswith("=") and not overwrite_formulas:
+                pending.append({"sheet": name, "row": int(row_number),
+                                "column": int(progress_column), "value": percent})
+                formula_cells += 1
+            else:
+                pcell.value = percent
             progress_rows += 1
             if percent > 0:
                 progress_values.append(percent)
     info["dashboard_sheet"] = name
     info["dashboard_marks"] = marks
     info["dashboard_kept"] = kept
+    info["dashboard_formula_cells"] = formula_cells
     info["progress_rows"] = progress_rows
     if progress_values:
         total = sum(progress_values) / len(progress_values)
-        sheet.cell(row=2, column=int(progress_column), value=total)
+        tcell = sheet.cell(row=2, column=int(progress_column))
+        tcurrent = getattr(tcell, "value", None)
+        if isinstance(tcurrent, str) and tcurrent.startswith("=") and not overwrite_formulas:
+            pending.append({"sheet": name, "row": 2,
+                            "column": int(progress_column), "value": total})
+            formula_cells += 1
+        else:
+            tcell.value = total
         info["progress_total"] = total
 
 
-def sync_workbook_from_system(workbook, plan: SystemUpdatePlan) -> Dict[str, Any]:
+def sync_workbook_from_system(workbook, plan: SystemUpdatePlan,
+                              overwrite_formulas: bool = True) -> Dict[str, Any]:
     """زنجیرهٔ «خروجی کندو ← فایل سامانه» و «colorcode ← خروجی کندو» را اجرا می‌کند.
 
     دادهٔ L..AJ بر اساس **نام سرستون** در شیت خروجی نوشته می‌شود (نه بر اساس
@@ -2787,7 +2816,8 @@ def sync_workbook_from_system(workbook, plan: SystemUpdatePlan) -> Dict[str, Any
         "export_mapping": "", "export_contract_column": "",
         "dashboard_sheet": "", "dashboard_marks": 0, "dashboard_kept": 0,
         "progress_rows": 0, "progress_total": None,
-        "requirements": 0, "notes": [],
+        "requirements": 0, "notes": [], "pending_values": [],
+        "dashboard_formula_cells": 0,
     }
     headers = [str(name) for name in (plan.source_headers or [])]
     records = list(plan.records or [])
@@ -2805,8 +2835,57 @@ def sync_workbook_from_system(workbook, plan: SystemUpdatePlan) -> Dict[str, Any
         export_name = _find_export_sheet(workbook, keys)
     if export_name:
         _write_export_sheet(workbook, export_name, plan, headers, records, keys, info)
-    _apply_dashboard_results(workbook, plan, headers, records, info)
+    _apply_dashboard_results(workbook, plan, headers, records, info,
+                             overwrite_formulas=overwrite_formulas)
     return info
+
+
+def apply_pending_values(path: str, pending: Sequence[Dict[str, Any]]) -> int:
+    """مقدارهای محاسبه‌شده را جای فرمول‌هایی می‌نویسد که بازمحاسبه نشده‌اند.
+
+    وقتی اکسل در دسترس نباشد و کتاب کار ستون‌هایش فرمول داشته باشد، این تابع
+    مانع می‌شود داشبورد مقدار خالی بخواند.
+    """
+    if not pending or openpyxl is None:
+        return 0
+    target = Path(str(path)).expanduser()
+    if not target.exists():
+        return 0
+    workbook = openpyxl.load_workbook(str(target), data_only=False)
+    written = 0
+    try:
+        for item in pending:
+            sheet_name = str(item.get("sheet") or "")
+            if sheet_name not in workbook.sheetnames:
+                continue
+            sheet = workbook[sheet_name]
+            try:
+                sheet.cell(row=int(item["row"]), column=int(item["column"]),
+                           value=item.get("value"))
+                written += 1
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        if written:
+            try:
+                workbook.calculation.fullCalcOnLoad = True
+            except Exception:
+                pass
+            workbook.save(str(target))
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    return written
+
+
+def _prefer_workbook_formulas() -> bool:
+    """آیا فرمول‌های شیت colorcode دست‌نخورده بمانند و با اکسل بازمحاسبه شوند؟
+
+    روی ویندوز که اکسل در دسترس است، «مثل خروجی شیت colorcode خودتان» می‌شود:
+    همان فرمول‌ها + مقادیر تازه. روی سیستم بدون اکسل، مقدارها نوشته می‌شوند.
+    """
+    return os.name == "nt"
 
 
 def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
@@ -2826,7 +2905,9 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
     try:
         if plan.sheet_name not in workbook.sheetnames:
             raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
-        info = sync_workbook_from_system(workbook, plan)
+        keep_formulas = _prefer_workbook_formulas()
+        info = sync_workbook_from_system(workbook, plan,
+                                         overwrite_formulas=not keep_formulas)
         cleaned = 0
         try:
             workbook.calculation.fullCalcOnLoad = True
@@ -2840,6 +2921,19 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
             workbook.close()
         except Exception:
             pass
+    recalculated = False
+    pending = list(info.get("pending_values") or [])
+    if keep_formulas and pending:
+        recalculated = recalculate_with_excel(str(target))
+        if not recalculated:
+            replaced = apply_pending_values(str(target), pending)
+            info["dashboard_marks"] = int(info.get("dashboard_marks") or 0) + replaced
+            log_event(
+                f"بازمحاسبهٔ اکسل ممکن نشد؛ {replaced} مقدار محاسبه‌شده جای فرمول‌ها "
+                "نوشته شد تا داشبورد خالی نماند."
+            )
+    info["recalculated"] = bool(recalculated)
+    info["pending_values"] = pending
     for note in info.get("notes", []):
         log_event(f"همگام‌سازی با فایل سامانه: {note}")
     log_event(
@@ -2855,7 +2949,10 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
     )
     return {
         "output_path": str(target),
-        "written_cells": int(info.get("export_written", 0)) + int(info.get("dashboard_marks", 0)),
+        "recalculated": bool(info.get("recalculated")),
+        "written_cells": (int(info.get("export_written", 0))
+                          + int(info.get("dashboard_marks", 0))
+                          + int(info.get("dashboard_formula_cells", 0))),
         "formula_cells": int(info.get("export_formulas", 0)),
         "merged_cells": 0,
         "cleaned_marks": cleaned,
@@ -2878,8 +2975,12 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
     try:
         if plan.sheet_name not in workbook.sheetnames:
             raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
-        info = sync_workbook_from_system(workbook, plan)
-        updated = int(info.get("export_written", 0)) + int(info.get("dashboard_marks", 0))
+        info = sync_workbook_from_system(
+            workbook, plan, overwrite_formulas=not _prefer_workbook_formulas()
+        )
+        updated = (int(info.get("export_written", 0))
+                   + int(info.get("dashboard_marks", 0))
+                   + int(info.get("dashboard_formula_cells", 0)))
         # اکسل بعد از ذخیره، ستون‌های خالی انتهایی را حذف می‌کند و عرض شیت به ۵۶
         # می‌رسد؛ برنامه ۵۸ ستون انتظار دارد، پس یک سلول خالی برای حفظ عرض می‌گذاریم.
         for sheet_name in (plan.sheet_name, info.get("dashboard_sheet") or ""):
@@ -2931,13 +3032,26 @@ def sync_summary_lines(info: Dict[str, Any]) -> List[str]:
         )
     dashboard = str(info.get("dashboard_sheet") or "")
     if dashboard:
+        formulas = int(info.get("dashboard_formula_cells") or 0)
+        if formulas:
+            lines.append(
+                "شیت «{sheet}»: مثل کتاب کار خودتان با فرمول‌هایش بازمحاسبه شد "
+                "({count} سلول فرمولی دست‌نخورده).".format(
+                    sheet=dashboard, count=fa(formulas))
+            )
         lines.append(
             "شیت «{sheet}»: {marks} وضعیت مدرک (OK/M) و {rows} درصد پیشرفت.".format(
                 sheet=dashboard,
-                marks=fa(int(info.get("dashboard_marks") or 0)),
+                marks=fa(int(info.get("dashboard_marks") or 0) + formulas),
                 rows=fa(int(info.get("progress_rows") or 0)),
             )
         )
+        if info.get("recalculated"):
+            lines.append("بازمحاسبه با خودِ اکسل انجام شد (مقادیر فرمول‌ها به‌روز شدند).")
+        elif formulas:
+            lines.append(
+                "اکسل در دسترس نبود؛ مقدار همان فرمول‌ها مستقیم در سلول‌ها نوشته شد."
+            )
         total = info.get("progress_total")
         if isinstance(total, (int, float)):
             lines.append("میانگین درصد پیشرفت: {value}٪".format(
@@ -7927,7 +8041,9 @@ class SystemCopyWorker(QThread):
             healthy = False
             imported: Dict[str, Any] = {}
             if self.auto_import:
-                recalculated = recalculate_with_excel(info["output_path"])
+                recalculated = bool(info.get("recalculated")) or recalculate_with_excel(
+                    info["output_path"]
+                )
                 try:
                     health = workbook_health(Path(info["output_path"]).read_bytes())
                     healthy = not health.get("damaged")
@@ -8003,10 +8119,19 @@ class SystemUpdateApplyWorker(QThread):
                 # اگر اکسل نصب باشد، فرمول‌های کتاب کار (مبالغ، ستون‌های محاسبهٔ
                 # «خروجی کندو» و …) بازمحاسبه و مقدارشان ذخیره می‌شود؛ اگر نبود،
                 # همان مقدارهایی که برنامه خودش حساب کرده در فایل هست.
+                recalculated = False
                 try:
-                    recalculate_with_excel(str(temp_path))
+                    recalculated = recalculate_with_excel(str(temp_path))
                 except Exception as exc:
                     log_event(f"بازمحاسبهٔ فایل پیش از ذخیره در دیتابیس ممکن نشد: {exc}")
+                if not recalculated:
+                    pending = list(LAST_SYNC_INFO.get("pending_values") or [])
+                    if pending:
+                        replaced = apply_pending_values(str(temp_path), pending)
+                        log_event(
+                            f"اکسل در دسترس نبود؛ {replaced} مقدار محاسبه‌شده جای "
+                            "فرمول‌ها نوشته شد."
+                        )
                 imported = import_workbook_to_database(
                     self.settings, str(temp_path), sheet_name=self.plan.sheet_name,
                     workbook_id=int(self.settings.get("workbook_id") or 1),
