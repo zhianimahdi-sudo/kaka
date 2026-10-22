@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.11"
+APP_VERSION = "3.6.0"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1565,6 +1565,223 @@ def import_workbook_to_database(
     }
 
 
+# ---------------------------------------------------------------------------
+# ساخت دیتابیس از صفر (نسخهٔ ۳٫۶)
+# ---------------------------------------------------------------------------
+# ترتیب حذف مهم است: جدول فرزند پیش از جدول پدر حذف می‌شود تا کلید خارجی
+# (excel_original_files → excel_workbooks) مانع نشود.
+APP_DATABASE_TABLES = (
+    "excel_original_files",
+    "excel_workbooks",
+    "mehr_contracts",
+    "mehr_workbooks",
+)
+
+
+def database_schema_statements() -> List[str]:
+    """همهٔ دستورهای ساخت جدول‌های برنامه (کتاب کار + جدول‌های نرمال‌شده)."""
+    return list(WORKBOOK_SCHEMA_SQL) + list(MEHR_SCHEMA_SQL)
+
+
+def reset_database_schema(settings: Dict[str, Any],
+                          drop_database: bool = True) -> Dict[str, Any]:
+    """دیتابیس مرکزی را «از صفر» می‌سازد: جدول‌های قبلی پاک و دوباره ساخته می‌شوند.
+
+    `drop_database=True` کل دیتابیس را حذف و از نو می‌سازد (پاک‌سازی کامل)؛ با
+    `False` فقط جدول‌های همین برنامه حذف می‌شوند و جدول‌های دیگر دست‌نخورده
+    می‌مانند. فایل‌های اکسل روی دیسک هیچ‌وقت پاک نمی‌شوند.
+    """
+    if mysql_connector is None:
+        raise DatabaseError(
+            "کتابخانهٔ mysql-connector-python نصب نیست.\n"
+            "دستور نصب: pip install mysql-connector-python"
+        )
+    database = _safe_identifier(settings.get("database") or "master_data", "نام دیتابیس")
+    host = settings.get("host") or "127.0.0.1"
+    port = int(settings.get("port") or 3306)
+    log_event(
+        f"ساخت دیتابیس از صفر: {host}:{port}/{database} "
+        f"(حذف کامل={drop_database})"
+    )
+    connection = connect_server(settings)
+    dropped = False
+    created: List[str] = []
+    try:
+        cursor = connection.cursor()
+        try:
+            exists = False
+            try:
+                cursor.execute(
+                    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA "
+                    "WHERE SCHEMA_NAME=%s", (database,)
+                )
+                exists = cursor.fetchone() is not None
+            except Exception as exc:
+                log_event(f"بررسی وجود دیتابیس ممکن نشد (ادامه می‌دهیم): {exc}")
+            if drop_database and exists:
+                cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+                cursor.execute(f"DROP DATABASE `{database}`")
+                dropped = True
+                log_event(f"دیتابیس قبلی حذف شد: {database}")
+            cursor.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{database}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+            cursor.execute(f"USE `{database}`")
+            if not drop_database:
+                cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+                for table in APP_DATABASE_TABLES:
+                    cursor.execute(f"DROP TABLE IF EXISTS `{table}`")
+                log_event("جدول‌های قبلی برنامه حذف شدند (دیتابیس و جدول‌های دیگر ماندند).")
+            for statement in database_schema_statements():
+                cursor.execute(statement)
+                match = re.search(r"CREATE TABLE IF NOT EXISTS\s+`?(\w+)", statement)
+                if match:
+                    created.append(match.group(1))
+            try:
+                cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+            except Exception:
+                pass
+            connection.commit()
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+    except ExcelDataError:
+        raise
+    except Exception as exc:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        text = str(exc)
+        log_event(f"خطای ساخت دیتابیس از صفر: {type(exc).__name__}: {text}")
+        if "1044" in text or "access denied" in text.lower():
+            raise DatabaseError(
+                f"کاربر MySQL اجازهٔ ساخت/حذف دیتابیس «{database}» را ندارد "
+                f"({host}:{port}).\n{text}\n\n"
+                "با کاربر root (یا کاربری که دسترسی CREATE/DROP دارد) وارد شوید، "
+                "یا همین دیتابیس را با «مدیریت دیتابیس مرکزی» بسازید."
+            ) from exc
+        if "1045" in text or "access denied" in text.lower():
+            raise DatabaseError(
+                f"نام کاربری یا رمز MySQL پذیرفته نشد ({host}:{port}).\n{text}\n\n"
+                "رمز درستِ کاربر را در تنظیمات وارد کنید یا با کاربر root وارد شوید."
+            ) from exc
+        raise DatabaseError(
+            f"ساخت دیتابیس «{database}» از صفر ممکن نشد.\n{text}"
+        ) from exc
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    counts: Dict[str, int] = {}
+    try:
+        fresh = connect_database(settings, allow_fallback=False)
+        try:
+            probe = fresh.cursor()
+            try:
+                for table in APP_DATABASE_TABLES:
+                    probe.execute(f"SELECT COUNT(*) FROM `{table}`")
+                    row = probe.fetchone() or (0,)
+                    counts[table] = int(row[0] or 0)
+            finally:
+                probe.close()
+        finally:
+            fresh.close()
+    except Exception as exc:
+        log_event(f"شمارش جدول‌های تازه ممکن نشد: {exc}")
+    log_event(
+        "دیتابیس از صفر ساخته شد: "
+        + "، ".join(f"{table}={counts.get(table, 0)}" for table in APP_DATABASE_TABLES)
+    )
+    return {
+        "database": database,
+        "host": host,
+        "port": port,
+        "dropped_database": dropped,
+        "tables": created,
+        "counts": counts,
+    }
+
+
+def _workbook_file_for_database(source_path: str,
+                                sheet_name: str = "") -> Dict[str, Any]:
+    """فایلی را که باید در دیتابیس ذخیره شود آماده می‌کند.
+
+    اگر فایل خودش شیت `colorcode` داشته باشد همان استفاده می‌شود؛ اگر «فایل ۰۱»
+    سامانه باشد، اول یک کتاب کار کامل (با شیت colorcode) از آن ساخته می‌شود.
+    """
+    path = Path(str(source_path or "")).expanduser()
+    if not path.exists() or not path.is_file():
+        raise ExcelDataError(
+            "فایل اکسل برای ساخت دیتابیس پیدا نشد:\n" + str(path)
+        )
+    if has_colorcode_sheet(str(path)):
+        return {"path": str(path), "built": False, "source": str(path),
+                "sheet_name": str(sheet_name or SHEET_NAME_DEFAULT),
+                "notes": []}
+    built = build_workbook_from_system(str(path))
+    blob = built.get("blob") or b""
+    if not blob:
+        raise ExcelDataError("ساخت کتاب کار از فایل ۰۱ سامانه نتیجه‌ای نداشت.")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    target = data_dir() / f"{path.stem}-پایه-{stamp}.xlsx"
+    try:
+        target.write_bytes(blob)
+    except OSError as exc:
+        raise ExcelDataError(f"نوشتن کتاب کار ساخته‌شده ممکن نشد:\n{exc}") from exc
+    log_event(f"کتاب کار پایه از فایل ۰۱ ساخته شد: {target}")
+    return {
+        "path": str(target),
+        "built": True,
+        "source": str(path),
+        "sheet_name": str(built.get("sheet_name") or SHEET_NAME_DEFAULT),
+        "notes": list(built.get("notes") or []),
+    }
+
+
+def rebuild_database_from_scratch(settings: Dict[str, Any], source_path: str = "",
+                                  sheet_name: str = "",
+                                  drop_database: bool = True) -> Dict[str, Any]:
+    """دیتابیس را از صفر می‌سازد و (اگر فایل داده شده باشد) همان را کتاب کار ۱ می‌کند."""
+    schema = reset_database_schema(settings, drop_database=drop_database)
+    result: Dict[str, Any] = dict(schema)
+    result.update({
+        "workbook_id": 0, "data_rows": 0, "source": "", "built_path": "",
+        "filename": "", "notes": [], "imported": {},
+    })
+    source = str(source_path or "").strip()
+    if not source:
+        log_event("دیتابیس خالی ساخته شد؛ هیچ فایلی برای بارگذاری داده نشد.")
+        return result
+    prepared = _workbook_file_for_database(source, sheet_name)
+    target = dict(settings)
+    target["workbook_id"] = 1
+    imported = import_workbook_to_database(
+        target, prepared["path"],
+        sheet_name=sheet_name or prepared.get("sheet_name") or SHEET_NAME_DEFAULT,
+        workbook_id=1,
+    )
+    result.update({
+        "workbook_id": int(imported.get("workbook_id") or 1),
+        "data_rows": int(imported.get("data_rows") or 0),
+        "source": prepared["source"],
+        "built_path": prepared["path"] if prepared.get("built") else "",
+        "filename": str(imported.get("filename") or ""),
+        "notes": prepared.get("notes") or [],
+        "imported": imported,
+    })
+    log_event(
+        "دیتابیس از صفر ساخته و پر شد: "
+        f"{result['data_rows']} ردیف، شناسهٔ {result['workbook_id']}"
+    )
+    return result
+
+
 # ==========================================================================
 # به‌روزرسانی خودکار از «فایل سامانه» (فایل ۰۱) — بدون کپی‌پیست دستی
 # ==========================================================================
@@ -1830,6 +2047,7 @@ class SystemUpdateRecord:
     values: List[Any]          # ستون‌های L..AJ فایل سامانه، به‌ترتیب سرستون‌ها
     requirements: List[str]    # ستون‌های AL..BH: M/O/N/A (الزام هر مدرک)
     combos: List[str]          # ستون‌های BK..CG: «1-M» / «0-M» / ...
+    contract_type: str = ""    # ستون «نوع قرارداد» (کلید ماتریس الزام)
 
 
 @dataclass
@@ -2083,6 +2301,10 @@ def plan_system_update(source_path: str, target_blob: bytes,
             f"{fa(len(data_rows))})؛ {fa(len(order_mapping))} ردیف اول به‌ترتیب نوشته شد."
         )
 
+    type_col = _header_column([rows[header_row]], 0,
+                              ("نوع قرارداد", "اجرایی", "contract type", "type"))
+    if type_col < 0:
+        type_col = 8  # ستون I در فایل سامانه
     mapping: List[Tuple[int, List[Any]]] = []
     records: List[SystemUpdateRecord] = []
     for target_row, row in picked:
@@ -2091,7 +2313,8 @@ def plan_system_update(source_path: str, target_blob: bytes,
             values.append(None)
         mapping.append((target_row, values))
         records.append(
-            _build_update_record(row, values, contract_col, first_column - 1)
+            _build_update_record(row, values, contract_col, first_column - 1,
+                                 type_col=type_col)
         )
     if not filtered:
         raise ExcelDataError(
@@ -2142,7 +2365,8 @@ def _plan_source_headers(rows: Sequence[Sequence[Any]], header_row: int,
 
 
 def _build_update_record(row: Sequence[Any], values: List[Any],
-                         contract_col: int, base_index: int) -> SystemUpdateRecord:
+                         contract_col: int, base_index: int,
+                         type_col: int = -1) -> SystemUpdateRecord:
     """ردیف فایل سامانه + ستون‌های محاسبهٔ شیت «خروجی کندو» (AL..BH و BK..CG)."""
     def slice_of(offset: int) -> List[str]:
         start = base_index + offset
@@ -2159,8 +2383,10 @@ def _build_update_record(row: Sequence[Any], values: List[Any],
     if combos and not any(re.match(r"^[01]\s*-", item) for item in combos):
         combos = []
     key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+    type_value = txt(row[type_col]) if 0 <= type_col < len(row) else ""
     return SystemUpdateRecord(key=key, values=values,
-                              requirements=requirements, combos=combos)
+                              requirements=requirements, combos=combos,
+                              contract_type=type_value)
 
 
 def _sheet_system_scan(workbook, sheet_name: str, source_keys: set) -> Dict[str, Any]:
@@ -2562,6 +2788,233 @@ def _find_export_sheet(workbook, keys: set) -> str:
     return best_name if best_score >= 5 else ""
 
 
+# ---------------------------------------------------------------------------
+# ماتریس الزام مدارک — همان «جدول شماره ۷» کتاب کار شما (Sheet1 (2))
+# ---------------------------------------------------------------------------
+# هر نوع قرارداد (ستون I شیت «خروجی کندو») برای هر یک از ۲۳ مدرک یکی از این
+# کدها را دارد: M (الزامی) / O (اختیاری) / N/A (لازم نیست). شیت «خروجی کندو»
+# با VLOOKUP همین را در ستون‌های AL..BH می‌نویسد و بعد در ستون‌های BK..CG
+# ترکیب «دارد/لازم» را می‌سازد؛ «0-M» یعنی مدرک الزامی است و ثبت نشده.
+REQUIREMENT_DOC_NAMES = (
+    "صورتجلسه تحویل موقت",
+    "صورت وضعیت ماقبل قطعی",
+    "صورت جلسه برچیدن کارگاه",
+    "صورتجلسه فصل مشترک",
+    "گواهی رفع پانچ",
+    "بالانس متریال",
+    "مدارک مهندسی نهایی شده - Final Doc",
+    "لایحه تاخیرات",
+    "ادعاها، اضافه یا کسر کارها",
+    "تسویه حساب کارگاهی",
+    "صورت وضعیت قطعی",
+    "صورتجلسه کارگروه اختتام - کمیسیون پایان قرارداد",
+    "مفاصا حساب بیمه",
+    "اقرار نامه ترک ادعاها",
+    "آزاد سازی سپرده حسن انجام کار - بخش اول",
+    "آزاد سازی تضامین",
+    "صورت جلسه اختتام - اتمام دوره گارانتی",
+    "صورتجلسه تحویل قطعی",
+    "آزاد سازی سپرده حسن انجام کار - بخش دوم",
+    "تسویه حساب مالی",
+    "گواهی پایان کار",
+    "گواهی رضایت کاری",
+    "صورت جلسه اختتام - تحویل قطعی",
+)
+
+REQUIREMENT_MATRIX_DEFAULT: Dict[str, Tuple[str, ...]] = {
+    "EPC": (
+        "M", "M", "M", "O", "M", "M", "M", "M", "M", "M", "M", "M", "M", "M",
+        "M", "M", "M", "M", "M", "M", "O", "O", "M",
+    ),
+    "PC": (
+        "M", "M", "M", "O", "M", "M", "M", "M", "M", "M", "M", "M", "M", "M",
+        "M", "M", "M", "M", "M", "M", "O", "O", "M",
+    ),
+    "C": (
+        "M", "M", "M", "O", "M", "M", "M", "M", "M", "M", "M", "M", "M", "M",
+        "M", "M", "M", "M", "M", "M", "O", "O", "M",
+    ),
+    "PR": (
+        "N/A", "N/A", "N/A", "N/A", "N/A", "M", "M", "M", "M", "N/A", "M",
+        "M", "M", "M", "N/A", "M", "M", "N/A", "N/A", "M", "O", "O", "N/A",
+    ),
+    "MTR": (
+        "N/A", "N/A", "N/A", "N/A", "N/A", "M", "M", "M", "M", "N/A", "M",
+        "M", "M", "M", "N/A", "M", "M", "N/A", "N/A", "M", "O", "O", "N/A",
+    ),
+    "GNR": (
+        "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "O", "N/A",
+        "M", "O", "M", "M", "N/A", "M", "O", "N/A", "N/A", "M", "N/A", "N/A",
+        "O",
+    ),
+    "E": (
+        "O", "N/A", "N/A", "O", "N/A", "N/A", "N/A", "M", "M", "M", "M", "M",
+        "M", "M", "M", "M", "O", "O", "O", "M", "O", "O", "O",
+    ),
+    "LOG": (
+        "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "O", "M", "M", "M",
+        "M", "M", "M", "M", "M", "O", "O", "O", "M", "O", "O", "O",
+    ),
+    "TRS": (
+        "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "O", "M", "M", "M",
+        "M", "M", "M", "M", "M", "O", "O", "O", "M", "O", "O", "O",
+    ),
+    "RNT": (
+        "N/A", "N/A", "O", "O", "N/A", "N/A", "N/A", "O", "O", "M", "M", "M",
+        "M", "M", "M", "M", "N/A", "N/A", "O", "M", "O", "O", "O",
+    ),
+    "MTN": (
+        "N/A", "N/A", "O", "O", "N/A", "O", "N/A", "O", "O", "M", "M", "M",
+        "M", "M", "M", "M", "O", "O", "O", "M", "O", "O", "O",
+    ),
+}
+
+REQUIREMENT_MATRIX_NAMES = {
+    "EPC": ("EPC", "طراحی، تامین کالا و اجرا"),
+    "PC": ("PC", "تامین کالا و اجرا"),
+    "C": ("C", "اجرایی"),
+    "PR": ("PR", "تأمین کالا"),
+    "MTR": ("MTR", "تأمین متریال و مصالح"),
+    "GNR": ("GNR", "خرید اقلام عمومی"),
+    "E": ("E", "خدمات مشاوره و مهندسی"),
+    "LOG": ("LOG", "خدمات پشتیبانی"),
+    "TRS": ("TRS", "حمل و نقل"),
+    "RNT": ("RNT", "اجاره"),
+    "MTN": ("MTN", "نگهداری و تعمیرات"),
+}
+
+_REQUIREMENT_CODES = {"M", "O", "N", "A", "N/A", "NA", "-"}
+
+# نام‌هایی که شیت «خروجی کندو» با آن شناخته می‌شود (برای اینکه شیت داده با شیت
+# ماتریس اشتباه گرفته نشود).
+EXPORT_SHEET_HINTS = ("خروجی کندو", "خروجی كندو", "kandoo", "cando", "export")
+
+
+def normalize_requirement_code(value: Any) -> str:
+    """کد الزام مدرک را یکدست می‌کند: M / O / N/A."""
+    text = re.sub(r"\s+", "", txt(value)).upper()
+    if text in {"M", "O"}:
+        return text
+    if text in {"N/A", "NA", "N", "A", "-", ""}:
+        return "N/A"
+    return text
+
+
+def _matrix_type_key(value: Any) -> str:
+    """کد نوع قرارداد (ستون I) را به کلید ماتریس تبدیل می‌کند."""
+    text = re.sub(r"\s+", " ", txt(value)).strip()
+    if not text:
+        return ""
+    upper = text.upper()
+    if upper in REQUIREMENT_MATRIX_DEFAULT:
+        return upper
+    for code, names in REQUIREMENT_MATRIX_NAMES.items():
+        for name in names:
+            if normalize_per(text) == normalize_per(name):
+                return code
+    # «EPC - طراحی و تامین» یا «C/اجرایی»
+    first = re.split(r"[\s/\-–—,،(]", upper, maxsplit=1)[0].strip()
+    if first in REQUIREMENT_MATRIX_DEFAULT:
+        return first
+    for code, names in REQUIREMENT_MATRIX_NAMES.items():
+        for name in names:
+            if name and normalize_per(name) and normalize_per(name) in normalize_per(text):
+                return code
+    return ""
+
+
+def requirement_for_type(type_value: Any,
+                         matrix: Optional[Dict[str, Sequence[str]]] = None
+                         ) -> List[str]:
+    """کدهای الزام ۲۳ مدرک برای یک نوع قرارداد."""
+    matrix = matrix or REQUIREMENT_MATRIX_DEFAULT
+    key = _matrix_type_key(type_value)
+    codes = matrix.get(key) if key else None
+    if not codes:
+        return []
+    return [normalize_requirement_code(item) for item in codes]
+
+
+def _matrix_from_grid(grid: Sequence[Sequence[Any]]) -> Dict[str, List[str]]:
+    """از یک شیت ماتریس، کدهای هر نوع قرارداد را می‌خواند (اگر چنین شیتی بود)."""
+    found: Dict[str, List[str]] = {}
+    for row in grid:
+        cells = list(row)
+        for start in range(len(cells)):
+            if normalize_requirement_code(cells[start]) not in _REQUIREMENT_CODES:
+                continue
+            codes: List[str] = []
+            for value in cells[start:start + 30]:
+                if normalize_requirement_code(value) in _REQUIREMENT_CODES:
+                    codes.append(normalize_requirement_code(value))
+                else:
+                    break
+            if len(codes) < 15:
+                continue
+            # کد نوع معمولاً یکی دو ستون سمت چپ همین ردیف است.
+            for offset in range(1, 4):
+                column = start - offset
+                if column < 0:
+                    break
+                key = _matrix_type_key(cells[column])
+                if key and key not in found:
+                    found[key] = codes[:23]
+                    break
+    return found
+
+
+def load_requirement_matrix(workbook) -> Dict[str, List[str]]:
+    """ماتریس الزام مدارک را از کتاب کار می‌خواند (شیت ماتریس یا ستون‌های AL..BH)."""
+    if workbook is None:
+        return {}
+    for sheet_name in workbook.sheetnames:
+        name = str(sheet_name)
+        normalized = normalize_per(name)
+        if is_dashboard_sheet_name(name) or any(
+            hint in normalized for hint in EXPORT_SHEET_HINTS
+        ):
+            continue
+        try:
+            sheet = workbook[sheet_name]
+            width = min(int(sheet.max_column or 0), 40)
+            height = min(int(sheet.max_row or 0), 80)
+            if width <= 0 or height <= 0:
+                continue
+            grid = [list(row) for row in sheet.iter_rows(
+                min_row=1, max_row=height, max_col=width, values_only=True)]
+        except Exception:
+            continue
+        matrix = _matrix_from_grid(grid)
+        if len(matrix) >= 3:
+            log_event(
+                f"ماتریس الزام مدارک از شیت «{name}» خوانده شد: "
+                f"{fa(len(matrix))} نوع قرارداد"
+            )
+            return matrix
+    return {}
+
+
+def requirement_matrix_for(workbook) -> Tuple[Dict[str, List[str]], str]:
+    """ماتریس الزام: از کتاب کار خودتان، وگرنه ماتریس پیش‌فرض برنامه."""
+    matrix = load_requirement_matrix(workbook)
+    if matrix:
+        return matrix, "کتاب کار"
+    return dict(REQUIREMENT_MATRIX_DEFAULT), "پیش‌فرض"
+
+
+def build_doc_combos(values: Sequence[Any],
+                     requirements: Sequence[str]) -> List[str]:
+    """ستون‌های BK..CG را مثل فرمول خود شیت می‌سازد: «1-M» / «0-M» / «1-O»."""
+    combos: List[str] = []
+    for index in range(len(REQUIREMENT_DOC_NAMES)):
+        code = (normalize_requirement_code(requirements[index])
+                if index < len(requirements) else "")
+        number = num(values[index]) if index < len(values) else None
+        have = "1" if (number is not None and abs(number) > 0) else "0"
+        combos.append(f"{have}-{code}" if code else "")
+    return combos
+
+
 def _doc_state(count_value: Any, required: Any, combo: Any, unknown: str = "",
                progress: Optional[float] = None) -> str:
     """وضعیت یک مدرک، عیناً همان فرمول شیت `colorcode` کتاب کار شما:
@@ -2598,8 +3051,18 @@ def _doc_state(count_value: Any, required: Any, combo: Any, unknown: str = "",
 
 def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
                         headers: List[str], records: List[SystemUpdateRecord],
-                        keys: set, info: Dict[str, Any]) -> None:
-    """دادهٔ فایل سامانه را در ستون‌های هم‌نام شیت «خروجی کندو» می‌نویسد."""
+                        keys: set, info: Dict[str, Any]) -> Dict[str, List[str]]:
+    """دادهٔ فایل سامانه را در شیت «خروجی کندو» می‌نویسد و محاسبهٔ همان شیت را می‌سازد.
+
+    ترتیب کار عیناً مثل خود کتاب کار شماست:
+    ۱) ستون‌های L تا AJ از فایل سامانه (بر اساس نام سرستون) پیست می‌شوند؛
+    ۲) ماتریس الزام مدارک برای نوع قرارداد همان ردیف خوانده می‌شود و در
+       ستون‌های AL..BH می‌نشیند؛
+    ۳) ستون‌های BI و BK..CG و CH مثل فرمول‌های خود شیت ساخته می‌شوند
+       («1-M» / «0-M» و شمارش آن‌ها)؛
+    ۴) نتیجه به‌صورت «کلید قرارداد ← الزام ۲۳ مدرک» برگردانده می‌شود تا در شیت
+       colorcode بنشیند.
+    """
     sheet = workbook[sheet_name]
     width = max(1, min(int(sheet.max_column or 1), 90))
     grid = [list(row) for row in sheet.iter_rows(
@@ -2611,7 +3074,7 @@ def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
             f"در شیت «{sheet_name}» هیچ شمارهٔ قراردادی از فایل سامانه پیدا نشد؛ "
             "داده در آن شیت نوشته نشد."
         )
-        return
+        return {}
     if header_row < 0:
         first_data = min(key_rows.values()) if key_rows else 1
         header_row = max(0, first_data - 2)
@@ -2622,9 +3085,25 @@ def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
     info["export_sheet"] = sheet_name
     info["export_mapping"] = "ترتیب ستون‌ها" if positional else "نام سرستون"
     info["export_contract_column"] = _column_letter(contract_column + 1) if contract_column >= 0 else ""
+    # ستون هر مدرک در شیت مقصد (۰-پایه)
+    doc_columns: List[int] = []
+    for offset in range(len(REQUIREMENT_DOC_NAMES)):
+        if positional or offset >= len(mapping) or mapping[offset] < 0:
+            doc_columns.append(plan.first_column - 1 + offset)
+        else:
+            doc_columns.append(mapping[offset])
+    type_column = _match_header("نوع قرارداد", header_values)
+    if type_column < 0:
+        type_column = 8  # ستون I در کتاب کار شما
+    matrix, matrix_source = requirement_matrix_for(workbook)
+    info["requirement_matrix"] = matrix_source
+    first_doc = doc_columns[0] if doc_columns else plan.first_column - 1
+    calculate = first_doc + 74 < width  # تا ستون CH جا هست
     written = 0
     formulas = 0
+    calculated = 0
     record_rows: List[int] = []
+    requirements_by_key: Dict[str, List[str]] = {}
     for record in records:
         row_number = key_rows.get(record.key) or 0
         record_rows.append(int(row_number))
@@ -2655,20 +3134,72 @@ def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
             except AttributeError:
                 continue
             written += 1
+        if not calculate:
+            continue
+        type_value = sheet.cell(row=int(row_number), column=int(type_column) + 1).value
+        requirements = requirement_for_type(type_value, matrix)
+        if not requirements:
+            requirements = [normalize_requirement_code(item)
+                            for item in (record.requirements or [])][:23]
+        if len(requirements) < len(REQUIREMENT_DOC_NAMES):
+            continue
+        requirements_by_key[record.key] = requirements
+        counts = [record.values[index] if index < len(record.values) else None
+                  for index in range(len(REQUIREMENT_DOC_NAMES))]
+        combos = build_doc_combos(counts, requirements)
+        required_count = sum(1 for code in requirements if code == "M")
+        have_count = sum(1 for combo in combos if combo == "1-M")
+        block: List[Tuple[int, Any]] = []
+        for offset, code in enumerate(requirements):
+            block.append((first_doc + 26 + offset, code))
+        block.append((first_doc + 49, required_count))
+        for offset, combo in enumerate(combos):
+            block.append((first_doc + 51 + offset, combo))
+        block.append((first_doc + 74, have_count))
+        for column, value in block:
+            try:
+                cell = sheet.cell(row=int(row_number), column=int(column) + 1)
+            except (AttributeError, ValueError):
+                continue
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                # فرمول خود کتاب کار دست‌نخورده می‌ماند؛ اکسل بازمحاسبه‌اش می‌کند.
+                continue
+            current = cell.value
+            if isinstance(value, str):
+                if txt(current).strip() == value:
+                    continue
+            else:
+                number = num(current)
+                if number is not None and abs(number - float(value)) < 1e-9:
+                    continue
+            try:
+                cell.value = value
+            except AttributeError:
+                continue
+            calculated += 1
     info["export_written"] = written
     info["export_formulas"] = formulas
+    info["export_calculated"] = calculated
     info["export_record_rows"] = record_rows
     if positional:
         info["notes"].append(
             f"سرستون‌های شیت «{sheet_name}» با فایل سامانه هم‌نام نبود؛ داده مثل روش "
             "دستی به‌ترتیب ستون‌ها (L تا AJ) نوشته شد."
         )
+    if calculated:
+        info["notes"].append(
+            f"محاسبهٔ شیت «{sheet_name}» انجام شد: {fa(len(requirements_by_key))} ردیف، "
+            "ستون‌های AL..BH و BI و BK..CG و CH."
+        )
+    return requirements_by_key
 
 
 def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str],
                              records: List[SystemUpdateRecord],
                              info: Dict[str, Any],
-                             overwrite_formulas: bool = True) -> None:
+                             overwrite_formulas: bool = True,
+                             requirements_by_key: Optional[Dict[str, List[str]]] = None
+                             ) -> None:
     """نتیجهٔ محاسبه (وضعیت هر مدرک و درصد) در شیت colorcode می‌نشیند.
 
     اگر `overwrite_formulas=False` باشد، سلول‌هایی که در کتاب کار شما فرمول دارند
@@ -2751,12 +3282,19 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
             record.values[_PLAN_PERCENT_OFFSET]
             if _PLAN_PERCENT_OFFSET < len(record.values) else None
         )
+        # الزام مدارک: اول از محاسبهٔ شیت «خروجی کندو» (ماتریس)، بعد از خود فایل.
+        row_requirements = ((requirements_by_key or {}).get(record.key)
+                            or list(record.requirements or [])
+                            or requirement_for_type(getattr(record, "contract_type", "")))
+        row_combos = list(record.combos or [])
+        if not row_combos and row_requirements:
+            row_combos = build_doc_combos(record.values, row_requirements)
         for source_index, column in doc_columns:
             value = record.values[source_index] if source_index < len(record.values) else None
-            required = (record.requirements[source_index]
-                        if source_index < len(record.requirements) else "")
-            combo = (record.combos[source_index]
-                     if source_index < len(record.combos) else "")
+            required = (row_requirements[source_index]
+                        if source_index < len(row_requirements) else "")
+            combo = (row_combos[source_index]
+                     if source_index < len(row_combos) else "")
             state = _doc_state(value, required, combo, unknown="M", progress=percent)
             if not state:
                 continue
@@ -2832,11 +3370,15 @@ def sync_workbook_from_system(workbook, plan: SystemUpdatePlan,
     if plan.sheet_name in workbook.sheetnames and not is_dashboard_sheet_name(plan.sheet_name):
         export_name = str(plan.sheet_name)
     else:
-        export_name = _find_export_sheet(workbook, keys)
+        requirements_by_key: Dict[str, List[str]] = {}
+    export_name = _find_export_sheet(workbook, keys)
     if export_name:
-        _write_export_sheet(workbook, export_name, plan, headers, records, keys, info)
+        requirements_by_key = _write_export_sheet(
+            workbook, export_name, plan, headers, records, keys, info
+        ) or {}
     _apply_dashboard_results(workbook, plan, headers, records, info,
-                             overwrite_formulas=overwrite_formulas)
+                             overwrite_formulas=overwrite_formulas,
+                             requirements_by_key=requirements_by_key)
     return info
 
 
@@ -3661,6 +4203,7 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
 
     written = 0
     status_marks = 0
+    matrix_rows = 0
     progress_values: List[float] = []
     target_row = 4
     for order, row in enumerate(filtered, start=1):
@@ -3690,6 +4233,18 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
         combos = [txt(row[11 + _PLAN_COMBO_OFFSET + index])
                   if 11 + _PLAN_COMBO_OFFSET + index < len(row) else ""
                   for index in range(23)]
+        if not any(item.strip() for item in required):
+            # فایل خام سامانه ستون AL..BH را ندارد؛ الزام هر مدرک از ماتریس
+            # خود کتاب کار (یا ماتریس پیش‌فرض برنامه) خوانده می‌شود.
+            required = requirement_for_type(
+                cell(row, type_col) if type_col >= 0 else "",
+                REQUIREMENT_MATRIX_DEFAULT,
+            )
+            matrix_rows += 1 if required else 0
+        if not any(item.strip() for item in combos) and required:
+            combos = build_doc_combos(
+                [cell(row, 11 + index) for index in range(23)], required
+            )
         for offset in range(max(0, last_column - first_column + 1)):
             column = first_column + offset
             value = cell(row, column - 1)
@@ -3708,6 +4263,11 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
             sheet.cell(row=target_row, column=column, value=value)
             written += 1
         target_row += 1
+    if matrix_rows:
+        notes.append(
+            f"الزام مدارک {fa(matrix_rows)} ردیف از ماتریس الزام خوانده شد "
+            "(فایل ۰۱ خام ستون AL..BH را ندارد)."
+        )
     if progress_values:
         # ردیف ۲ ستون ۳۷ در کتاب کار اصلی، درصد پیشرفت کل است؛ همان فرمول
         # (میانگین ردیف‌های بزرگ‌تر از صفر) را می‌گذاریم.
@@ -4350,6 +4910,26 @@ def resolve_update_base(settings: Dict[str, Any],
             "base_path": str(real),
             "base_workbook_id": 0,
         }
+    # هیچ کتاب کاری در دیتابیس یا روی دیسک نبود (مثلاً دیتابیس تازه ساخته شده):
+    # از همان فایل ۰۱ یک کتاب کار پایه ساخته می‌شود تا یک دکمه کافی باشد.
+    if str(source_path or "").strip():
+        try:
+            built = build_workbook_from_system(str(source_path))
+        except ExcelDataError as exc:
+            log_event(f"ساخت کتاب کار پایه از فایل ۰۱ ممکن نشد: {exc}")
+            built = {}
+        blob = (built or {}).get("blob") or b""
+        if blob:
+            log_event(
+                "هیچ کتاب کاری برای پایه پیدا نشد؛ کتاب کار پایه از فایل ۰۱ ساخته شد."
+            )
+            return {
+                "blob": blob,
+                "filename": f"{Path(str(source_path)).stem}.xlsx",
+                "base_source": "built",
+                "base_path": "",
+                "base_workbook_id": 0,
+            }
     raise ExcelDataError(
         "کتاب کار اصلی (فایل دارای شیت colorcode که ستون‌های وضعیت و درصد را دارد) "
         "پیدا نشد.\n\n"
@@ -8185,6 +8765,41 @@ class ImportWorker(QThread):
         self.succeeded.emit(info)
 
 
+class DatabaseRebuildWorker(QThread):
+    """ساخت دیتابیس از صفر (و بارگذاری فایل انتخاب‌شده) در رشتهٔ جداگانه."""
+
+    done = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, settings: Dict[str, Any], source_path: str = "",
+                 drop_database: bool = True, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = dict(settings)
+        self.source_path = str(source_path or "")
+        self.drop_database = bool(drop_database)
+
+    def run(self) -> None:
+        log_event(
+            "DatabaseRebuildWorker: شروع ساخت دیتابیس از صفر"
+            + (f" با فایل {self.source_path}" if self.source_path else " (خالی)")
+        )
+        try:
+            info = rebuild_database_from_scratch(
+                self.settings, self.source_path, drop_database=self.drop_database
+            )
+        except ExcelDataError as exc:
+            log_event(f"DatabaseRebuildWorker: خطا — {exc}")
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # خطای پیش‌بینی‌نشده
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            write_error_log(traceback.format_exc())
+            log_event(f"DatabaseRebuildWorker: خطای غیرمنتظره — {detail}")
+            self.failed.emit(f"خطای پیش‌بینی‌نشده در ساخت دیتابیس:\n{detail}")
+            return
+        self.done.emit(info)
+
+
 # ---------------------------------------------------------------------------
 # چیدمان جریانی (برای کارت‌های واکنش‌گرا)
 # ---------------------------------------------------------------------------
@@ -10905,6 +11520,7 @@ class SettingsPage(QWidget):
     testRequested = pyqtSignal()
     detectRequested = pyqtSignal()
     verifyRequested = pyqtSignal()
+    rebuildRequested = pyqtSignal()
     importRequested = pyqtSignal(str)
     localRunRequested = pyqtSignal(str)
     systemUpdateRequested = pyqtSignal(str)
@@ -11055,6 +11671,17 @@ class SettingsPage(QWidget):
         )
         verify_btn.clicked.connect(self.verifyRequested.emit)
         actions_row.addWidget(verify_btn)
+        self.rebuild_button = QPushButton("ساخت دیتابیس از صفر")
+        self.rebuild_button.setObjectName("Ghost")
+        self.rebuild_button.setIcon(make_icon("refresh", colors["ink_2"], 15))
+        self.rebuild_button.setCursor(Qt.PointingHandCursor)
+        self.rebuild_button.setToolTip(
+            "جدول‌های دیتابیس پاک و از نو ساخته می‌شوند و بعد فایل انتخاب‌شده "
+            "(خروجی سامانه یا کتاب کار) دوباره در آن بارگذاری می‌شود. "
+            "فایل‌های اکسل روی دیسک دست‌نخورده می‌مانند."
+        )
+        self.rebuild_button.clicked.connect(self.rebuildRequested.emit)
+        actions_row.addWidget(self.rebuild_button)
         pdf_btn = QPushButton("پیدا کردن پوشهٔ PDF")
         pdf_btn.setObjectName("Ghost")
         pdf_btn.setIcon(make_icon("folder", colors["ink_2"], 15))
@@ -11359,6 +11986,9 @@ class SettingsPage(QWidget):
         self.import_button.setText(
             "در حال بارگذاری…" if active else "بارگذاری در دیتابیس"
         )
+        button = getattr(self, "rebuild_button", None)
+        if button is not None:
+            button.setEnabled(not active)
 
     def refresh_pdf_note(self) -> None:
         folder = str(self.pdf_edit.text() or "").strip() or resolve_pdf_folder(self.config)
@@ -12692,6 +13322,7 @@ class MainWindow(QMainWindow):
         self.settings.openDataFolderRequested.connect(self._open_data_folder)
         self.settings.testRequested.connect(self.test_database)
         self.settings.verifyRequested.connect(self.verify_database_numbers)
+        self.settings.rebuildRequested.connect(self.rebuild_database)
         self.settings.detectRequested.connect(self.detect_database_settings)
         self.settings.importRequested.connect(self.import_excel)
         self.settings.systemUpdateRequested.connect(self.start_system_update)
@@ -14307,6 +14938,167 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("بارگذاری فایل اکسل")
         box.setIcon(QMessageBox.Critical)
         box.setText("ذخیرهٔ فایل اکسل در دیتابیس ممکن نشد.")
+        box.setInformativeText(f"{message}\n\nفایل گزارش:\n{log_path()}")
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
+    # ------------------------------------------------------------------
+    # ساخت دیتابیس از صفر
+    # ------------------------------------------------------------------
+    @guarded("rebuild_database")
+    def rebuild_database(self) -> None:
+        """دیتابیس مرکزی را از صفر می‌سازد و داده را دوباره بارگذاری می‌کند.
+
+        جدول‌های برنامه در دیتابیس پاک و از نو ساخته می‌شوند؛ بعد فایل انتخاب‌شده
+        (خروجی سامانه یا کتاب کار) به‌عنوان کتاب کار شمارهٔ ۱ در آن ذخیره می‌شود.
+        فایل‌های اکسل روی دیسک هیچ‌وقت پاک نمی‌شوند.
+        """
+        running = getattr(self, "_rebuild_worker", None)
+        if self._import_worker_running() or (running is not None and running.isRunning()):
+            self._notify("یک عملیات دیتابیس در حال اجراست؛ کمی صبر کنید", "clock")
+            return
+        values = self.settings.connection_values()
+        database = str(values.get("database") or "master_data")
+        host = str(values.get("host") or "127.0.0.1")
+        port = values.get("port") or 3306
+        source = str(
+            self.settings.excel_edit.text().strip()
+            or self.config.get("last_excel_path")
+            or ""
+        )
+        if not source or not Path(source).exists():
+            start = str(Path(source).parent if source else app_dir())
+            picked, _selected = QFileDialog.getOpenFileName(
+                self, "انتخاب فایل ۰۱ (خروجی سامانه) برای بارگذاری", start,
+                "فایل اکسل (*.xlsx *.xlsm);;همهٔ فایل‌ها (*)",
+            )
+            source = str(picked or "")
+        box = QMessageBox(self)
+        box.setWindowTitle("ساخت دیتابیس از صفر")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"دیتابیس «{database}» از صفر ساخته شود؟")
+        body = [
+            f"میزبان: {host}:{fa(port)}",
+            "همهٔ جدول‌های برنامه در این دیتابیس پاک و از نو ساخته می‌شوند؛ "
+            "کتاب کارها و ردیف‌های ذخیره‌شده در دیتابیس از بین می‌روند.",
+            "فایل‌های اکسل شما روی دیسک دست‌نخورده می‌مانند.",
+        ]
+        if source:
+            body.append(f"بعد از ساخت، این فایل بارگذاری می‌شود:\n{source}")
+        else:
+            body.append(
+                "هیچ فایلی انتخاب نشده؛ دیتابیس خالی ساخته می‌شود و بعد می‌توانید "
+                "دکمهٔ «بارگذاری فایل ۰۱ و به‌روزرسانی» را بزنید."
+            )
+        box.setInformativeText("\n\n".join(body))
+        rebuild = box.addButton("ساخت از صفر", QMessageBox.AcceptRole)
+        cancel = box.addButton("لغو", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec_()
+        if box.clickedButton() is not rebuild:
+            self.settings.set_status("ساخت دیتابیس لغو شد")
+            self._notify("ساخت دیتابیس لغو شد", "info")
+            return
+        settings = {
+            "host": values.get("host"),
+            "port": values.get("port"),
+            "database": values.get("database"),
+            "user": values.get("user"),
+            "password": values.get("password"),
+            "workbook_id": 1,
+            "sheet_name": str(values.get("sheet_name") or SHEET_NAME_DEFAULT),
+        }
+        self.show_page("settings")
+        self.settings.set_status("در حال ساخت دیتابیس از صفر…")
+        self.settings.set_importing(True, source)
+        worker = DatabaseRebuildWorker(settings, source, True, self)
+        worker.done.connect(
+            lambda info, values=values, source=source: self._on_rebuild_done(
+                info, values, source
+            )
+        )
+        worker.failed.connect(self._on_rebuild_failed)
+        worker.finished.connect(lambda: self.settings.set_importing(False))
+        self._rebuild_worker = worker
+        worker.start()
+
+    def _on_rebuild_done(self, info: Dict[str, Any], values: Dict[str, Any],
+                         source: str) -> None:
+        """دیتابیس تازه ساخته شد؛ تنظیمات ذخیره و داشبورد بازخوانی می‌شود."""
+        mapping = {
+            "db_host": values.get("host"),
+            "db_port": values.get("port"),
+            "db_name": values.get("database"),
+            "db_user": values.get("user"),
+        }
+        for key, value in mapping.items():
+            if value not in (None, ""):
+                self.config.set(key, value, save=False)
+        self.config.set_password(
+            str(values.get("password") or ""), self.config.get("db_remember_password")
+        )
+        workbook_id = int(info.get("workbook_id") or 0)
+        if workbook_id:
+            self.config.set("db_workbook_id", workbook_id, save=False)
+            self.config.set("data_source", "database", save=False)
+            if source:
+                self.config.set("last_excel_path", source, save=False)
+        self.config.save()
+        self.settings.apply_connection(values)
+        self._adopt_last_connection()
+        rows = int(info.get("data_rows") or 0)
+        tables = info.get("tables") or []
+        if workbook_id:
+            self.settings.set_status(
+                f"دیتابیس از صفر ساخته شد — {fa(rows)} ردیف در شناسهٔ {fa(workbook_id)}"
+            )
+            self._notify("دیتابیس از صفر ساخته و پر شد", "check")
+        else:
+            self.settings.set_status(
+                "دیتابیس خالی ساخته شد — حالا فایل ۰۱ را بارگذاری کنید"
+            )
+            self._notify("دیتابیس خالی ساخته شد", "table")
+        self.statusBar().showMessage(
+            f"دیتابیس «{info.get('database')}» از نو ساخته شد — "
+            f"{fa(len(tables))} جدول", 12000,
+        )
+        self.load_data()
+        lines = [
+            f"دیتابیس: «{info.get('database')}» روی "
+            f"{info.get('host')}:{fa(info.get('port') or 3306)}",
+            f"جدول‌های ساخته‌شده: {fa(len(tables))}"
+            + (" (" + "، ".join(tables) + ")" if tables else ""),
+            "دیتابیس قبلی حذف شد" if info.get("dropped_database")
+            else "جدول‌های قبلی پاک شدند",
+        ]
+        if workbook_id:
+            lines += [
+                f"کتاب کار ذخیره‌شده با شناسهٔ {fa(workbook_id)} — {fa(rows)} ردیف",
+                "داشبورد از همین دیتابیس بازخوانی شد.",
+            ]
+        else:
+            lines += [
+                "هیچ داده‌ای بارگذاری نشد؛ برای پر کردن دیتابیس دکمهٔ "
+                "«بارگذاری فایل ۰۱ و به‌روزرسانی» را بزنید.",
+            ]
+        box = QMessageBox(self)
+        box.setWindowTitle("دیتابیس از صفر ساخته شد")
+        box.setIcon(QMessageBox.Information)
+        box.setText("ساخت دیتابیس با موفقیت انجام شد.")
+        box.setInformativeText("\n".join(lines))
+        box.addButton("باشه", QMessageBox.AcceptRole)
+        box.exec_()
+
+    @guarded("_on_rebuild_failed")
+    def _on_rebuild_failed(self, message: str) -> None:
+        self.settings.set_status("ساخت دیتابیس از صفر ناموفق بود.")
+        log_event("ساخت دیتابیس ناموفق: "
+                  + " / ".join((message or "").splitlines()[:3]))
+        self._notify("ساخت دیتابیس ناموفق بود", "alert")
+        box = QMessageBox(self)
+        box.setWindowTitle("ساخت دیتابیس از صفر")
+        box.setIcon(QMessageBox.Critical)
+        box.setText("ساخت دیتابیس ممکن نشد.")
         box.setInformativeText(f"{message}\n\nفایل گزارش:\n{log_path()}")
         box.addButton("باشه", QMessageBox.AcceptRole)
         box.exec_()
