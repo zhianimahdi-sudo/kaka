@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.9"
+APP_VERSION = "3.5.10"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -2454,6 +2454,10 @@ def _match_header(name: Any, candidates: Sequence[Any]) -> int:
             continue
         if key in target or target in key:
             ratio = min(len(key), len(target)) / max(len(key), len(target))
+            # «آزاد سازی تضامین» در فایل سامانه، «آزاد سازی تضامین حسن انجام
+            # تعهدات» در شیت داشبورد است؛ پیشوندِ بلند هم همان مدرک است.
+            if (len(key) >= 10 and target.startswith(key)) or                (len(target) >= 10 and key.startswith(target)):
+                ratio = 1.0
             if ratio >= 0.55 and ratio > best_ratio:
                 best, best_ratio = index, ratio
     return best
@@ -2471,7 +2475,7 @@ def _plan_percent(value: Any) -> Optional[float]:
         number = number / 100.0
     if number < 0:
         return None
-    return round(min(1.0, number), 6)
+    return min(1.0, number)
 
 
 def _best_header_row(grid: Sequence[Sequence[Any]], names: Sequence[Any],
@@ -2558,14 +2562,23 @@ def _find_export_sheet(workbook, keys: set) -> str:
     return best_name if best_score >= 5 else ""
 
 
-def _doc_state(count_value: Any, required: Any, combo: Any, unknown: str = "") -> str:
-    """وضعیت یک مدرک: «OK» یعنی ثبت شده/لازم نیست، «M» یعنی لازم و ثبت‌نشده.
+def _doc_state(count_value: Any, required: Any, combo: Any, unknown: str = "",
+               progress: Optional[float] = None) -> str:
+    """وضعیت یک مدرک، عیناً همان فرمول شیت `colorcode` کتاب کار شما:
 
-    ترتیب تصمیم همان ترتیب فرمول‌های شیت «خروجی کندو» است: اول ستون «1-M/0-M»
-    (BK..CG)، بعد ماتریس الزامات (AL..BH) و در آخر شمارش خود مدرک.
+        =IF(AND(INDEX('خروجی کندو'!AJ:AJ,MATCH(...))>0,
+                INDEX('خروجی کندو'!BK:BK,MATCH(...))="0-M"),"M","OK")
+
+    یعنی «M» فقط وقتی مدرکِ لازم ثبت نشده **و** قرارداد پیشرفتی دارد (درصد > ۰)؛
+    قراردادهای با پیشرفت صفر همه «OK» می‌شوند. اگر ستون «1-M/0-M» نبود، از
+    ماتریس الزامات (AL..BH) و بعد از شمارش خود مدرک استفاده می‌شود.
     """
     number = num(count_value)
     if number is not None and abs(number) > 0:
+        return "OK"
+    if progress is not None and progress <= 0:
+        # قرارداد بدون پیشرفت، هیچ مدرکی «نیازمند» حساب نمی‌شود (همان شرط AJ>0
+        # در فرمول شیت colorcode).
         return "OK"
     text = txt(combo).strip()
     if text:
@@ -2632,6 +2645,11 @@ def _write_export_sheet(workbook, sheet_name: str, plan: SystemUpdatePlan,
             current = txt(cell.value)
             if current == txt(value):
                 continue
+            # ستون درصد باید عددی بماند (متن «100%» فرمول‌های INDEX/AK را می‌شکند).
+            if isinstance(value, str) and value.strip().endswith(("%", "٪")):
+                number = num(value.replace("%", "").replace("٪", ""))
+                if number is not None:
+                    value = number / 100.0 if number > 1.5 else number
             try:
                 cell.value = value
             except AttributeError:
@@ -2720,34 +2738,28 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
             row_number = order_rows[index]
         if not row_number:
             continue
+        percent = _plan_percent(
+            record.values[_PLAN_PERCENT_OFFSET]
+            if _PLAN_PERCENT_OFFSET < len(record.values) else None
+        )
         for source_index, column in doc_columns:
             value = record.values[source_index] if source_index < len(record.values) else None
             required = (record.requirements[source_index]
                         if source_index < len(record.requirements) else "")
             combo = (record.combos[source_index]
                      if source_index < len(record.combos) else "")
-            state = _doc_state(value, required, combo, unknown="M")
+            state = _doc_state(value, required, combo, unknown="M", progress=percent)
             if not state:
                 continue
             cell = sheet.cell(row=int(row_number), column=int(column))
             current = cell.value
-            if isinstance(current, str) and current.startswith("="):
-                continue
+            # نتیجهٔ محاسبه همیشه می‌نشیند (حتی روی فرمول قدیمی)، چون خود کتاب
+            # کار شما هم همین ستون‌ها را با فرمول حساب می‌کند.
             current_text = txt(current).strip().upper()
-            if state == "OK":
-                if current_text == "OK":
-                    continue
-                cell.value = "OK"
-            else:
-                if current_text == "OK" or is_status_mark(current):
-                    kept += 1
-                    continue
-                cell.value = "M"
+            if current_text == state:
+                continue
+            cell.value = state
             marks += 1
-        percent = _plan_percent(
-            record.values[_PLAN_PERCENT_OFFSET]
-            if _PLAN_PERCENT_OFFSET < len(record.values) else None
-        )
         if percent is not None:
             sheet.cell(row=int(row_number), column=int(progress_column), value=percent)
             progress_rows += 1
@@ -2758,7 +2770,7 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
     info["dashboard_kept"] = kept
     info["progress_rows"] = progress_rows
     if progress_values:
-        total = round(sum(progress_values) / len(progress_values), 4)
+        total = sum(progress_values) / len(progress_values)
         sheet.cell(row=2, column=int(progress_column), value=total)
         info["progress_total"] = total
 
@@ -2890,13 +2902,12 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
     LAST_SYNC_INFO = dict(info)
     log_event(
         "به‌روزرسانی: شیت «{export}» ({mapping}) {written} مقدار · "
-        "colorcode: {marks} علامت (»{kept}« علامت دستی حفظ شد)، {progress} درصد، "
+        "colorcode: {marks} علامت، {progress} درصد، "
         "میانگین {total}".format(
             export=info.get("export_sheet") or "—",
             mapping=info.get("export_mapping") or "—",
             written=info.get("export_written", 0),
             marks=info.get("dashboard_marks", 0),
-            kept=info.get("dashboard_kept", 0),
             progress=info.get("progress_rows", 0),
             total=info.get("progress_total"),
         )
@@ -2931,11 +2942,6 @@ def sync_summary_lines(info: Dict[str, Any]) -> List[str]:
         if isinstance(total, (int, float)):
             lines.append("میانگین درصد پیشرفت: {value}٪".format(
                 value=fa("{0:.2f}".format(float(total) * 100))))
-        kept = int(info.get("dashboard_kept") or 0)
-        if kept:
-            lines.append(
-                f"{fa(kept)} علامت «M» که خودتان ثبت کرده بودید حفظ شد."
-            )
     for note in info.get("notes") or []:
         lines.append(f"یادداشت: {note}")
     return lines
@@ -3580,7 +3586,7 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
                 value = _doc_state(value,
                                    required[index] if index < len(required) else "",
                                    combos[index] if index < len(combos) else "",
-                                   unknown="M") or None
+                                   unknown="M", progress=fraction) or None
                 if value == "M":
                     status_marks += 1
             if value is None:
@@ -3592,7 +3598,7 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
         # ردیف ۲ ستون ۳۷ در کتاب کار اصلی، درصد پیشرفت کل است؛ همان فرمول
         # (میانگین ردیف‌های بزرگ‌تر از صفر) را می‌گذاریم.
         sheet.cell(row=2, column=37,
-                   value=round(sum(progress_values) / len(progress_values), 4))
+                   value=sum(progress_values) / len(progress_values))
         notes.append(
             f"درصد پیشرفت از ستون «{txt(rows[header_row][progress_col])}» "
             f"فایل سامانه محاسبه شد (میانگین {fa(len(progress_values))} ردیف بزرگ‌تر از صفر)."
@@ -7994,6 +8000,13 @@ class SystemUpdateApplyWorker(QThread):
                 if temp_path.suffix.lower() not in {".xlsx", ".xlsm"}:
                     temp_path = temp_path.with_suffix(".xlsx")
                 temp_path.write_bytes(new_blob)
+                # اگر اکسل نصب باشد، فرمول‌های کتاب کار (مبالغ، ستون‌های محاسبهٔ
+                # «خروجی کندو» و …) بازمحاسبه و مقدارشان ذخیره می‌شود؛ اگر نبود،
+                # همان مقدارهایی که برنامه خودش حساب کرده در فایل هست.
+                try:
+                    recalculate_with_excel(str(temp_path))
+                except Exception as exc:
+                    log_event(f"بازمحاسبهٔ فایل پیش از ذخیره در دیتابیس ممکن نشد: {exc}")
                 imported = import_workbook_to_database(
                     self.settings, str(temp_path), sheet_name=self.plan.sheet_name,
                     workbook_id=int(self.settings.get("workbook_id") or 1),
