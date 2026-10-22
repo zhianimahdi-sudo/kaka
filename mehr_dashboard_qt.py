@@ -108,6 +108,7 @@ try:
         QGridLayout,
         QHBoxLayout,
         QHeaderView,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QListWidget,
@@ -166,7 +167,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.2"
+APP_VERSION = "3.5.3"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1798,6 +1799,24 @@ def plan_system_update(source_path: str, target_blob: bytes,
     if contract_col < 0:
         contract_col = 4  # ستون E به‌عنوان حدس اولیه
 
+    sample = rows[header_row + 1: header_row + 60]
+    if contract_col < 0 or not any(
+        _looks_like_contract_number(row[contract_col] if contract_col < len(row) else None)
+        for row in sample
+    ):
+        best_col, best_hits = -1, 0
+        width = min(25, max((len(row) for row in sample[:30]), default=0))
+        for column in range(width):
+            hits = sum(
+                1 for row in sample[:200]
+                if column < len(row) and _looks_like_contract_number(row[column])
+            )
+            if hits > best_hits:
+                best_col, best_hits = column, hits
+        if best_col >= 0 and best_hits >= 3:
+            contract_col = best_col
+            notes.append("ستون شمارهٔ قرارداد فایل سامانه از روی داده‌ها پیدا شد.")
+
     if not target_blob:
         raise ExcelDataError("محتوای کتاب کار مقصد خالی است.")
     try:
@@ -1817,35 +1836,59 @@ def plan_system_update(source_path: str, target_blob: bytes,
         if not target_name:
             raise ExcelDataError("کتاب کار دیتابیس هیچ شیتی ندارد.")
         target_ws = target[target_name]
-        target_header_row, target_contract_col, _ = _detect_header_row(
-            [list(r) for r in target_ws.iter_rows(values_only=True)][:15]
+        width = max(1, min(int(target_ws.max_column or 1), 90))
+        target_grid = [list(r) for r in target_ws.iter_rows(max_col=width,
+                                                            values_only=True)]
+        target_header_row, target_sub_col, target_contract_col = _detect_header_row(
+            target_grid[:15]
         )
+        first_data_row = max(4, target_header_row + 2)
+
+        # ستون شمارهٔ قرارداد: اول از روی سرستون، بعد از روی هم‌خوانی با فایل ۰۱
+        source_keys = set()
+        for row in rows[header_row + 1:]:
+            key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
+            if key:
+                source_keys.add(key)
+        if source_keys and target_grid:
+            hits: Dict[int, int] = {}
+            for row in target_grid[first_data_row - 1:first_data_row - 1 + 4000]:
+                for column, value in enumerate(row):
+                    key = normalize_lookup_key(txt(value))
+                    if key and key in source_keys:
+                        hits[column] = hits.get(column, 0) + 1
+            if hits:
+                best_col = max(hits, key=lambda c: hits[c])
+                header_hits = hits.get(target_contract_col, 0) if target_contract_col >= 0 else 0
+                if hits[best_col] >= max(3, header_hits + 1):
+                    if target_contract_col != best_col:
+                        notes.append("ستون شمارهٔ قرارداد در کتاب کار از روی داده‌ها پیدا شد.")
+                    target_contract_col = best_col
         if target_contract_col < 0:
             target_contract_col = 4  # ستون E
+
         target_rows: Dict[str, int] = {}
         target_name_rows: Dict[str, int] = {}
         target_name_counts: Dict[str, int] = {}
         data_rows: List[int] = []
-        width = max(1, int(target_ws.max_column or 1))
-        first_data_row = max(4, target_header_row + 2)
-        for row_number in range(first_data_row, int(target_ws.max_row or 0) + 1):
-            values = [
-                target_ws.cell(row=row_number, column=column).value
-                for column in range(1, width + 1)
-            ]
+        name_col = _header_column([target_grid[target_header_row]], 0,
+                                  ("نام شرکت", "subcontractor", "sub contractor",
+                                   "شرکت", "company"))
+        if name_col < 0 or name_col == target_contract_col:
+            name_col = 3
+        for offset, values in enumerate(target_grid[first_data_row - 1:], start=first_data_row):
             if all(is_blank(value) for value in values):
                 continue
-            data_rows.append(row_number)
-            value = target_ws.cell(row=row_number, column=target_contract_col + 1).value
+            data_rows.append(offset)
+            value = values[target_contract_col] if target_contract_col < len(values) else None
             key = normalize_lookup_key(txt(value))
             if key:
-                target_rows.setdefault(key, row_number)
-            name_key = normalize_lookup_key(txt(
-                target_ws.cell(row=row_number, column=4).value
-            ))
+                target_rows.setdefault(key, offset)
+            name_value = values[name_col] if name_col < len(values) else None
+            name_key = normalize_lookup_key(txt(name_value))
             if name_key:
                 target_name_counts[name_key] = target_name_counts.get(name_key, 0) + 1
-                target_name_rows.setdefault(name_key, row_number)
+                target_name_rows.setdefault(name_key, offset)
         if not data_rows:
             raise ExcelDataError("در کتاب کار دیتابیس هیچ ردیف داده‌ای پیدا نشد.")
         target_name_rows = {
@@ -1991,36 +2034,89 @@ def plan_system_update(source_path: str, target_blob: bytes,
     )
 
 
-def _sheet_system_score(workbook, sheet_name: str, source_keys: set) -> int:
-    """امتیاز شباهت یک شیت به خروجی سامانه (Contract Close Documet Count Report)."""
+def _sheet_system_scan(workbook, sheet_name: str, source_keys: set) -> Dict[str, Any]:
+    """شیت را می‌کاود: سرستون‌ها، ستون شمارهٔ قرارداد و تعداد هم‌خوانی با فایل ۰۱.
+
+    تشخیص فقط به نام سرستون‌ها وابسته نیست؛ اگر سرستون‌ها فارسی یا متفاوت باشند،
+    ستونی که بیشترین شمارهٔ قرارداد مشترک با فایل ۰۱ را دارد پیدا می‌شود.
+    """
+    info: Dict[str, Any] = {
+        "sheet": str(sheet_name), "score": -1, "header_row": -1, "sub_col": -1,
+        "contract_col": -1, "hits": 0, "rows": 0,
+    }
     try:
         sheet = workbook[sheet_name]
+        width = min(int(sheet.max_column or 1), 70)
+        head_rows = [list(r) for r in sheet.iter_rows(
+            min_row=1, max_row=15, max_col=width, values_only=True
+        )]
     except Exception:
-        return -1
-    rows = [list(row) for row in sheet.iter_rows(
-        min_row=1, max_row=15, max_col=40, values_only=True
-    )]
-    header_row, sub_col, contract_col = _detect_header_row(rows)
-    if contract_col < 0:
-        return -1
-    score = 10 if sub_col >= 0 else 0
-    lowered = normalize_per(sheet_name).strip().lower()
-    if "کندو" in sheet_name or "kandoo" in lowered:
-        score += 30
-    elif "خروجی" in sheet_name:
-        score += 20
-    elif "sheet 1" in lowered or "sheet1" in lowered:
-        score += 15
-    hits = 0
-    for row in sheet.iter_rows(
-        min_row=header_row + 2, max_col=contract_col + 1, values_only=True
-    ):
-        key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
-        if key and key in source_keys:
-            hits += 1
-            if hits >= 50:
+        return info
+    header_row, sub_col, contract_col = _detect_header_row(head_rows)
+    info.update({"header_row": header_row, "sub_col": sub_col,
+                 "contract_col": contract_col})
+    start = header_row + 1 if header_row >= 0 else 0
+    hits: Dict[int, int] = {}
+    scanned = 0
+    try:
+        for row in sheet.iter_rows(min_row=max(1, start + 1), max_col=width,
+                                   values_only=True):
+            scanned += 1
+            if scanned > 4000:
                 break
-    return score + min(40, hits // 5)
+            for column, value in enumerate(row):
+                if value is None or value == "":
+                    continue
+                key = normalize_lookup_key(txt(value))
+                if key and key in source_keys:
+                    hits[column] = hits.get(column, 0) + 1
+    except Exception:
+        pass
+    best_hits = max(hits.values()) if hits else 0
+    info["rows"] = scanned
+    info["hits"] = best_hits
+    score = 0
+    if contract_col >= 0:
+        score += 30
+    if sub_col >= 0:
+        score += 20
+    lowered = normalize_per(str(sheet_name)).strip().lower()
+    if "کندو" in str(sheet_name):
+        score += 25
+    elif "خروجی" in str(sheet_name):
+        score += 15
+    elif "sheet 1" in lowered or "sheet1" in lowered:
+        score += 10
+    if best_hits:
+        score += min(60, best_hits)
+        if contract_col < 0:
+            score += 15  # ستون از روی داده پیدا شد
+    if score <= 0 or (contract_col < 0 and best_hits == 0):
+        score = -1
+    info["score"] = score
+    return info
+
+
+def _sheet_system_score(workbook, sheet_name: str, source_keys: set) -> int:
+    """امتیاز شباهت یک شیت به خروجی سامانه (Contract Close Documet Count Report)."""
+    return int(_sheet_system_scan(workbook, sheet_name, source_keys)["score"])
+
+
+def sheet_scan_report(workbook, source_keys: set) -> List[Dict[str, Any]]:
+    """گزارش کوتاه از همهٔ شیت‌ها (برای پیام خطا و فایل لاگ)."""
+    report = []
+    for name in workbook.sheetnames:
+        info = _sheet_system_scan(workbook, str(name), source_keys)
+        report.append({
+            "sheet": str(name),
+            "score": max(0, int(info["score"])),
+            "header_row": int(info["header_row"]) + 1 if info["header_row"] >= 0 else 0,
+            "sub_col": int(info["sub_col"]) + 1 if info["sub_col"] >= 0 else 0,
+            "contract_col": int(info["contract_col"]) + 1 if info["contract_col"] >= 0 else 0,
+            "hits": int(info["hits"]),
+            "rows": int(info["rows"]),
+        })
+    return report
 
 
 def detect_system_sheet(workbook, source_keys: set) -> str:
@@ -6737,30 +6833,57 @@ class SystemCopyWorker(QThread):
 
     done = pyqtSignal(dict)
     failed = pyqtSignal(str)
+    sheet_needed = pyqtSignal(dict)
 
-    def __init__(self, settings: Dict[str, Any], source_path: str, parent=None) -> None:
+    def __init__(self, settings: Dict[str, Any], source_path: str, parent=None,
+                 forced_sheet: str = "") -> None:
         super().__init__(parent)
         self.settings = dict(settings)
         self.source_path = str(source_path)
+        self.forced_sheet = str(forced_sheet or "")
 
     def run(self) -> None:
         try:
             base = resolve_update_base(self.settings, self.source_path)
             keys = source_contract_keys(self.source_path)
+            report: List[Dict[str, Any]] = []
             try:
                 probe = openpyxl.load_workbook(io.BytesIO(base["blob"]), data_only=False)
-                target_sheet = detect_system_sheet(probe, keys)
-                probe.close()
+                try:
+                    if self.forced_sheet and self.forced_sheet in probe.sheetnames:
+                        target_sheet = self.forced_sheet
+                    else:
+                        target_sheet = detect_system_sheet(probe, keys)
+                    if not target_sheet:
+                        report = sheet_scan_report(probe, keys)
+                finally:
+                    probe.close()
             except Exception as exc:
                 raise ExcelDataError(f"کتاب کار باز نشد:\n{exc}") from exc
             if not target_sheet:
-                raise ExcelDataError(
-                    "در کتاب کار شیتی پیدا نشد که خروجی سامانه در آن پیست شود "
-                    "(شیتی با سرستون‌های Contract No و Sub Project).\n"
-                    "اگر کتاب کار شما شیت «خروجی کندو» دارد، همان را بررسی کنید."
-                )
+                for item in report:
+                    log_event(
+                        "بررسی شیت «{sheet}»: امتیاز {score} | سرستون ردیف {header_row} | "
+                        "ستون زیرپروژه {sub_col} | ستون قرارداد {contract_col} | "
+                        "هم‌خوانی {hits} از {rows} ردیف".format(**item)
+                    )
+                self.sheet_needed.emit({
+                    "base_source": base.get("base_source"),
+                    "base_filename": base.get("filename"),
+                    "sheets": [item["sheet"] for item in report],
+                    "report": report,
+                })
+                return
             plan = plan_system_update(self.source_path, base["blob"],
                                       sheet_name=target_sheet)
+            if not plan.matched_rows:
+                raise ExcelDataError(
+                    "در شیت «" + str(target_sheet) + "» هیچ ردیفی با فایل ۰۱ تطبیق "
+                    "پیدا نکرد (هیچ شمارهٔ قرارداد یا نام شرکتی مشترک نبود).\n\n"
+                    "یعنی این شیت همان جایی نیست که خروجی سامانه در آن پیست می‌شود. "
+                    "شیت مقصد را عوض کنید یا کتاب کار اصلی (دارای شیت colorcode) را "
+                    "بارگذاری کنید."
+                )
             stamp = datetime.now().strftime("%Y%m%d-%H%M")
             stem = Path(str(base.get("filename") or "workbook.xlsx")).stem
             out_path = data_dir() / f"{stem}-به‌روز-{stamp}.xlsx"
@@ -12046,13 +12169,69 @@ class MainWindow(QMainWindow):
             "last_excel_path": self.config.get("last_excel_path"),
             "extra_excel_path": self.settings.excel_edit.text().strip(),
         })
-        worker = SystemCopyWorker(settings, path, self)
+        self._start_system_copy(settings, path)
+
+    def _start_system_copy(self, settings: Dict[str, Any], source_path: str,
+                           forced_sheet: str = "") -> None:
+        """اجرای کارگر ساخت نسخهٔ به‌روز (با امکان انتخاب دستی شیت مقصد)."""
+        if not forced_sheet:
+            forced_sheet = str(self.config.get("system_update_sheet") or "")
+        worker = SystemCopyWorker(settings, source_path, self, forced_sheet=forced_sheet)
         worker.done.connect(self._on_system_copy_done)
         worker.failed.connect(self._on_system_update_failed)
+        worker.sheet_needed.connect(self._on_system_sheet_needed)
         worker.finished.connect(lambda: self._set_system_update_busy(False))
+        self._system_copy_request = (dict(settings), str(source_path))
         self._system_update_worker = worker
         self._system_update_busy = True
         worker.start()
+
+    @guarded("_on_system_sheet_needed")
+    def _on_system_sheet_needed(self, info: Dict[str, Any]) -> None:
+        """شیت مقصد را از کاربر می‌پرسد؛ چون تشخیص خودکار مطمئن نبود."""
+        sheets = [str(name) for name in (info.get("sheets") or [])]
+        if not sheets:
+            self._on_system_update_failed(
+                "در کتاب کار هیچ شیتی پیدا نشد که بتوان خروجی سامانه را در آن نوشت."
+            )
+            return
+        details = info.get("report") or []
+        guess = ""
+        for item in details:
+            if item.get("hits"):
+                guess = str(item.get("sheet") or "")
+                break
+        if not guess:
+            guess = sheets[0]
+        hints = []
+        for item in details:
+            hints.append(
+                "{sheet} — هم‌خوانی {hits}".format(
+                    sheet=item.get("sheet"), hits=fa(int(item.get("hits") or 0))
+                )
+            )
+        self.settings.set_status("شیت مقصد پیدا نشد؛ انتخاب دستی لازم است")
+        message = (
+            "در کتاب کار «{name}» شیتی پیدا نشد که با خروجی سامانه هم‌خوانی روشن داشته باشد.\n\n"
+            "شیت مقصد را انتخاب کنید (همان شیتی که ستون‌های L تا AJ فایل ۰۱ در آن "
+            "پیست می‌شود):\n\n{hints}"
+        ).format(name=info.get("base_filename") or "کتاب کار",
+                 hints="\n".join(hints[:12]))
+        choice, ok = QInputDialog.getItem(
+            self, "انتخاب شیت مقصد", message, sheets,
+            max(0, sheets.index(guess)) if guess in sheets else 0, False,
+        )
+        if not ok or not choice:
+            self._notify("به‌روزرسانی لغو شد", "info")
+            self.settings.set_status("به‌روزرسانی لغو شد — شیتی انتخاب نشد")
+            return
+        settings, source_path = getattr(self, "_system_copy_request", ({}, ""))
+        if not settings:
+            self._on_system_update_failed("درخواست به‌روزرسانی گم شد؛ دوباره تلاش کنید.")
+            return
+        self.config.set("system_update_sheet", str(choice), save=False)
+        self.settings.set_status(f"ساخت نسخهٔ به‌روز روی شیت «{choice}»…")
+        self._start_system_copy(settings, source_path, forced_sheet=str(choice))
 
     # ------------------------------------------------------------------
     # به‌روزرسانی محلی از فایل سامانه (بدون دیتابیس)
@@ -12089,13 +12268,7 @@ class MainWindow(QMainWindow):
                 "extra_excel_path": self.settings.excel_edit.text().strip(),
             })
             self.settings.set_status("در حال ساخت نسخهٔ به‌روز از کتاب کار اصلی…")
-            worker = SystemCopyWorker(settings, source_path, self)
-            worker.done.connect(self._on_system_copy_done)
-            worker.failed.connect(self._on_system_update_failed)
-            worker.finished.connect(lambda: self._set_system_update_busy(False))
-            self._system_update_worker = worker
-            self._system_update_busy = True
-            worker.start()
+            self._start_system_copy(settings, source_path)
             return
         seed = find_seed_workbook(source_path, extra_paths=base_paths)
         self.settings.set_status("در حال ساخت/به‌روزرسانی کتاب کار داخلی از فایل ۰۱…")
