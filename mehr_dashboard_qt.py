@@ -168,7 +168,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.5.5"
+APP_VERSION = "3.5.6"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -1573,8 +1573,10 @@ SYSTEM_UPDATE_LAST_COLUMN = 36    # ستون AJ
 _SYSTEM_UPDATE_OK_WORDS = {"okk", "ok"}
 
 # علامت‌هایی که در ستون‌های وضعیت/کسورات «ثبت‌شده» حساب می‌شوند.
-# مرجع، همان رفتار نسخهٔ اولیه است: فقط حرف M. حرف «م» و تیک هم پذیرفته می‌شوند،
-# اما عدد ۱ یا x عمداً شمرده نمی‌شوند تا شاخص‌ها اشتباه نشوند.
+# مرجع، همان رفتار نسخهٔ اولیه است: فقط حرف M (و «م»/تیک).
+# عدد ۱ یا x عمداً شمرده نمی‌شوند تا شاخص‌ها اشتباه نشوند؛ در عوض، هنگام
+# نوشتن/ساخت کتاب کار، مقدار ۱ به «M» و ۰ به خالی تبدیل می‌شود تا کارت‌ها
+# صفر نشوند.
 _STATUS_MARK_TOKENS = {"m", "م", "✓", "✔"}
 
 
@@ -1589,6 +1591,36 @@ def is_status_mark(value: Any) -> bool:
         return True
     compact = re.sub(r"\s+", " ", text)
     return compact in _STATUS_MARK_TOKENS
+
+
+FLAG_COLUMNS_ONE_BASED = {column + 1 for _key, _label, column in FLAG_DEFS}
+
+
+def status_mark_value(value: Any) -> Any:
+    """مقدار ستون وضعیت را به «علامت» تبدیل می‌کند: ۱ → M، ۰ → خالی.
+
+    خروجی سامانه در این ستون‌ها عدد ۰/۱ دارد؛ اگر همان عدد در کتاب کار نوشته
+    شود، داشبورد آن را «علامت» نمی‌شناسد و کارت‌ها صفر می‌شوند.
+    """
+    if is_blank(value):
+        return None
+    if isinstance(value, bool):
+        return "M" if value else None
+    if isinstance(value, (int, float)):
+        return "M" if float(value) > 0 else None
+    text = normalize_per(txt(value)).strip()
+    lowered = text.lower()
+    if lowered in ("0", "0.0", "false", "-", "na", "none", "n/a"):
+        return None
+    if lowered in _STATUS_MARK_TOKENS:
+        return "M"
+    return value
+
+
+def is_dashboard_sheet_name(name: str) -> bool:
+    """آیا این شیت همان شیت داشبورد است (colorcode)؟"""
+    text = normalize_per(txt(name)).strip().lower()
+    return "colorcode" in text or "color code" in text or "کالرکد" in text
 
 
 def has_amount(value: Any) -> bool:
@@ -2300,12 +2332,15 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
         if plan.sheet_name not in workbook.sheetnames:
             raise ExcelDataError(f"شیت «{plan.sheet_name}» در کتاب کار پیدا نشد.")
         sheet = workbook[plan.sheet_name]
+        dashboard_target = is_dashboard_sheet_name(plan.sheet_name)
         written = 0
         formula_cells = 0
         merged_cells = 0
         for target_row, values in plan.rows:
             for offset, value in enumerate(values):
                 column = plan.first_column + offset
+                if dashboard_target and column in FLAG_COLUMNS_ONE_BASED:
+                    value = status_mark_value(value)
                 cell = sheet.cell(row=int(target_row), column=int(column))
                 current = getattr(cell, "value", None)
                 if isinstance(current, str) and current.startswith("="):
@@ -2361,6 +2396,8 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
                     value = value.strip()
                     if value.lower() in _SYSTEM_UPDATE_OK_WORDS:
                         value = "ok"
+                if is_dashboard_sheet_name(plan.sheet_name) and column in FLAG_COLUMNS_ONE_BASED:
+                    value = status_mark_value(value)
                 cell = sheet.cell(row=target_row, column=column)
                 if is_blank(value):
                     # مقدار خالی در فایل سامانه، دادهٔ موجود کتاب کار را پاک نمی‌کند
@@ -3004,12 +3041,15 @@ def build_workbook_from_system(source_path: str, sheet_name: str = SHEET_NAME_DE
             progress_values.append(fraction)
             sheet.cell(row=target_row, column=SYSTEM_UPDATE_LAST_COLUMN + 1, value=fraction)
         for offset in range(max(0, last_column - first_column + 1)):
-            value = cell(row, first_column - 1 + offset)
+            column = first_column + offset
+            value = cell(row, column - 1)
             if isinstance(value, str) and value.lower() in _SYSTEM_UPDATE_OK_WORDS:
                 value = "ok"
+            if column in FLAG_COLUMNS_ONE_BASED:
+                value = status_mark_value(value)
             if value is None:
                 continue
-            sheet.cell(row=target_row, column=first_column + offset, value=value)
+            sheet.cell(row=target_row, column=column, value=value)
             written += 1
         target_row += 1
     if progress_values:
