@@ -1,41 +1,38 @@
 @echo off
 REM =====================================================================
-REM  ساخت فایل اجرایی تک‌فایلی ویندوز (MehrDashboard.exe)
+REM  ساخت فایل اجرایی تک‌فایلی ویندوز (MehrDashboard.exe) — نسخهٔ ۴
 REM  پیش‌نیاز: Python 3.9+ نصب شده و در PATH باشد
+REM  داده‌ها هنگام اجرا در D:\DATANEW ساخته می‌شوند.
 REM =====================================================================
 chcp 65001 >nul
 setlocal
 
 echo [1/3] نصب پیش‌نیازها ...
 python -m pip install --upgrade pip >nul
-python -m pip install PyQt5 openpyxl mysql-connector-python pyinstaller || goto :error
+python -m pip install PyQt5 openpyxl pyinstaller || goto :error
 
 echo [2/3] پاک‌سازی خروجی قبلی ...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 echo [3/3] ساخت فایل تک‌فایلی ...
-set EXTRA=
-
 python -m PyInstaller ^
   --noconfirm ^
   --onefile ^
   --windowed ^
   --name MehrDashboard ^
-  %EXTRA% ^
   --hidden-import openpyxl ^
   --hidden-import openpyxl.styles ^
   --hidden-import openpyxl.utils ^
-  --hidden-import mysql.connector ^
-  --hidden-import mysql.connector.plugins ^
-  --collect-submodules mysql.connector ^
+  --hidden-import openpyxl.worksheet ^
+  --hidden-import openpyxl.cell ^
   mehr_dashboard_qt.py || goto :error
 
 echo.
 echo =====================================================
 echo  ساخته شد: dist\MehrDashboard.exe
-echo  فایل اکسل و پوشهٔ PDF-MEHR را کنار exe بگذارید،
-echo  یا مسیر آن‌ها را از صفحهٔ «تنظیمات» انتخاب کنید.
+echo  داده‌ها در D:\DATANEW ساخته می شوند؛ برای شروع دکمهٔ
+echo  «به‌روزرسانی از فایل ۰۱» را بزنید.
 echo =====================================================
 goto :end
 

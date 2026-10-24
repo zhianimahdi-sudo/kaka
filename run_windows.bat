@@ -1,14 +1,15 @@
-﻿@echo off
+@echo off
 REM =====================================================================
 REM  اجرای داشبورد مهر روی ویندوز (نصب خودکار پیش‌نیازها در اولین اجرا)
 REM  نیاز: Python 3.9 یا بالاتر که در PATH باشد (python.org/downloads)
+REM  داده‌ها: D:\DATANEW   —   بدون MySQL، بدون رمز، بدون سرویس
 REM =====================================================================
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
 echo ==========================================================
-echo   داشبورد قراردادهای مهر خلیج فارس
+echo   داشبورد قراردادهای مهر خلیج فارس — نسخهٔ ۴٫۰٫۰
 echo ==========================================================
 echo.
 
@@ -27,8 +28,8 @@ if errorlevel 1 (
 
 echo [2/2] اجرای برنامه...
 echo.
-echo   اگر دیتابیس آماده نیست، در صفحهٔ «تنظیمات» فایل اکسل را
-echo   «بارگذاری در دیتابیس» کنید یا «اجرای محلی (بدون دیتابیس)» را بزنید.
+echo   داده‌ها در پوشهٔ D:\DATANEW ساخته می‌شود.
+echo   برای شروع: دکمهٔ «به‌روزرسانی از فایل ۰۱» یا «بارگذاری کتاب کار…».
 echo.
 python mehr_dashboard_qt.py
 if errorlevel 1 goto :runfail
@@ -46,7 +47,7 @@ exit /b 1
 :pipfail
 echo.
 echo  [خطا] نصب پیش‌نیازها انجام نشد. اتصال اینترنت یا دسترسی pip را بررسی کنید.
-echo  دستور دستی:  python -m pip install PyQt5 openpyxl mysql-connector-python
+echo  دستور دستی:  python -m pip install PyQt5 openpyxl
 echo.
 pause
 exit /b 1
@@ -54,7 +55,8 @@ exit /b 1
 :runfail
 echo.
 echo  [خطا] برنامه با خطا بسته شد.
-echo  فایل گزارش «mehr_error.log» در همان پوشهٔ این فایل ساخته می‌شود؛ آن را بفرستید.
+echo  فایل گزارش: D:\DATANEW\logs\errors.log  (یا mehr_error.log کنار برنامه)
+echo  آن فایل را بفرستید.
 echo.
 pause
 exit /b 1
