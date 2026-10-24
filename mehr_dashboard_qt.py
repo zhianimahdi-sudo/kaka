@@ -47,6 +47,7 @@ import json
 import math
 import os
 import platform
+import socket
 import subprocess
 import re
 import sys
@@ -168,7 +169,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
 APP_SHORT = "سامانه کندو"
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.6.1"
 SHEET_NAME_DEFAULT = "colorcode"
 REQUIRED_COLUMNS = 57  # ستون‌های مورد استفاده تا ستون 55 (BB)
 
@@ -941,6 +942,109 @@ def _is_network_error(exc: Exception) -> bool:
     ))
 
 
+def mysql_port_open(host: str = "127.0.0.1", port: int = 3306,
+                    timeout: float = 2.0) -> bool:
+    """آیا چیزی روی پورت MySQL گوش می‌دهد؟ (برای تشخیص «سرویس خاموش است»)."""
+    name = str(host or "127.0.0.1").strip()
+    if name.lower() in {"localhost", "."}:
+        name = "127.0.0.1"
+    try:
+        with socket.create_connection((name, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def local_mysql_services() -> List[Dict[str, str]]:
+    """سرویس‌های MySQL/MariaDB نصب‌شده روی ویندوز و وضعیتشان.
+
+    برای اینکه پیام خطا بگوید «MySQL نصب نیست»، «سرویس خاموش است» یا «رمز غلط
+    است» — بدون این‌که کاربر لازم باشد خودش services.msc را باز کند.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        completed = subprocess.run(
+            ["sc", "query", "type=", "service", "state=", "all"],
+            capture_output=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        text = (completed.stdout or b"").decode("utf-8", "replace")
+    except Exception as exc:
+        log_event(f"خواندن فهرست سرویس‌های ویندوز ممکن نشد: {exc}")
+        return []
+    services: List[Dict[str, str]] = []
+    current: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.upper().startswith("SERVICE_NAME:"):
+            if current.get("name"):
+                services.append(current)
+            current = {"name": line.split(":", 1)[1].strip(), "state": ""}
+        elif line.upper().startswith("STATE") and current:
+            parts = [item.strip() for item in line.split(":", 1)[-1].split()]
+            current["state"] = " ".join(parts[1:]) if len(parts) > 1 else ""
+    if current.get("name"):
+        services.append(current)
+    found = [item for item in services
+             if "mysql" in item["name"].lower() or "maria" in item["name"].lower()]
+    if found:
+        log_event(
+            "سرویس‌های دیتابیس روی این سیستم: "
+            + "، ".join(f"{item['name']} ({item['state'] or '—'})" for item in found)
+        )
+    return found
+
+
+def mysql_diagnosis(host: str, port: int) -> str:
+    """توضیح فارسی علت اتصال‌نشدن: سرویس خاموش، پورت اشتباه یا رمز غلط."""
+    reachable = mysql_port_open(host, port)
+    services = local_mysql_services()
+    lines: List[str] = []
+    if not reachable:
+        lines.append(
+            f"هیچ برنامه‌ای روی {host}:{fa(port)} به MySQL گوش نمی‌دهد؛ یعنی سرور "
+            "MySQL خاموش است یا روی این سیستم نصب نیست."
+        )
+        running = [item for item in services if "RUNNING" in item["state"].upper()]
+        stopped = [item for item in services if item not in running]
+        if running:
+            lines.append(
+                "سرویس MySQL در حال اجراست اما روی پورت دیگری گوش می‌دهد؛ "
+                "پورت درست را در تنظیمات بگذارید."
+            )
+        elif stopped:
+            lines.append(
+                "سرویس نصب شده اما خاموش است: "
+                + "، ".join(item["name"] for item in stopped)
+            )
+            lines.append(
+                "برای روشن کردن: پنجرهٔ CMD را «Run as administrator» باز کنید و "
+                f"دستور «net start {stopped[0]['name']}» را بزنید "
+                "(یا services.msc را باز کنید و همان سرویس را Start کنید)."
+            )
+        elif services:
+            lines.append("سرویس‌های دیتابیس: "
+                         + "، ".join(f"{item['name']} ({item['state']})"
+                                     for item in services))
+        else:
+            lines.append(
+                "اگر MySQL روی این سیستم نصب نیست، آن را نصب کنید (MySQL Community "
+                "Server) یا اگر روی سرور دیگری است، آدرس آن را در فیلد «میزبان» "
+                "بگذارید."
+            )
+    else:
+        lines.append(
+            f"پورت {fa(port)} روی {host} باز است، پس سرور MySQL روشن است و مشکل "
+            "از نام کاربری یا رمز است."
+        )
+        lines.append(
+            "کاربر و رمزی که MySQL پذیرفته را وارد کنید؛ اگر رمز را نمی‌دانید و "
+            "کاربر root بدون رمز دارید، فیلد رمز را خالی بگذارید."
+        )
+    return "\n".join(lines)
+
+
 def connect_database(settings: Dict[str, Any], timeout: int = 8,
                      allow_fallback: bool = True):
     """اتصال به دیتابیس؛ اگر رمز/کاربر جواب نداد، ورودهای بدون رمز هم امتحان می‌شود."""
@@ -994,6 +1098,16 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8,
     auth_only = bool(errors) and all(
         ("1045" in item) or ("access denied" in item.lower()) for item in errors
     )
+    network_only = bool(errors) and all(
+        ("2003" in item) or ("10061" in item) or ("can't connect" in item.lower())
+        or ("connection refused" in item.lower()) for item in errors
+    )
+    if network_only:
+        raise DatabaseError(
+            f"سرور MySQL در دسترس نیست ({host}:{port} — دیتابیس {database}).\n\n"
+            f"{mysql_diagnosis(host, port)}\n\n"
+            f"جزئیات فنی:\n{detail}"
+        )
     if auth_only:
         raise DatabaseError(
             f"نام کاربری یا رمز MySQL پذیرفته نشد ({host}:{port} — دیتابیس {database}).\n"
@@ -1005,7 +1119,8 @@ def connect_database(settings: Dict[str, Any], timeout: int = 8,
             "   FLUSH PRIVILEGES;\n"
             "• اگر رمز root را دارید، همان را با کاربر root وارد کنید.\n"
             "• اگر دیتابیس روی سرور دیگری است، آدرس آن را در فیلد «میزبان» بگذارید.\n"
-            "• برای کار بدون دیتابیس: «اجرای محلی (بدون دیتابیس)» یا به‌روزرسانی محلی فایل ۰۱."
+            "• برای کار بدون دیتابیس: «اجرای محلی (بدون دیتابیس)» یا به‌روزرسانی محلی فایل ۰۱.\n\n"
+            f"{mysql_diagnosis(host, port)}"
         )
     raise DatabaseError(
         f"اتصال به دیتابیس ممکن نشد ({host}:{port}).\n{detail}\n\n"
@@ -1062,10 +1177,18 @@ def connect_server(settings: Dict[str, Any], timeout: int = 8):
         })
         return connection
     detail = "\n".join(errors[:4]) if errors else "خطای نامشخص"
+    auth_only = bool(errors) and all(
+        ("1045" in item) or ("access denied" in item.lower()) for item in errors
+    )
+    if auth_only:
+        head = (
+            f"نام کاربری یا رمز MySQL پذیرفته نشد ({host}:{port}).\n"
+            "همهٔ حالت‌ها امتحان شد و هیچ‌کدام قبول نشدند.\n\n"
+        )
+    else:
+        head = f"اتصال به سرور دیتابیس ممکن نشد ({host}:{port}).\n\n"
     raise DatabaseError(
-        f"اتصال به سرور دیتابیس ممکن نشد ({host}:{port}).\n{detail}\n\n"
-        "اگر کاربر MySQL شما رمز ندارد، فیلد رمز را خالی بگذارید "
-        "(مثلاً کاربر root با رمز خالی)."
+        head + mysql_diagnosis(host, port) + f"\n\nجزئیات فنی:\n{detail}"
     )
 
 
@@ -2048,6 +2171,7 @@ class SystemUpdateRecord:
     requirements: List[str]    # ستون‌های AL..BH: M/O/N/A (الزام هر مدرک)
     combos: List[str]          # ستون‌های BK..CG: «1-M» / «0-M» / ...
     contract_type: str = ""    # ستون «نوع قرارداد» (کلید ماتریس الزام)
+    identity: Dict[str, str] = field(default_factory=dict)  # شناسه/نام/موضوع/...
 
 
 @dataclass
@@ -2305,6 +2429,18 @@ def plan_system_update(source_path: str, target_blob: bytes,
                               ("نوع قرارداد", "اجرایی", "contract type", "type"))
     if type_col < 0:
         type_col = 8  # ستون I در فایل سامانه
+    identity_columns: Dict[str, int] = {}
+    for label, hints in (
+        ("id", ("Contract ID", "شناسه قرارداد", "شناسه")),
+        ("company", _SOURCE_HEADER_HINTS["name"]),
+        ("subject", _SOURCE_HEADER_HINTS["subject"]),
+        ("employer", _SOURCE_HEADER_HINTS["employer"]),
+        ("sub_project", ("sub project", "subproject", "زیرپروژه", "زیر پروژه")),
+        ("no", ("Contract No", "شماره قرارداد", "شماره قرارداد / الحاقیه")),
+    ):
+        column = _header_column([rows[header_row]], 0, hints)
+        if column >= 0:
+            identity_columns[label] = column
     mapping: List[Tuple[int, List[Any]]] = []
     records: List[SystemUpdateRecord] = []
     for target_row, row in picked:
@@ -2314,7 +2450,8 @@ def plan_system_update(source_path: str, target_blob: bytes,
         mapping.append((target_row, values))
         records.append(
             _build_update_record(row, values, contract_col, first_column - 1,
-                                 type_col=type_col)
+                                 type_col=type_col,
+                                 identity_columns=identity_columns)
         )
     if not filtered:
         raise ExcelDataError(
@@ -2366,7 +2503,9 @@ def _plan_source_headers(rows: Sequence[Sequence[Any]], header_row: int,
 
 def _build_update_record(row: Sequence[Any], values: List[Any],
                          contract_col: int, base_index: int,
-                         type_col: int = -1) -> SystemUpdateRecord:
+                         type_col: int = -1,
+                         identity_columns: Optional[Dict[str, int]] = None
+                         ) -> SystemUpdateRecord:
     """ردیف فایل سامانه + ستون‌های محاسبهٔ شیت «خروجی کندو» (AL..BH و BK..CG)."""
     def slice_of(offset: int) -> List[str]:
         start = base_index + offset
@@ -2384,9 +2523,13 @@ def _build_update_record(row: Sequence[Any], values: List[Any],
         combos = []
     key = normalize_lookup_key(txt(row[contract_col] if contract_col < len(row) else ""))
     type_value = txt(row[type_col]) if 0 <= type_col < len(row) else ""
+    identity: Dict[str, str] = {"type": type_value}
+    for label, column in (identity_columns or {}).items():
+        identity[label] = txt(row[column]) if 0 <= column < len(row) else ""
+    identity["contract"] = txt(row[contract_col]) if contract_col < len(row) else ""
     return SystemUpdateRecord(key=key, values=values,
                               requirements=requirements, combos=combos,
-                              contract_type=type_value)
+                              contract_type=type_value, identity=identity)
 
 
 def _sheet_system_scan(workbook, sheet_name: str, source_keys: set) -> Dict[str, Any]:
@@ -2762,8 +2905,13 @@ def _sheet_key_rows(sheet, keys: set, width: int = 0) -> Tuple[int, Dict[str, in
 
 
 def _find_export_sheet(workbook, keys: set) -> str:
-    """شیت «خروجی کندو» (یا هر شیتی که خروجی سامانه در آن پیست می‌شود)."""
-    best_name, best_score = "", 0
+    """شیت «خروجی کندو» (یا هر شیتی که خروجی سامانه در آن پیست می‌شود).
+
+    فقط شباهت نام یا شمارهٔ قرارداد کافی نیست: شیت‌های دیگری مثل «کندو مبلغ دار»
+    هم ستون «Contract ID» دارند. شیت درست، سرستون‌های همان ۲۳ مدرک را هم دارد.
+    """
+    best_name, best_score = "", 0.0
+    total_keys = max(1, len(keys))
     for name in workbook.sheetnames:
         sheet_name = str(name)
         if is_dashboard_sheet_name(sheet_name):
@@ -2771,21 +2919,32 @@ def _find_export_sheet(workbook, keys: set) -> str:
         sheet = workbook[sheet_name]
         width = max(1, min(int(sheet.max_column or 1), 90))
         grid = [list(row) for row in sheet.iter_rows(
-            min_row=1, max_row=8, max_col=width, values_only=True)]
+            min_row=1, max_row=10, max_col=width, values_only=True)]
+        header_row, hits = _best_header_row(
+            grid, list(REQUIREMENT_DOC_NAMES), minimum=3
+        )
         sub_project = any(
             _looks_like_sub_project_header(value)
             for row in grid for value in row
         )
         _column, key_rows = _sheet_key_rows(sheet, keys, width)
-        score = len(key_rows)
+        matched = len(key_rows)
+        doc_hits = max(0, hits)
+        score = 0.0
+        if doc_hits >= 5:
+            score += doc_hits * 4
         if sub_project:
             score += 12
         text = normalize_per(sheet_name)
         if "کندو" in text or "kandoo" in text or "export" in text:
             score += 8
+        score += min(matched, 40)
+        if doc_hits < 5 and not (sub_project and matched >= max(10, total_keys // 2)):
+            # این شیت خروجی سامانه نیست (مثلاً گزارش مالی با همان شناسه‌ها).
+            score = 0.0
         if score > best_score:
             best_name, best_score = sheet_name, score
-    return best_name if best_score >= 5 else ""
+    return best_name if best_score >= 30 else ""
 
 
 # ---------------------------------------------------------------------------
@@ -3341,6 +3500,89 @@ def _apply_dashboard_results(workbook, plan: SystemUpdatePlan, headers: List[str
         info["progress_total"] = total
 
 
+def _create_export_sheet(workbook, plan: SystemUpdatePlan, headers: List[str],
+                         records: List[SystemUpdateRecord],
+                         info: Dict[str, Any]) -> Tuple[str, Dict[str, List[str]]]:
+    """شیت «خروجی کندو» را در کتاب کاری که آن را ندارد می‌سازد.
+
+    کتاب کارهایی که برنامه خودش از فایل ۰۱ می‌سازد فقط شیت colorcode دارند؛
+    بدون شیت خروجی، فرمول‌های colorcode به جایی وصل نیستند. این تابع همان شیت
+    را با سرستون‌های شیت واقعی می‌سازد و دادهٔ L..AJ و محاسبهٔ AL..BH/BI/BK..CG/CH
+    را در آن می‌نویسد.
+    """
+    title = "خروجی کندو"
+    if title in workbook.sheetnames:
+        title = "خروجی کندو (برنامه)"
+    index = 1
+    while title in workbook.sheetnames:
+        index += 1
+        title = f"خروجی کندو (برنامه {fa(index)})"
+    sheet = workbook.create_sheet(title, 0)
+    sheet.sheet_view.rightToLeft = True
+    identity_titles = ["Contract ID", "Clinet", "SubContractor", "Contract No",
+                       "Contract Subject", "Sub Project"]
+    for column, name in enumerate(identity_titles, start=1):
+        sheet.cell(row=4, column=column, value=name)
+    for offset, name in enumerate(REQUIREMENT_DOC_NAMES):
+        sheet.cell(row=4, column=plan.first_column + offset, value=name)
+    first_doc = plan.first_column - 1
+    sheet.cell(row=4, column=first_doc + 24, value="جمع تعداد مدارک")
+    sheet.cell(row=4, column=first_doc + 25, value="درصد پیشرفت مدارک اختتام")
+    for offset, name in enumerate(REQUIREMENT_DOC_NAMES):
+        sheet.cell(row=4, column=first_doc + 27 + offset, value=name)
+    sheet.cell(row=4, column=first_doc + 50, value="جمع کلی تعداد مدارک مورد نیاز جهت اختتام کامل")
+    for offset, name in enumerate(REQUIREMENT_DOC_NAMES):
+        sheet.cell(row=4, column=first_doc + 52 + offset, value=name)
+    sheet.cell(row=4, column=first_doc + 75, value="جمع کلی تعداد مدارک لازم به ثبت")
+    matrix, matrix_source = requirement_matrix_for(workbook)
+    requirements_by_key: Dict[str, List[str]] = {}
+    written = 0
+    for index_row, record in enumerate(records, start=5):
+        identity = record.identity or {}
+        sheet.cell(row=index_row, column=1, value=identity.get("id") or index_row - 4)
+        sheet.cell(row=index_row, column=3, value=identity.get("company") or "")
+        sheet.cell(row=index_row, column=4,
+                   value=identity.get("no") or identity.get("contract") or "")
+        sheet.cell(row=index_row, column=5, value=identity.get("subject") or "")
+        sheet.cell(row=index_row, column=6, value=identity.get("sub_project") or "")
+        for offset, value in enumerate(record.values):
+            column = plan.first_column + offset
+            sheet.cell(row=index_row, column=column, value=value)
+            written += 1
+        requirements = (requirement_for_type(identity.get("type") or record.contract_type,
+                                             matrix)
+                        or [normalize_requirement_code(item)
+                            for item in (record.requirements or [])][:23])
+        if len(requirements) < len(REQUIREMENT_DOC_NAMES):
+            continue
+        requirements_by_key[record.key] = requirements
+        counts = [record.values[i] if i < len(record.values) else None
+                  for i in range(len(REQUIREMENT_DOC_NAMES))]
+        combos = build_doc_combos(counts, requirements)
+        for offset, code in enumerate(requirements):
+            sheet.cell(row=index_row, column=first_doc + 27 + offset, value=code)
+        sheet.cell(row=index_row, column=first_doc + 50,
+                   value=sum(1 for code in requirements if code == "M"))
+        for offset, combo in enumerate(combos):
+            sheet.cell(row=index_row, column=first_doc + 52 + offset, value=combo)
+        sheet.cell(row=index_row, column=first_doc + 75,
+                   value=sum(1 for combo in combos if combo == "1-M"))
+    info["export_sheet"] = title
+    info["export_mapping"] = "شیت تازه"
+    info["export_written"] = int(info.get("export_written") or 0) + written
+    info["export_created"] = True
+    info["requirement_matrix"] = matrix_source
+    info["notes"].append(
+        f"کتاب کار شیت «خروجی کندو» نداشت؛ ساخته شد و {fa(len(requirements_by_key))} "
+        "ردیف داده و محاسبهٔ همان شیت در آن نوشته شد."
+    )
+    log_event(
+        f"شیت «{title}» ساخته شد: {fa(len(requirements_by_key))} ردیف، "
+        f"{fa(written)} مقدار، ماتریس {matrix_source}"
+    )
+    return title, requirements_by_key
+
+
 def sync_workbook_from_system(workbook, plan: SystemUpdatePlan,
                               overwrite_formulas: bool = True) -> Dict[str, Any]:
     """زنجیرهٔ «خروجی کندو ← فایل سامانه» و «colorcode ← خروجی کندو» را اجرا می‌کند.
@@ -3372,7 +3614,15 @@ def sync_workbook_from_system(workbook, plan: SystemUpdatePlan,
     else:
         requirements_by_key: Dict[str, List[str]] = {}
     export_name = _find_export_sheet(workbook, keys)
-    if export_name:
+    requirements_by_key: Dict[str, List[str]] = {}
+    if not export_name and any(is_dashboard_sheet_name(str(name))
+                               for name in workbook.sheetnames):
+        # کتاب کار فقط شیت colorcode دارد؛ شیت خروجی ساخته می‌شود تا فرمول‌ها
+        # و نتیجهٔ محاسبه جایی برای نشستن داشته باشند.
+        export_name, requirements_by_key = _create_export_sheet(
+            workbook, plan, headers, records, info
+        )
+    elif export_name:
         requirements_by_key = _write_export_sheet(
             workbook, export_name, plan, headers, records, keys, info
         ) or {}
@@ -3430,6 +3680,64 @@ def _prefer_workbook_formulas() -> bool:
     return os.name == "nt"
 
 
+def measure_dashboard_values(blob_or_path: Any,
+                             sheet_name: str = SHEET_NAME_DEFAULT) -> Dict[str, Any]:
+    """اعدادی که داشبورد از یک کتاب کار می‌بیند را می‌شمارد (بدون ساخت داده).
+
+    برای اطمینان از اینکه فایل ساخته‌شده واقعاً علامت `M` و درصد دارد استفاده
+    می‌شود؛ اگر نداشته باشد، آن فایل نباید جای دادهٔ فعلی بنشیند.
+    """
+    result: Dict[str, Any] = {"ok": False, "marks": 0, "percent": None,
+                              "rows": 0, "sheet": ""}
+    if openpyxl is None:
+        return result
+    if isinstance(blob_or_path, (bytes, bytearray)):
+        source: Any = io.BytesIO(bytes(blob_or_path))
+    else:
+        path = Path(str(blob_or_path)).expanduser()
+        if not path.exists():
+            return result
+        source = str(path)
+    try:
+        workbook = openpyxl.load_workbook(source, data_only=True, read_only=True)
+    except Exception:
+        return result
+    try:
+        result["ok"] = True
+        target = sheet_name if sheet_name in workbook.sheetnames else ""
+        if not target:
+            for name in workbook.sheetnames:
+                if is_dashboard_sheet_name(str(name)):
+                    target = str(name)
+                    break
+        if not target:
+            return result
+        result["sheet"] = target
+        sheet = workbook[target]
+        marks = 0
+        rows = 0
+        for index, row in enumerate(sheet.iter_rows(max_col=37, values_only=True),
+                                    start=1):
+            if index == 2:
+                number = num(row[36]) if len(row) > 36 else None
+                if number is not None:
+                    result["percent"] = round(float(number) * 100, 2)
+            if index < 4:
+                continue
+            rows += 1
+            for column in range(11, min(34, len(row))):
+                if is_status_mark(row[column]):
+                    marks += 1
+        result["marks"] = marks
+        result["rows"] = rows
+        return result
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+
+
 def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
                         out_path: str) -> Dict[str, Any]:
     """نسخهٔ تازه‌ای از کتاب کار می‌سازد: «خروجی کندو» از فایل سامانه پر می‌شود و
@@ -3476,6 +3784,27 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
             )
     info["recalculated"] = bool(recalculated)
     info["pending_values"] = pending
+    # کنترل نهایی: همان اعدادی که داشبورد از این فایل می‌خواند شمرده می‌شود.
+    measured = measure_dashboard_values(str(target),
+                                        sheet_name=str(info.get("dashboard_sheet") or ""))
+    info["verified_marks"] = int(measured.get("marks") or 0)
+    info["verified_percent"] = measured.get("percent")
+    # بدون شیت خروجی، اعداد colorcode همان اعداد قبلی (کهنه) می‌مانند؛ پس تأیید
+    # فقط وقتی است که داده واقعاً در شیت خروجی نوشته شده باشد.
+    info["verified"] = bool(measured.get("ok") and info["verified_marks"] > 0
+                            and info.get("export_sheet"))
+    if not info.get("export_sheet"):
+        info["notes"].append(
+            "در کتاب کار پایه، شیت «خروجی کندو» پیدا نشد؛ دادهٔ فایل ۰۱ جایی "
+            "ننشست و فرمول‌های colorcode نتیجه‌ای ندارند."
+        )
+    log_event(
+        "کنترل فایل ساخته‌شده: {marks} علامت، درصد {percent}".format(
+            marks=fa(info["verified_marks"]),
+            percent=("—" if info["verified_percent"] is None
+                     else fa(info["verified_percent"])),
+        )
+    )
     for note in info.get("notes", []):
         log_event(f"همگام‌سازی با فایل سامانه: {note}")
     log_event(
@@ -3492,6 +3821,10 @@ def prepare_system_copy(plan: SystemUpdatePlan, base_blob: bytes,
     return {
         "output_path": str(target),
         "recalculated": bool(info.get("recalculated")),
+        "verified": bool(info.get("verified")),
+        "verified_marks": int(info.get("verified_marks") or 0),
+        "verified_percent": info.get("verified_percent"),
+        "export_sheet": str(info.get("export_sheet") or ""),
         "written_cells": (int(info.get("export_written", 0))
                           + int(info.get("dashboard_marks", 0))
                           + int(info.get("dashboard_formula_cells", 0))),
@@ -3520,6 +3853,14 @@ def apply_system_update(plan: SystemUpdatePlan, target_blob: bytes) -> Tuple[byt
         info = sync_workbook_from_system(
             workbook, plan, overwrite_formulas=not _prefer_workbook_formulas()
         )
+        if not info.get("export_sheet"):
+            raise ExcelDataError(
+                "در کتاب کار پایه شیت «خروجی کندو» پیدا نشد؛ بدون آن، دادهٔ فایل ۰۱ "
+                "جایی برای نشستن ندارد و فرمول‌های colorcode نتیجه‌ای نمی‌دهند.\n\n"
+                "کتاب کار اصلی خودتان (همان فایلی که ستون‌های L تا AJ فایل سامانه در "
+                "آن پیست می‌شود) را در دیتابیس بگذارید، یا از دکمهٔ «بارگذاری فایل ۰۱ "
+                "و به‌روزرسانی» استفاده کنید تا کتاب کار کامل ساخته شود."
+            )
         updated = (int(info.get("export_written", 0))
                    + int(info.get("dashboard_marks", 0))
                    + int(info.get("dashboard_formula_cells", 0)))
@@ -3598,6 +3939,22 @@ def sync_summary_lines(info: Dict[str, Any]) -> List[str]:
         if isinstance(total, (int, float)):
             lines.append("میانگین درصد پیشرفت: {value}٪".format(
                 value=fa("{0:.2f}".format(float(total) * 100))))
+    if "verified" in info:
+        marks = int(info.get("verified_marks") or 0)
+        percent = info.get("verified_percent")
+        if info.get("verified"):
+            lines.append(
+                "کنترل نهایی: فایل ساخته‌شده {marks} علامت وضعیت و درصد {percent} "
+                "دارد (همان اعدادی که داشبورد می‌خواند).".format(
+                    marks=fa(marks),
+                    percent=("—" if percent is None else fa(percent)),
+                )
+            )
+        else:
+            lines.append(
+                "کنترل نهایی: فایل ساخته‌شده هیچ علامت وضعیتی ندارد؛ برای همین جای "
+                "دادهٔ فعلی نمی‌نشیند."
+            )
     for note in info.get("notes") or []:
         lines.append(f"یادداشت: {note}")
     return lines
@@ -3975,11 +4332,38 @@ def damaged_workbook_message(health: Dict[str, Any]) -> str:
     )
 
 
+def _looks_like_export_sheet_rows(rows: Sequence[Sequence[Any]]) -> bool:
+    """آیا این چند ردیف اول، سرستون‌های شیت «خروجی کندو» را دارند؟
+
+    شیت ماتریس الزام هم نام مدارک را دارد، اما «Sub Project» و «Contract ID»
+    ندارد؛ همین دو، شیت خروجی سامانه را از بقیه جدا می‌کند.
+    """
+    has_marker = False
+    doc_hits = 0
+    for row in rows[:10]:
+        for value in row:
+            text = normalize_per(txt(value))
+            if not text:
+                continue
+            if (_looks_like_sub_project_header(value)
+                    or "contract id" in text
+                    or text in {"subcontractor", "sub contractor"}):
+                has_marker = True
+                continue
+            needle = normalize_per(txt(value))
+            for name in REQUIREMENT_DOC_NAMES:
+                if normalize_per(name) and normalize_per(name) == needle:
+                    doc_hits += 1
+                    break
+    return bool(has_marker and doc_hits >= 5)
+
+
 def inspect_workbook_bytes(blob: bytes) -> Dict[str, Any]:
     """ویژگی‌های مهم کتاب کار: ساختهٔ برنامه؟ درصد دارد؟ علامت وضعیت دارد؟"""
     info: Dict[str, Any] = {
         "generated": False, "has_progress": False, "mark_rows": 0,
-        "sheets": [], "colorcode": False, "ok": False,
+        "sheets": [], "colorcode": False, "ok": False, "has_export": False,
+        "export_sheet": "",
     }
     if not blob or openpyxl is None:
         return info
@@ -4026,6 +4410,35 @@ def inspect_workbook_bytes(blob: bytes) -> Dict[str, Any]:
             if info["generated"] and index > 1:
                 break  # کتاب کار ساخته‌شده از ۰۱ نیازی به شمارش علامت‌ها ندارد
         info["mark_rows"] = marks
+        # شیت خروجی سامانه: بدون آن، فرمول‌های colorcode نتیجه‌ای نمی‌دهند و
+        # به‌روزرسانی روی این کتاب کار، داشبورد را صفر می‌کند.
+        best_name, best_score = "", 0
+        for name in workbook.sheetnames:
+            if str(name) == str(target):
+                continue
+            try:
+                sheet = workbook[name]
+                head = [list(row) for row in sheet.iter_rows(
+                    min_row=1, max_row=10, max_col=60, values_only=True)]
+            except Exception:
+                continue
+            if not _looks_like_export_sheet_rows(head):
+                continue
+            score = 1
+            normalized = normalize_per(str(name))
+            if any(hint in normalized for hint in EXPORT_SHEET_HINTS):
+                score += 6
+            if any(_looks_like_sub_project_header(value)
+                   for row in head for value in row):
+                score += 6
+            if any("contract id" in normalize_per(txt(value))
+                   for row in head for value in row):
+                score += 4
+            if score > best_score:
+                best_name, best_score = str(name), score
+        if best_name:
+            info["has_export"] = True
+            info["export_sheet"] = best_name
         return info
     finally:
         try:
@@ -4073,14 +4486,26 @@ def find_real_workbook(source_path: str = "",
     except Exception:
         pass
     add(ORIGINAL_EXCEL_PATH)
+    # کتاب کاری که شیت خروجی سامانه را ندارد، برای به‌روزرسانی مناسب نیست:
+    # نوشتن نتیجه روی colorcode آن، فرمول‌ها را به #N/A تبدیل می‌کند و داشبورد
+    # صفر می‌شود. پس اول کتاب کار «کامل» (colorcode + خروجی کندو) انتخاب می‌شود.
     for path in candidates:
         quality = inspect_workbook_file(path)
-        if quality.get("ok") and quality.get("colorcode") and not quality.get("generated"):
-            if quality.get("has_progress") or quality.get("mark_rows"):
-                return path
+        if not (quality.get("ok") and quality.get("colorcode")
+                and not quality.get("generated")):
+            continue
+        if not quality.get("has_export"):
+            log_event(
+                "کتاب کار «{}» شیت خروجی سامانه ندارد؛ برای پایهٔ به‌روزرسانی "
+                "مناسب نیست.".format(Path(str(path)).name)
+            )
+            continue
+        if quality.get("has_progress") or quality.get("mark_rows"):
+            return path
     for path in candidates:
         quality = inspect_workbook_file(path)
-        if quality.get("ok") and quality.get("colorcode") and not quality.get("generated"):
+        if (quality.get("ok") and quality.get("colorcode")
+                and not quality.get("generated") and quality.get("has_export")):
             return path
     return ""
 
@@ -4843,6 +5268,7 @@ def resolve_update_base(settings: Dict[str, Any],
         usable = (
             not quality.get("generated")
             and bool(quality.get("colorcode"))
+            and bool(quality.get("has_export"))
             and not health.get("damaged")
         )
         if usable:
@@ -4880,7 +5306,9 @@ def resolve_update_base(settings: Dict[str, Any],
         log_event(
             "کتاب کار تنظیم‌شده برای پایه مناسب نیست "
             f"(ساختهٔ برنامه={quality.get('generated')}، "
-            f"colorcode={quality.get('colorcode')}، ناقص={health.get('damaged')})؛ "
+            f"colorcode={quality.get('colorcode')}، "
+            f"شیت خروجی={quality.get('has_export')}، "
+            f"ناقص={health.get('damaged')})؛ "
             "بهترین کتاب کار دیتابیس جست‌وجو می‌شود"
         )
     best = best_database_workbook(settings, skip_ids=[configured])
@@ -5498,6 +5926,7 @@ class DashboardData:
     damaged: bool = False
     damaged_reason: str = ""
     repaired: int = 0
+    computed_rows: int = 0   # ردیف‌هایی که مقدار فرمولی‌شان از «خروجی کندو» حساب شد
 
     @property
     def excel_path(self) -> str:
@@ -5588,6 +6017,168 @@ def _progress_like(value: Any) -> str:
     return text.replace("%", "٪")
 
 
+def _colorcode_marks(raw_rows: Sequence[Sequence[Any]]) -> int:
+    """تعداد علامت‌های M در ناحیهٔ اسناد (L..AH) ردیف‌های colorcode."""
+    marks = 0
+    for row in raw_rows[3:]:
+        for column in range(11, min(34, len(row))):
+            if is_status_mark(row[column]):
+                marks += 1
+    return marks
+
+
+def _sheet_grid(sheet, max_rows: int = 20000, max_cols: int = 90) -> List[List[Any]]:
+    """ردیف‌های یک شیت را به‌صورت لیست می‌خواند (مقاوم به read_only)."""
+    rows: List[List[Any]] = []
+    try:
+        iterator = sheet.iter_rows(max_col=max_cols, values_only=True)
+    except Exception:
+        return rows
+    for index, row in enumerate(iterator, start=1):
+        rows.append(list(row))
+        if index >= max_rows:
+            break
+    return rows
+
+
+def _export_grid_for(workbook, dashboard_sheet: str) -> Tuple[str, List[List[Any]]]:
+    """شیت «خروجی کندو» را داخل همان کتاب کار پیدا می‌کند (بدون کلید قرارداد)."""
+    best_name, best_score = "", 0
+    for name in workbook.sheetnames:
+        text = str(name)
+        if text == str(dashboard_sheet):
+            continue
+        normalized = normalize_per(text)
+        bonus = 8 if any(hint in normalized for hint in EXPORT_SHEET_HINTS) else 0
+        try:
+            sheet = workbook[text]
+            head = _sheet_grid(sheet, max_rows=30, max_cols=90)
+        except Exception:
+            continue
+        if len(head) < 5 or max((len(row) for row in head), default=0) < 30:
+            continue
+        score = bonus
+        header_row, _count = _best_header_row(
+            head[:12], list(REQUIREMENT_DOC_NAMES) + ["اجرا - مهر"], minimum=3
+        )
+        if header_row >= 0:
+            score += 10
+            header = [normalize_per(txt(value)) for value in head[header_row]]
+            hits = 0
+            for name_ in REQUIREMENT_DOC_NAMES:
+                needle = normalize_per(name_)
+                if needle and any(needle in cell for cell in header):
+                    hits += 1
+            score += min(hits, 12)
+        if any(_looks_like_sub_project_header(value)
+               for row in head[:8] for value in row):
+            score += 6
+        if score > best_score:
+            best_name, best_score = text, score
+    if best_score < 10 or not best_name:
+        return "", []
+    log_event(f"شیت خروجی برای بازسازی مقادیر: «{best_name}» (امتیاز {fa(best_score)})")
+    return best_name, _sheet_grid(workbook[best_name], max_rows=20000, max_cols=90)
+
+
+def heal_colorcode_rows(workbook, sheet_name: str,
+                        raw_rows: List[List[Any]]) -> Dict[str, Any]:
+    """فرمول‌های colorcode که مقدار ذخیره‌شده ندارند را از «خروجی کندو» می‌سازد.
+
+    کتاب کاری که با ابزاری بیرون از اکسل ذخیره شده باشد، ستون‌های فرمولی‌اش
+    (L..AH و AK) مقدار ندارند؛ در نتیجه داشبورد صفر می‌شود. این تابع همان
+    محاسبهٔ فرمول را از روی دادهٔ شیت «خروجی کندو» و ماتریس الزام انجام می‌دهد
+    و ردیف‌ها را با اعداد درست برمی‌گرداند — بدون تغییر در فایل روی دیسک.
+    """
+    report: Dict[str, Any] = {"filled": 0, "marks": 0, "percent": None,
+                              "sheet": "", "skipped": ""}
+    if not raw_rows or len(raw_rows) < 4:
+        return report
+    progress_cell = raw_rows[1][36] if len(raw_rows) > 1 and len(raw_rows[1]) > 36 else None
+    marks = _colorcode_marks(raw_rows)
+    if num(progress_cell) is not None and marks:
+        report["skipped"] = "مقادیر موجود است"
+        return report
+    export_name, grid = _export_grid_for(workbook, sheet_name)
+    if not export_name or not grid:
+        report["skipped"] = "شیت خروجی کندو پیدا نشد"
+        return report
+    report["sheet"] = export_name
+    header_row, _count = _best_header_row(
+        grid[:12], list(REQUIREMENT_DOC_NAMES) + ["اجرا - مهر"], minimum=3
+    )
+    if header_row < 0:
+        header_row = 3
+    export_start = header_row + 1          # ۰-پایه: اولین ردیف داده
+    colorcode_start = 3                    # ردیف ۴ شیت colorcode
+    offset = export_start - colorcode_start
+    matrix, matrix_source = requirement_matrix_for(workbook)
+    width_needed = 86
+    for row in grid:
+        if len(row) < width_needed:
+            row.extend([None] * (width_needed - len(row)))
+    percents: List[float] = []
+    filled = new_marks = 0
+    for index in range(colorcode_start, len(raw_rows)):
+        row = raw_rows[index]
+        if len(row) < 58:
+            row.extend([None] * (58 - len(row)))
+        export_row = grid[index + offset] if 0 <= index + offset < len(grid) else None
+        if export_row is None:
+            continue
+        counts = [export_row[11 + i] for i in range(23)]
+        if all(is_blank(value) for value in counts):
+            continue
+        percent_number = num(export_row[11 + _PLAN_PERCENT_OFFSET])
+        if percent_number is not None:
+            percents.append(percent_number)
+        requirements = [normalize_requirement_code(export_row[11 + _PLAN_REQUIREMENT_OFFSET + i])
+                        for i in range(23)]
+        if sum(1 for code in requirements if code in {"M", "O"}) < 3:
+            requirements = requirement_for_type(export_row[8], matrix)
+        combos = [txt(export_row[11 + _PLAN_COMBO_OFFSET + i]).strip()
+                  for i in range(23)]
+        if not any(re.match(r"^[01]\s*-", combo) for combo in combos):
+            combos = build_doc_combos(counts, requirements)
+        changed = False
+        for offset_doc in range(23):
+            state = _doc_state(counts[offset_doc],
+                               requirements[offset_doc] if offset_doc < len(requirements) else "",
+                               combos[offset_doc] if offset_doc < len(combos) else "",
+                               unknown="M", progress=percent_number)
+            if not state:
+                continue
+            current = txt(row[11 + offset_doc]).strip().upper()
+            if current == state:
+                continue
+            row[11 + offset_doc] = state
+            changed = True
+            if state == "M":
+                new_marks += 1
+        if percent_number is not None and len(row) > 36 and num(row[36]) is None:
+            row[36] = percent_number
+            changed = True
+        if changed:
+            filled += 1
+    if len(raw_rows) > 1 and len(raw_rows[1]) < 37:
+        raw_rows[1].extend([None] * (37 - len(raw_rows[1])))
+    if num(raw_rows[1][36]) is None and percents:
+        raw_rows[1][36] = sum(percents) / len(percents)
+        report["percent"] = round(sum(percents) / len(percents) * 100, 2)
+    if percents and report["percent"] is None:
+        report["percent"] = round(sum(percents) / len(percents) * 100, 2)
+    report["filled"] = filled
+    report["marks"] = _colorcode_marks(raw_rows)
+    report["matrix"] = matrix_source
+    if filled:
+        log_event(
+            "مقادیر فرمولی colorcode از شیت «{}» بازسازی شد: {} ردیف، {} علامت، "
+            "درصد {}".format(export_name, fa(filled), fa(report["marks"]),
+                             "—" if report["percent"] is None else fa(report["percent"]))
+        )
+    return report
+
+
 def parse_workbook_bytes(
     filename: str,
     blob: bytes,
@@ -5640,6 +6231,14 @@ def parse_workbook_bytes(
                     repair.get("sheet"), repair.get("filled"), repair.get("progress")
                 )
             )
+        # اگر فرمول‌های colorcode مقدار ذخیره‌شده نداشته باشند (فایل با ابزاری
+        # بیرون از اکسل ذخیره شده)، همان محاسبه از «خروجی کندو» انجام می‌شود.
+        healed: Dict[str, Any] = {}
+        try:
+            healed = heal_colorcode_rows(workbook, target, raw_rows)
+        except Exception as exc:
+            log_event(f"بازسازی مقادیر فرمولی colorcode ممکن نشد: {exc}")
+            healed = {}
     finally:
         try:
             workbook.close()
@@ -5650,6 +6249,12 @@ def parse_workbook_bytes(
             f"ستون‌های شناسایی/درصد از شیت «{repair.get('sheet')}» همان فایل بازسازی شد"
         )
         source_kind = source_kind or "excel"
+    if healed.get("filled"):
+        source_note = (source_note + " • " if source_note else "") + (
+            f"مقادیر فرمولی colorcode از شیت «{healed.get('sheet')}» حساب شد "
+            f"({fa(int(healed.get('filled') or 0))} ردیف، "
+            f"{fa(int(healed.get('marks') or 0))} علامت)"
+        )
     kind = source_kind or (
         "generated" if inspect_workbook_bytes(blob).get("generated") else "excel"
     )
@@ -5664,6 +6269,8 @@ def parse_workbook_bytes(
         source_kind=kind,
     )
     data.repaired = int(repair.get("filled") or 0)
+    if healed.get("filled"):
+        data.computed_rows = int(healed.get("filled") or 0)
     return data
 
 
@@ -5797,7 +6404,13 @@ def parse_workbook_rows(
 
     if records and not any(any(record.flags.values()) for record in records):
         metric_note = (
-            "در داده‌های فعلی هیچ علامت وضعیت (M) نیست؛ کارت‌های وضعیت صفر می‌مانند."
+            "در داده‌های فعلی هیچ علامت وضعیت (M) نیست؛ کارت‌های وضعیت صفر می‌مانند.\n"
+            "اگر این فایل را برنامه ساخته، فایل ناقص است: دکمهٔ «بارگذاری فایل ۰۱ و "
+            "به‌روزرسانی» را بزنید تا نسخهٔ سالم ساخته شود."
+        )
+        warnings.append(
+            "این کتاب کار هیچ علامت وضعیت (`M`) ندارد؛ کارت‌های وضعیت خالی می‌مانند. "
+            "برای ساختن نسخهٔ درست، فایل ۰۱ سامانه را دوباره بارگذاری کنید."
         )
         log_event("هیچ علامت وضعیت M در داده‌ها پیدا نشد")
 
@@ -8612,6 +9225,43 @@ class SystemCopyWorker(QThread):
             stem = Path(str(base.get("filename") or "workbook.xlsx")).stem
             out_path = data_dir() / f"{stem}-به‌روز-{stamp}.xlsx"
             info = prepare_system_copy(plan, base["blob"], str(out_path))
+            if not info.get("verified"):
+                # کتاب کار پایه شیت «خروجی کندو» نداشت یا داده در آن ننشست؛
+                # نتیجه‌اش داشبورد صفر است. پس یک کتاب کار کامل از خود فایل ۰۱
+                # ساخته می‌شود و همان مسیر یک بار دیگر اجرا می‌شود.
+                log_event(
+                    "فایل ساخته‌شده علامت/درصد ندارد (شیت خروجی: «{}»)؛ کتاب کار "
+                    "کامل از فایل ۰۱ ساخته می‌شود.".format(
+                        info.get("export_sheet") or "—")
+                )
+                built = build_workbook_from_system(self.source_path)
+                built_blob = built.get("blob") or b""
+                if not built_blob:
+                    raise ExcelDataError(
+                        "کتاب کار پایه قابل استفاده نبود و ساخت کتاب کار از فایل ۰۱ "
+                        "هم نتیجه‌ای نداشت."
+                    )
+                plan = plan_system_update(self.source_path, built_blob,
+                                          sheet_name=str(built.get("sheet_name")
+                                                         or SHEET_NAME_DEFAULT))
+                base = dict(base)
+                base["blob"] = built_blob
+                base["filename"] = f"{Path(str(self.source_path)).stem}.xlsx"
+                base["base_source"] = "built"
+                base["base_path"] = ""
+                base["base_workbook_id"] = 0
+                target_sheet = plan.sheet_name
+                stamp = datetime.now().strftime("%Y%m%d-%H%M")
+                out_path = data_dir() / f"{Path(str(base['filename'])).stem}-به‌روز-{stamp}.xlsx"
+                info = prepare_system_copy(plan, base["blob"], str(out_path))
+                if not info.get("verified"):
+                    raise ExcelDataError(
+                        "نسخهٔ به‌روز ساخته شد اما هیچ علامت وضعیت یا درصدی نداشت؛ "
+                        "برای همین جای دادهٔ فعلی ننشست (داشبورد صفر نمی‌شود).\n\n"
+                        "فایل پایه: «" + str(base.get("filename") or "—") + "»\n"
+                        "اگر مطمئنید فایل ۰۱ درست است، کتاب کار اصلی (فایلی که شیت "
+                        "«خروجی کندو» دارد) را یک بار در برنامه بارگذاری کنید."
+                    )
             log_event(
                 f"نسخهٔ به‌روز ساخته شد: {info['output_path']} — "
                 f"{plan.matched_rows} ردیف، {info['written_cells']} سلول، "
@@ -8662,6 +9312,10 @@ class SystemCopyWorker(QThread):
                 "base_filename": base.get("filename"),
                 "base_workbook_id": int(base.get("base_workbook_id") or 0),
                 "recalculated": recalculated,
+                "verified": bool(info.get("verified")),
+                "verified_marks": int(info.get("verified_marks") or 0),
+                "verified_percent": info.get("verified_percent"),
+                "export_sheet": str(info.get("export_sheet") or ""),
                 "cleaned_marks": info.get("cleaned_marks", 0),
                 "healthy": healthy,
                 "imported": imported,
@@ -14553,7 +15207,8 @@ class MainWindow(QMainWindow):
         if imported and not imported.get("error"):
             self._on_auto_update_done(result, imported)
             return
-        if result.get("recalculated") and result.get("healthy") and output:
+        if (result.get("recalculated") and result.get("healthy") and output
+                and result.get("verified", True)):
             self._on_local_copy_ready(result, imported)
             return
         self.settings.set_status(
