@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""داشبورد قراردادهای مهر خلیج فارس — نسخهٔ ۴٫۰٫۰ (بازنویسی کامل از صفر)
+"""داشبورد قراردادهای مهر خلیج فارس — نسخهٔ ۴٫۱٫۰ (ظاهر تازه + اصلاح کارت‌های صفر)
 
 یک فایل، دو چیز:
   ۱) داشبوردِ قراردادها از روی کتاب کار `colorcode`؛
@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 warnings.filterwarnings("ignore", message=".*marked as a date.*")
 
 APP_NAME = "داشبورد قراردادهای مهر خلیج فارس"
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.0"
 DATA_FOLDER_NAME = "DATANEW"
 DEFAULT_SHEET = "colorcode"
 EXPORT_SHEET_TITLE = "خروجی کندو"
@@ -57,13 +57,14 @@ except Exception:  # pragma: no cover
 
 try:
     from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
-    from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
+    from PyQt5.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient,
+                             QPainter, QPen)
     from PyQt5.QtWidgets import (
         QAbstractItemView, QApplication, QComboBox, QDialog, QFileDialog, QFrame,
         QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
         QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
         QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-        QVBoxLayout, QWidget,
+        QVBoxLayout, QWidget, QGraphicsDropShadowEffect,
     )
     QT_READY = True
     QT_ERROR = ""
@@ -90,6 +91,51 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def guess_workbooks(limit: int = 4, strong_only: bool = False) -> List[str]:
+    """کتاب کارهای احتمالی نزدیک برنامه و دسکتاپ را پیدا می‌کند."""
+    home = Path.home()
+    folders: List[Path] = []
+    for candidate in (app_dir(), data_root(), home / "Desktop" / "aa",
+                      home / "Desktop", home / "Downloads", home / "Documents"):
+        try:
+            if candidate.is_dir() and candidate not in folders:
+                folders.append(candidate)
+        except Exception:
+            continue
+    scores = {"f.o.c": 6, "mehr": 5, "colorcode": 5, "contract-info": 4,
+              "کندو": 3, "02": 2, "01": 2}
+    found: List[Tuple[int, float, str]] = []
+    seen = set()
+    for folder in folders:
+        try:
+            entries = list(folder.glob("*.xls*"))
+        except Exception:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name.startswith("~$") or name in seen:
+                continue
+            folded = name.lower()
+            score = 0
+            for key, value in scores.items():
+                if key in folded:
+                    score = max(score, value)
+            if not score:
+                continue
+            try:
+                if entry.stat().st_size < 20000:
+                    continue
+                stamp = entry.stat().st_mtime
+            except Exception:
+                continue
+            if strong_only and score < 5:
+                continue
+            seen.add(name)
+            found.append((score, stamp, str(entry)))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in found[:limit]]
 
 
 def default_data_root(windows: Optional[bool] = None) -> Path:
@@ -180,16 +226,29 @@ def write_error_log(detail: str) -> Optional[Path]:
 _PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 
+def _persian_number(text: str) -> str:
+    """رقم‌ها و جداکننده‌ها را فارسی می‌کند: ۱٬۱۸۷ و ۹۶٫۲۸."""
+    return (text.replace(",", "\u066c").replace(".", "\u066b")
+            .translate(_PERSIAN_DIGITS))
+
+
 def fa(value: Any) -> str:
     """عدد/متن را با رقم‌های فارسی برمی‌گرداند."""
     if isinstance(value, bool):
         return "بله" if value else "خیر"
     if isinstance(value, int):
-        return f"{value:,}".translate(_PERSIAN_DIGITS)
+        return _persian_number(f"{value:,}")
     if isinstance(value, float):
         text = f"{value:,.2f}".rstrip("0").rstrip(".")
-        return text.translate(_PERSIAN_DIGITS)
+        if text.endswith("."):
+            text = text[:-1]
+        return _persian_number(text)
     return str(value if value is not None else "").translate(_PERSIAN_DIGITS)
+
+
+def fa_percent(value: float) -> str:
+    """درصد با یک رقم اعشار در صورت لزوم: ۹۶٫۲۸٪."""
+    return f"{fa(round(float(value), 2))}\u066a"
 
 
 def txt(value: Any) -> str:
@@ -209,9 +268,11 @@ def num(value: Any) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    text = str(value).strip().translate(
-        str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-    )
+    text = str(value).strip()
+    if text.startswith("="):
+        # سلول فرمول است و مقدار ذخیره‌شده ندارد؛ عدد نیست.
+        return None
+    text = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
     if not text:
         return None
     percent = text.endswith("%") or text.endswith("٪")
@@ -463,6 +524,8 @@ FLAG_DEFS: List[Tuple[str, str, int]] = [
     ("financial", "تسویهٔ مالی نهایی", 30),
 ]
 FLAG_LABELS = {key: label for key, label, _ in FLAG_DEFS}
+# جای هر کارت در فهرست ۲۳ مدرک (ستون ۱۱ = اولین مدرک)
+FLAG_DOC_INDEX = [column - 11 for _key, _label, column in FLAG_DEFS]
 
 
 @dataclass
@@ -626,9 +689,140 @@ def open_rows(path_or_blob: Any, sheet_hint: str = "") -> Tuple[List[str], str, 
     return names, target, rows
 
 
+def read_export_values(path_or_blob: Any, dashboard_name: str = ""
+                       ) -> Dict[str, Any]:
+    """مقدارهای محاسبه‌شدهٔ شیت «خروجی کندو» را می‌خواند.
+
+    برای کتاب کارهایی لازم است که ستون‌هایشان فرمول دارد و اکسل مقدار
+    ذخیره‌شده (cache) ندارد؛ آن‌وقت همین داده‌ها با قاعدهٔ خود شیت colorcode
+    به OK/M تبدیل می‌شوند تا کارت‌ها صفر نشوند.
+
+    خروجی: `by_no`، `by_id`، `rows` (به ترتیب ردیف‌ها) و `percent` (میانگین).
+    """
+    result: Dict[str, Any] = {"by_no": {}, "by_id": {}, "rows": [], "percent": None,
+                              "sheet": ""}
+    if openpyxl is None:
+        return result
+    source: Any = (io.BytesIO(bytes(path_or_blob))
+                   if isinstance(path_or_blob, (bytes, bytearray)) else str(path_or_blob))
+    try:
+        workbook = openpyxl.load_workbook(source, data_only=True, read_only=True)
+    except Exception:
+        return result
+    try:
+        name = ""
+        for candidate in workbook.sheetnames:
+            if norm(candidate) != norm(dashboard_name) \
+                    and norm(candidate) == norm(EXPORT_SHEET_TITLE):
+                name = str(candidate)
+                break
+        if not name:
+            name = _pick_export_sheet(workbook, dashboard_name)
+        if not name:
+            return result
+        result["sheet"] = name
+        rows = _sheet_rows(workbook[name], max_rows=20000, max_cols=110)
+    except Exception:
+        return result
+    finally:
+        try:
+            workbook.close()
+        except Exception:
+            pass
+    header_row = -1
+    for index, row in enumerate(rows[:12]):
+        if _header_match_count(row, DOC_NAMES) >= 8:
+            header_row = index
+            break
+    if header_row < 0:
+        return result
+    header = rows[header_row]
+    doc_start = _doc_start(header)
+    no_col = _find_column(header, SOURCE_HINTS["no"])
+    id_col = _find_column(header, SOURCE_HINTS["id"])
+    company_col = _find_column(header, SOURCE_HINTS["company"])
+    subject_col = _find_column(header, SOURCE_HINTS["subject"])
+    employer_col = _find_column(header, SOURCE_HINTS["employer"])
+    type_col = _find_column(header, SOURCE_HINTS["type"])
+    percent_col = doc_start + 24
+    code_cols: List[int] = []
+    for offset in range(len(DOC_NAMES)):
+        found = -1
+        needle = norm(DOC_NAMES[offset])
+        for index, value in enumerate(header):
+            if index >= doc_start + 25 and norm(value) == needle:
+                found = index
+                break
+        code_cols.append(found)
+
+    def cell(row: Sequence[Any], column: int) -> Any:
+        if column < 0 or column >= len(row):
+            return None
+        return row[column]
+
+    by_no: Dict[str, Dict[str, Any]] = {}
+    by_id: Dict[str, Dict[str, Any]] = {}
+    ordered: List[Dict[str, Any]] = []
+    percents: List[float] = []
+    for row in rows[header_row + 1:]:
+        if not row or all(blank(value) for value in row[:8]):
+            continue
+        docs = [cell(row, doc_start + offset) for offset in range(len(DOC_NAMES))]
+        percent = num(cell(row, percent_col))
+        if percent is not None and percent > 0:
+            percents.append(percent)
+        record = {
+            "no": txt(cell(row, no_col)) if no_col >= 0 else "",
+            "id": txt(cell(row, id_col)) if id_col >= 0 else "",
+            "company": txt(cell(row, company_col)) if company_col >= 0 else "",
+            "subject": txt(cell(row, subject_col)) if subject_col >= 0 else "",
+            "employer": txt(cell(row, employer_col)) if employer_col >= 0 else "",
+            "type": txt(cell(row, type_col)) if type_col >= 0 else "",
+            "docs": docs,
+            "percent": percent,
+            "codes": [req_code(cell(row, column)) if column >= 0 else ""
+                      for column in code_cols],
+        }
+        ordered.append(record)
+        no_key = key_of(record["no"])
+        id_key = key_of(record["id"])
+        if no_key:
+            by_no.setdefault(no_key, record)
+        if id_key:
+            by_id.setdefault(id_key, record)
+    result["by_no"] = by_no
+    result["by_id"] = by_id
+    result["rows"] = ordered
+    result["percent"] = (sum(percents) / len(percents)) if percents else None
+    return result
+
+
+def _requirement_columns(header: Sequence[Any]) -> List[int]:
+    """ستون‌های AL..BH (کد الزام هر مدرک) در شیت colorcode، اگر وجود داشته باشند."""
+    columns: List[int] = []
+    for offset in range(len(DOC_NAMES)):
+        found = -1
+        needle = norm(DOC_NAMES[offset])
+        for index, value in enumerate(header):
+            if index < 35 or not norm(value):
+                continue
+            if norm(value) == needle:
+                found = index
+                break
+        columns.append(found)
+    return columns
+
+
 def parse_workbook(path_or_blob: Any, sheet_hint: str = "",
                    source_name: str = "", workbook_id: int = 0) -> Dashboard:
-    """کتاب کار را به یک داشبورد کامل تبدیل می‌کند."""
+    """کتاب کار را به یک داشبورد کامل تبدیل می‌کند.
+
+    ستون‌های مدرک (L..AH) در بیشتر کتاب کارها متن `OK`/`M` دارند و همان‌طور
+    خوانده می‌شوند. اگر جای متن، عدد باشد (کتاب کاری که فرمول‌هایش ذخیره نشده
+    یا نسخه‌های قدیمی که شمارش خام را نوشته‌اند)، همان قاعدهٔ شیت `colorcode`
+    دوباره اجرا می‌شود: مدرکِ لازم و ثبت‌نشده با پیشرفت بالای صفر → `M`،
+    وگرنه `OK`. این‌طور کارت‌ها هرگز صفر نمی‌شوند.
+    """
     names, sheet, rows = open_rows(path_or_blob, sheet_hint)
     if len(rows) < 4:
         raise ValueError("ساختار شیت غیرمنتظره است (کمتر از ۴ ردیف).")
@@ -638,8 +832,6 @@ def parse_workbook(path_or_blob: Any, sheet_hint: str = "",
             row.extend([None] * (width - len(row)))
 
     progress = num(rows[1][36]) if len(rows[1]) > 36 else None
-    if progress is None:
-        progress = _percent_from_rows(rows)
     header = rows[2] if len(rows) > 2 else []
     doc_columns: List[int] = []
     doc_titles: List[str] = []
@@ -648,33 +840,117 @@ def parse_workbook(path_or_blob: Any, sheet_hint: str = "",
         title = txt(header[column]) if column < len(header) else ""
         doc_columns.append(column)
         doc_titles.append(title or DOC_NAMES[offset])
+    requirement_columns = _requirement_columns(header)
+
+    data_rows = rows[3:]
+    numeric_cells = 0
+    mark_cells = 0
+    for row in data_rows:
+        for column in doc_columns:
+            value = row[column] if column < len(row) else None
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric_cells += 1
+            elif is_mark(value):
+                mark_cells += 1
+    use_export = numeric_cells > mark_cells
+
+    export: Dict[str, Any] = {}
+    export_rows: List[Dict[str, Any]] = []
+    if use_export:
+        export = read_export_values(path_or_blob, sheet)
+        export_rows = list(export.get("rows") or [])
+        if progress is None:
+            progress = export.get("percent")
+    if progress is None:
+        progress = _percent_from_rows(rows)
+    positional = (len(export_rows) == len(data_rows))
 
     contracts: List[Contract] = []
     for index in range(3, len(rows)):
         row = rows[index]
         if all(blank(row[column]) for column in range(min(35, len(row)))):
             continue
-        docs = [txt(row[column]).upper() if column < len(row) else ""
-                for column in doc_columns]
-        counts = [row[column] if column < len(row) else None for column in doc_columns]
-        flags = {}
-        for key, _label, column in FLAG_DEFS:
-            flags[key] = is_mark(row[column] if column < len(row) else None)
+        raw = [row[column] if column < len(row) else None for column in doc_columns]
+        contract_no = txt(row[4]) if len(row) > 4 else ""
+        contract_id = txt(row[2]) if len(row) > 2 else ""
+        contract_type = txt(row[5]) if len(row) > 5 else ""
+        record = ((export.get("by_no") or {}).get(key_of(contract_no))
+                  or (export.get("by_id") or {}).get(key_of(contract_id))
+                  or {})
+        if not record and positional and index - 3 < len(export_rows):
+            # ستون‌های شناسایی در رنگ‌کد فرمول دارند و مقدار ذخیره‌شده ندارند؛
+            # ردیف‌ها یک‌به‌یک با شیت «خروجی کندو» هم‌تراز هستند.
+            record = export_rows[index - 3]
+            contract_no = contract_no or txt(record.get("no"))
+            contract_id = contract_id or txt(record.get("id"))
+            contract_type = contract_type or txt(record.get("type"))
+
+        percent_row = num(row[36]) if len(row) > 36 else None
+        if percent_row is None:
+            percent_row = num(record.get("percent")) if record else None
+        if percent_row is None:
+            percent_row = progress
+
+        codes = requirements_for(contract_type, MATRIX)
+        if not contract_type and record.get("type"):
+            contract_type = txt(record.get("type"))
+            codes = requirements_for(contract_type, MATRIX)
+        if len(codes) < len(DOC_NAMES) and record.get("codes"):
+            export_codes = [req_code(item) for item in record["codes"]]
+            if sum(1 for item in export_codes if item) >= len(DOC_NAMES):
+                codes = export_codes
+        if len(codes) < len(DOC_NAMES):
+            column_codes = [req_code(row[column]) if 0 <= column < len(row) else ""
+                            for column in requirement_columns]
+            if sum(1 for item in column_codes if item) >= len(DOC_NAMES):
+                codes = column_codes
+        export_docs = record.get("docs") or []
+
+        values: List[Optional[float]] = []
+        for offset, value in enumerate(raw):
+            number = num(value)
+            if number is None and offset < len(export_docs):
+                number = num(export_docs[offset])
+            values.append(number)
+        combos = combos_for(values, codes) if len(codes) >= len(DOC_NAMES) else [""] * len(DOC_NAMES)
+
+        docs: List[str] = []
+        for offset, value in enumerate(raw):
+            if is_mark(value):
+                docs.append("M")
+            elif isinstance(value, str) and value.strip() and num(value) is None:
+                docs.append("OK")
+            else:
+                code = codes[offset] if offset < len(codes) else ""
+                docs.append(doc_state(values[offset], code, combos[offset], percent_row))
+
+        flags = {key: (docs[position] == "M" if position < len(docs) else False)
+                 for key, position in zip(FLAG_LABELS, FLAG_DOC_INDEX)}
+        company = txt(row[3]) if len(row) > 3 else ""
+        subject = txt(row[6]) if len(row) > 6 else ""
+        employer = txt(row[7]) if len(row) > 7 else ""
+        if record:
+            company = company or txt(record.get("company"))
+            subject = subject or txt(record.get("subject"))
+            employer = employer or txt(record.get("employer"))
         contracts.append(Contract(
             excel_row=index + 1,
-            contract_no=txt(row[4]) if len(row) > 4 else "",
-            contract_id=txt(row[2]) if len(row) > 2 else "",
-            company=txt(row[3]) if len(row) > 3 else "",
-            subject=txt(row[6]) if len(row) > 6 else "",
-            contract_type=txt(row[5]) if len(row) > 5 else "",
-            employer=txt(row[7]) if len(row) > 7 else "",
-            percent=num(row[36]) if len(row) > 36 else None,
+            contract_no=contract_no,
+            contract_id=contract_id,
+            company=company,
+            subject=subject,
+            contract_type=contract_type,
+            employer=employer,
+            percent=percent_row,
             status=txt(row[35]) if len(row) > 35 else "",
             problem=txt(row[34]) if len(row) > 34 else "",
             docs=docs,
-            counts=counts,
+            counts=raw,
             flags=flags,
         ))
+    note = f"شیت‌های کتاب کار: {'، '.join(names)}"
+    if use_export:
+        note += " — محاسبه از شیت «خروجی کندو»"
     return Dashboard(
         contracts=contracts,
         source_name=source_name or (Path(str(path_or_blob)).name
@@ -686,7 +962,7 @@ def parse_workbook(path_or_blob: Any, sheet_hint: str = "",
         loaded_at=datetime.now(),
         workbook_id=workbook_id,
         doc_titles=doc_titles,
-        note=f"شیت‌های کتاب کار: {'، '.join(names)}",
+        note=note,
     )
 
 
@@ -704,6 +980,14 @@ def workbook_mark_count(path_or_blob: Any, sheet_hint: str = "") -> Dict[str, An
     progress = num(rows[1][36]) if len(rows) > 1 and len(rows[1]) > 36 else None
     if progress is None:
         progress = _percent_from_rows(rows)
+    if marks == 0 or progress is None:
+        try:
+            parsed = parse_workbook(path_or_blob, sheet_hint)
+            marks = marks or parsed.open_documents
+            if progress is None:
+                progress = parsed.progress
+        except Exception:
+            pass
     return {
         "ok": True, "marks": marks, "sheet": sheet,
         "percent": (round(progress * 100, 2) if progress is not None else None),
@@ -1698,6 +1982,35 @@ def load_workbook_blob(workbook_id: int) -> bytes:
     return bytes(row["blob"])
 
 
+def resave_dashboard(dashboard: Dashboard, workbook_id: int) -> None:
+    """ردیف‌های یک کتاب کار را با دادهٔ تازه (پس از اصلاح محاسبه) بازنویسی می‌کند."""
+    rows = []
+    for item in dashboard.contracts:
+        rows.append((
+            workbook_id, item.excel_row, item.contract_no, item.contract_id,
+            item.company, item.subject, item.contract_type, item.employer,
+            item.percent, item.status,
+            json.dumps(item.docs, ensure_ascii=False),
+            json.dumps([txt(value) for value in item.counts], ensure_ascii=False),
+            _flags_mask(item.flags), item.problem,
+        ))
+    with connect_db() as connection:
+        connection.execute("DELETE FROM contracts WHERE workbook_id=?", (workbook_id,))
+        connection.executemany(
+            "INSERT OR REPLACE INTO contracts(workbook_id, excel_row, contract_no, "
+            "contract_id, company, subject, contract_type, employer, percent, status, "
+            "docs, counts, flags, problem) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        connection.execute("UPDATE workbooks SET rows=? WHERE id=?",
+                           (len(dashboard.contracts), workbook_id))
+        connection.commit()
+    log_line(
+        "داده‌های ذخیره‌شدهٔ کتاب کار {} با محاسبهٔ تازه بازنویسی شد: {} قرارداد، {} علامت.".format(
+            fa(workbook_id), fa(dashboard.total), fa(dashboard.open_documents))
+    )
+
+
 def load_dashboard(workbook_id: int = 0) -> Optional[Dashboard]:
     """داشبورد را از ردیف‌های ذخیره‌شده می‌سازد."""
     with connect_db() as connection:
@@ -1746,7 +2059,7 @@ def load_dashboard(workbook_id: int = 0) -> Optional[Dashboard]:
         if percent:
             percents.append(float(percent))
     progress = (sum(percents) / len(percents)) if percents else None
-    return Dashboard(
+    dashboard = Dashboard(
         contracts=contracts,
         source_name=str(meta["filename"]),
         sheet_name=str(meta["sheet"]),
@@ -1757,6 +2070,23 @@ def load_dashboard(workbook_id: int = 0) -> Optional[Dashboard]:
         note=f"دیتابیس داخلی — شناسهٔ {fa(int(meta['id']))}",
         doc_titles=list(DOC_NAMES),
     )
+    # اگر ردیف‌های قدیمی (نسخه‌های پیش از این اصلاح) بدون علامت ذخیره شده‌اند،
+    # همان کتاب کار دوباره خوانده می‌شود تا کارت‌ها صفر نمانند.
+    stale = setting_get("parsed_version", "") != APP_VERSION
+    if (stale or dashboard.open_documents == 0) and b"PK" == (meta["blob"] or b"")[:2]:
+        try:
+            fresh = parse_workbook(bytes(meta["blob"]), str(meta["sheet"]),
+                                   str(meta["filename"]), int(meta["id"]))
+            if fresh.contracts and fresh.open_documents > 0:
+                resave_dashboard(fresh, int(meta["id"]))
+                fresh.note = f"دیتابیس داخلی — شناسهٔ {fa(int(meta['id']))} (بازخوانی‌شده)"
+                fresh.percent = (round(fresh.progress * 100, 2)
+                                 if fresh.progress is not None else None)
+                dashboard = fresh
+        except Exception as exc:
+            log_line(f"بازخوانی کتاب کار ذخیره‌شده ممکن نشد: {exc}")
+    setting_set("parsed_version", APP_VERSION)
+    return dashboard
 
 
 def list_workbooks() -> List[Dict[str, Any]]:
@@ -2037,18 +2367,20 @@ if QT_READY:
 
     THEMES = {
         "light": {
-            "bg": "#F1F2F9", "surface": "#FFFFFF", "surface2": "#F7F7FC",
-            "ink": "#171B26", "ink2": "#4E5566", "ink3": "#858B9C",
-            "brand": "#5A4FE0", "brand_soft": "#ECEAFF", "border": "#E2E4EF",
-            "ok": "#0E9F6E", "warn": "#C98A00", "danger": "#D64545",
-            "shadow": "#D8DAE8",
+            "bg": "#F3F4FA", "surface": "#FFFFFF", "surface2": "#F6F7FD",
+            "ink": "#141726", "ink2": "#525A70", "ink3": "#8A91A6",
+            "brand": "#5B4BE1", "brand2": "#8C7BFF", "brand_soft": "#EDEBFF",
+            "border": "#E5E7F2", "ok": "#0FA36B", "warn": "#D08B00",
+            "danger": "#DC4B3E", "shadow": "#DFE2EF", "on_hero": "#FFFFFF",
+            "hero1": "#5B4BE1", "hero2": "#8A76F5", "track": "#EEF0F9",
         },
         "dark": {
-            "bg": "#12141C", "surface": "#1B1E29", "surface2": "#222634",
-            "ink": "#F2F3F8", "ink2": "#B9BFD0", "ink3": "#848CA0",
-            "brand": "#8C83FF", "brand_soft": "#2A2947", "border": "#2C3040",
-            "ok": "#3DD598", "warn": "#F2C14E", "danger": "#FF7B7B",
-            "shadow": "#0B0D13",
+            "bg": "#0F1118", "surface": "#181B26", "surface2": "#20242F",
+            "ink": "#F2F3F8", "ink2": "#B6BDD0", "ink3": "#7F8798",
+            "brand": "#8B7DFF", "brand2": "#A99BFF", "brand_soft": "#282747",
+            "border": "#272B39", "ok": "#3DD598", "warn": "#F2C14E",
+            "danger": "#FF7B7B", "shadow": "#0A0C12", "on_hero": "#FFFFFF",
+            "hero1": "#3B32A8", "hero2": "#6C57CE", "track": "#232838",
         },
     }
 
@@ -2058,8 +2390,28 @@ if QT_READY:
         font.setBold(bold)
         return font
 
+    def _mix(first: str, second: str, ratio: float) -> QColor:
+        """دو رنگ را مخلوط می‌کند (ratio=۰ → اول، ۱ → دوم)."""
+        a, b = QColor(first), QColor(second)
+        ratio = max(0.0, min(1.0, float(ratio)))
+        return QColor(
+            int(a.red() + (b.red() - a.red()) * ratio),
+            int(a.green() + (b.green() - a.green()) * ratio),
+            int(a.blue() + (b.blue() - a.blue()) * ratio),
+        )
+
+    def _shadow(widget: QWidget, color: str, blur: int = 26, dy: int = 6,
+                alpha: int = 28) -> None:
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(blur)
+        effect.setOffset(0, dy)
+        shadow_color = QColor(color)
+        shadow_color.setAlpha(alpha)
+        effect.setColor(shadow_color)
+        widget.setGraphicsEffect(effect)
+
     class Card(QFrame):
-        """کارت سفید گرد با عنوان."""
+        """کارت سفید گرد با عنوان و زیرعنوان."""
 
         def __init__(self, title: str = "", subtitle: str = "",
                      colors: Optional[Dict[str, str]] = None, parent=None) -> None:
@@ -2075,10 +2427,10 @@ if QT_READY:
                 self.title_label = QLabel(title)
                 self.title_label.setFont(make_font(10, True))
                 row.addWidget(self.title_label)
-                row.addStretch(1)
                 self.subtitle_label = QLabel(subtitle)
                 self.subtitle_label.setFont(make_font(8))
                 row.addWidget(self.subtitle_label)
+                row.addStretch(1)
                 self.body.addLayout(row)
             self.apply_colors(self.colors)
 
@@ -2086,56 +2438,127 @@ if QT_READY:
             self.colors = colors
             self.setStyleSheet(
                 f"QFrame#Card {{ background: {colors['surface']};"
-                f" border: 1px solid {colors['border']}; border-radius: 14px; }}"
+                f" border: 1px solid {colors['border']}; border-radius: 16px; }}"
                 f" QLabel {{ color: {colors['ink']}; background: transparent; }}"
             )
             if hasattr(self, "subtitle_label"):
                 self.subtitle_label.setStyleSheet(f"color: {colors['ink3']};")
 
     class StatCard(Card):
-        """کارت آمار: عنوان، عدد بزرگ، توضیح کوچک."""
+        """کارت آمار: عنوان، عدد بزرگ، توضیح کوچک و نوار رنگی کنار."""
 
         def __init__(self, label: str, colors: Dict[str, str], accent: str = "",
                      parent=None) -> None:
             super().__init__("", "", colors, parent)
-            self.body.setSpacing(2)
+            self.body.setSpacing(3)
+            self.accent = accent or colors["brand"]
             self.caption = QLabel(label)
             self.caption.setFont(make_font(8))
             self.value = QLabel("—")
-            self.value.setFont(make_font(17, True))
+            self.value.setFont(make_font(19, True))
             self.hint = QLabel("")
             self.hint.setFont(make_font(7))
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(0)
+            self.bar.setTextVisible(False)
+            self.bar.setFixedHeight(5)
             self.body.addWidget(self.caption)
             self.body.addWidget(self.value)
             self.body.addWidget(self.hint)
-            self.accent = accent or colors["brand"]
+            self.body.addSpacing(2)
+            self.body.addWidget(self.bar)
             self.apply_colors(colors)
+
+        def set_accent(self, accent: str) -> None:
+            self.accent = accent
+            self.apply_colors(self.colors)
 
         def apply_colors(self, colors: Dict[str, str]) -> None:
             super().apply_colors(colors)
-            self.accent = getattr(self, "accent", colors["brand"]) or colors["brand"]
+            self.accent = getattr(self, "accent", "") or colors["brand"]
             if not hasattr(self, "caption"):
                 return
             self.caption.setStyleSheet(f"color: {colors['ink3']};")
             self.value.setStyleSheet(f"color: {self.accent};")
             self.hint.setStyleSheet(f"color: {colors['ink3']};")
+            self.bar.setStyleSheet(
+                f"QProgressBar {{ background: {colors['track']}; border-radius: 2px;"
+                f" border: none; }}"
+                f" QProgressBar::chunk {{ background: {self.accent}; border-radius: 2px; }}"
+            )
 
-        def set_value(self, value: str, hint: str = "") -> None:
+        def set_value(self, value: str, hint: str = "", ratio: float = 0.0) -> None:
             self.value.setText(value)
             self.hint.setText(hint)
+            self.bar.setValue(int(max(0.0, min(1.0, float(ratio or 0.0))) * 1000))
+
+    class StatusCard(QFrame):
+        """کارت کوچک وضعیت: نقطهٔ رنگی، عنوان، عدد و سهم از کل."""
+
+        def __init__(self, label: str, colors: Dict[str, str], accent: str = "",
+                     parent=None) -> None:
+            super().__init__(parent)
+            self.colors = colors
+            self.accent = accent or colors["brand"]
+            self.setObjectName("StatusCard")
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(13, 11, 13, 11)
+            layout.setSpacing(4)
+            top = QHBoxLayout()
+            top.setSpacing(6)
+            self.dot = QLabel("●")
+            self.dot.setFont(make_font(7))
+            self.label = QLabel(label)
+            self.label.setFont(make_font(8))
+            self.label.setWordWrap(True)
+            top.addWidget(self.dot)
+            top.addWidget(self.label, 1)
+            layout.addLayout(top)
+            self.value = QLabel("—")
+            self.value.setFont(make_font(15, True))
+            layout.addWidget(self.value)
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(0)
+            self.bar.setTextVisible(False)
+            self.bar.setFixedHeight(4)
+            layout.addWidget(self.bar)
+            self.apply_colors(colors)
+
+        def set_value(self, value: str, ratio: float = 0.0) -> None:
+            self.value.setText(value)
+            self.bar.setValue(int(max(0.0, min(1.0, float(ratio or 0.0))) * 1000))
+
+        def apply_colors(self, colors: Dict[str, str]) -> None:
+            self.colors = colors
+            self.setStyleSheet(
+                f"QFrame#StatusCard {{ background: {colors['surface2']};"
+                f" border: 1px solid {colors['border']}; border-radius: 12px; }}"
+                f" QLabel {{ background: transparent; border: none; }}"
+            )
+            self.dot.setStyleSheet(f"color: {self.accent};")
+            self.label.setStyleSheet(f"color: {colors['ink2']};")
+            self.value.setStyleSheet(f"color: {colors['ink']};")
+            self.bar.setStyleSheet(
+                f"QProgressBar {{ background: {colors['track']}; border: none;"
+                f" border-radius: 2px; }}"
+                f" QProgressBar::chunk {{ background: {self.accent}; border-radius: 2px; }}"
+            )
 
     class BarList(QWidget):
-        """نمودار میله‌ای افقی ساده با برچسب فارسی."""
+        """نمودار میله‌ای افقی با میله‌های گرد و مقدار."""
 
         def __init__(self, colors: Dict[str, str], parent=None) -> None:
             super().__init__(parent)
             self.colors = colors
             self.items: List[Tuple[str, int]] = []
-            self.setMinimumHeight(120)
+            self.setMinimumHeight(150)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         def set_items(self, items: Sequence[Tuple[str, int]]) -> None:
             self.items = list(items)
+            self.setMinimumHeight(max(90, 30 * max(1, len(self.items))))
             self.update()
 
         def apply_colors(self, colors: Dict[str, str]) -> None:
@@ -2148,81 +2571,367 @@ if QT_READY:
             colors = self.colors
             if not self.items:
                 painter.setPen(QPen(QColor(colors["ink3"])))
-                painter.drawText(self.rect(), Qt.AlignCenter, "داده‌ای نیست")
+                painter.setFont(make_font(9))
+                painter.drawText(self.rect(), Qt.AlignCenter, "داده‌ای برای نمایش نیست")
                 return
-            top = 6
-            row_height = max(22, int((self.height() - 12) / max(1, len(self.items))))
-            label_width = 118
+            row_height = max(24, min(38, int((self.height() - 8) / max(1, len(self.items)))))
+            label_width = min(150, max(88, int(self.width() * 0.34)))
+            value_width = 46
+            top = 4
             maximum = max(1, max(value for _label, value in self.items))
+            metrics = QFontMetrics(make_font(8))
             for index, (label, value) in enumerate(self.items):
                 y = top + index * row_height
                 painter.setPen(QPen(QColor(colors["ink2"])))
                 painter.setFont(make_font(8))
-                painter.drawText(6, y, label_width, row_height - 6,
-                                 int(Qt.AlignRight | Qt.AlignVCenter), label[:38])
-                bar_left = label_width + 10
-                bar_width = max(2, self.width() - bar_left - 56)
+                text = metrics.elidedText(str(label), Qt.ElideLeft, label_width - 4)
+                painter.drawText(self.width() - label_width, y, label_width - 4,
+                                 row_height - 8, int(Qt.AlignRight | Qt.AlignVCenter), text)
+                bar_right = self.width() - label_width - 8
+                bar_left = value_width + 6
+                bar_width = max(2, bar_right - bar_left)
                 painter.setPen(Qt.NoPen)
-                painter.setBrush(QBrush(QColor(colors["surface2"])))
-                painter.drawRoundedRect(bar_left, y + 4, bar_width, row_height - 12, 5, 5)
-                filled = int(bar_width * (value / maximum))
-                painter.setBrush(QBrush(QColor(colors["brand"])))
-                painter.drawRoundedRect(bar_left, y + 4, max(4, filled),
-                                        row_height - 12, 5, 5)
-                painter.setPen(QPen(QColor(colors["ink2"])))
-                painter.drawText(bar_left + bar_width + 6, y, 46, row_height - 6,
+                painter.setBrush(QBrush(QColor(colors["track"])))
+                painter.drawRoundedRect(bar_left, y + 5, bar_width, row_height - 16, 4, 4)
+                filled = int(bar_width * (value / maximum)) if maximum else 0
+                filled = max(3, filled)
+                gradient = QLinearGradient(bar_right, 0, bar_left, 0)
+                gradient.setColorAt(0.0, QColor(colors["brand"]))
+                gradient.setColorAt(1.0, QColor(colors["brand2"]))
+                painter.setBrush(QBrush(gradient))
+                painter.drawRoundedRect(bar_right - filled, y + 5, filled, row_height - 16, 4, 4)
+                painter.setPen(QPen(QColor(colors["ink"])))
+                painter.setFont(make_font(8, True))
+                painter.drawText(0, y, value_width, row_height - 8,
                                  int(Qt.AlignLeft | Qt.AlignVCenter), fa(value))
+
+    class Donut(QWidget):
+        """حلقهٔ درصد پیشرفت با عدد در مرکز."""
+
+        def __init__(self, colors: Dict[str, str], parent=None) -> None:
+            super().__init__(parent)
+            self.colors = colors
+            self.value = 0.0
+            self.caption = "پیشرفت"
+            self.setFixedSize(150, 150)
+
+        def set_value(self, value: float, caption: str = "پیشرفت") -> None:
+            self.value = max(0.0, min(100.0, float(value or 0.0)))
+            self.caption = caption
+            self.update()
+
+        def apply_colors(self, colors: Dict[str, str]) -> None:
+            self.colors = colors
+            self.update()
+
+        def paintEvent(self, event) -> None:  # noqa: N802
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            side = min(self.width(), self.height()) - 12
+            rect = self.rect().adjusted((self.width() - side) // 2,
+                                        (self.height() - side) // 2,
+                                        -(self.width() - side) // 2,
+                                        -(self.height() - side) // 2)
+            pen = QPen(QColor(255, 255, 255, 60), 11)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawArc(rect, 0, 360 * 16)
+            pen = QPen(QColor("#FFFFFF"), 11)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            span = int(-360 * 16 * self.value / 100.0)
+            painter.drawArc(rect, 90 * 16, span)
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.setFont(make_font(19, True))
+            painter.drawText(rect.adjusted(0, -8, 0, -8), Qt.AlignCenter,
+                             f"{fa(round(self.value, 2))}٪")
+            painter.setPen(QPen(QColor(255, 255, 255, 190)))
+            painter.setFont(make_font(8))
+            painter.drawText(rect.adjusted(0, 26, 0, 26), Qt.AlignCenter, self.caption)
+
+    class HeroCard(QFrame):
+        """کارت بزرگ بالای داشبورد با پس‌زمینهٔ گرادیانی."""
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self.colors = THEMES["light"]
+            self.setObjectName("Hero")
+            self.setMinimumHeight(178)
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(26, 20, 26, 20)
+            layout.setSpacing(20)
+
+            right = QVBoxLayout()
+            right.setSpacing(6)
+            self.title_label = QLabel("درصد پیشرفت کل قراردادها")
+            self.title_label.setFont(make_font(9))
+            self.value_label = QLabel("—")
+            self.value_label.setFont(make_font(30, True))
+            self.subtitle = QLabel("")
+            self.subtitle.setFont(make_font(9))
+            self.source = QLabel("")
+            self.source.setFont(make_font(8))
+            right.addWidget(self.title_label)
+            right.addWidget(self.value_label)
+            right.addWidget(self.subtitle)
+            right.addWidget(self.source)
+            right.addStretch(1)
+
+            middle = QVBoxLayout()
+            middle.setSpacing(10)
+            middle.addStretch(1)
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 1000)
+            self.bar.setTextVisible(False)
+            self.bar.setFixedHeight(9)
+            middle.addWidget(self.bar)
+            self.legend = QLabel("")
+            self.legend.setFont(make_font(8))
+            middle.addWidget(self.legend)
+            middle.addStretch(1)
+
+            self.donut = Donut(self.colors)
+
+            layout.addLayout(right, 3)
+            layout.addLayout(middle, 4)
+            layout.addWidget(self.donut, 0, Qt.AlignVCenter)
+
+        def set_data(self, percent: Optional[float], total: int, marks: int,
+                     incomplete: int, source: str) -> None:
+            value = float(percent or 0.0)
+            self.value_label.setText(f"{fa(round(value, 2))}٪")
+            self.subtitle.setText(
+                f"{fa(total)} قرارداد  •  {fa(marks)} سند باز  •  {fa(incomplete)} قرارداد ناقص"
+            )
+            self.source.setText(source)
+            self.bar.setValue(int(max(0.0, min(100.0, value)) * 10))
+            self.legend.setText(
+                f"میانگین ستون درصد پیشرفت — {fa(marks)} مدرک لازمِ ثبت‌نشده"
+                if marks else "همهٔ مدارک لازم ثبت شده‌اند"
+            )
+            self.donut.set_value(value)
+
+        def clear(self) -> None:
+            self.value_label.setText("—")
+            self.subtitle.setText("هنوز داده‌ای بارگذاری نشده است")
+            self.source.setText("")
+            self.legend.setText("")
+            self.bar.setValue(0)
+            self.donut.set_value(0.0)
+
+        def apply_colors(self, colors: Dict[str, str]) -> None:
+            self.colors = colors
+            self.setStyleSheet(
+                f"QFrame#Hero {{ border-radius: 20px; border: none;"
+                f" background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
+                f" stop:0 {colors['hero1']}, stop:1 {colors['hero2']}); }}"
+                f" QFrame#Hero QLabel {{ background: transparent; border: none; }}"
+            )
+            self.title_label.setStyleSheet("color: rgba(255,255,255,0.80);")
+            self.value_label.setStyleSheet("color: #FFFFFF;")
+            self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
+            self.source.setStyleSheet("color: rgba(255,255,255,0.72);")
+            self.legend.setStyleSheet("color: rgba(255,255,255,0.78);")
+            self.bar.setStyleSheet(
+                "QProgressBar { background: rgba(255,255,255,0.22); border: none;"
+                " border-radius: 4px; }"
+                " QProgressBar::chunk { background: #FFFFFF; border-radius: 4px; }"
+            )
+            self.donut.apply_colors(colors)
+
+    class IconBadge(QWidget):
+        """نشان گرد با شکل سند؛ جای ایموجی که در Tahoma نیست."""
+
+        def __init__(self, colors: Dict[str, str], parent=None) -> None:
+            super().__init__(parent)
+            self.colors = colors
+
+        def apply_colors(self, colors: Dict[str, str]) -> None:
+            self.colors = colors
+            self.update()
+
+        def paintEvent(self, event) -> None:  # noqa: N802
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            colors = self.colors
+            side = min(self.width(), self.height()) - 4
+            left = (self.width() - side) // 2
+            top = (self.height() - side) // 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(colors["brand_soft"])))
+            painter.drawRoundedRect(left, top, side, side, side / 3, side / 3)
+            pen = QPen(QColor(colors["brand"]), max(2, side // 22))
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            inner = side * 0.30
+            painter.drawRoundedRect(int(left + inner), int(top + inner * 0.8),
+                                    int(side - inner * 2), int(side - inner * 1.7),
+                                    6, 6)
+            painter.drawLine(int(left + inner * 1.5), int(top + side * 0.50),
+                             int(left + side - inner * 1.5), int(top + side * 0.50))
+            painter.drawLine(int(left + inner * 1.5), int(top + side * 0.63),
+                             int(left + side - inner * 2.2), int(top + side * 0.63))
+
+    class EmptyState(QFrame):
+        """صفحهٔ شروع وقتی هیچ کتاب کاری در دیتابیس نیست."""
+
+        def __init__(self, colors: Dict[str, str], parent=None) -> None:
+            super().__init__(parent)
+            self.colors = colors
+            self.setObjectName("Empty")
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(40, 34, 40, 34)
+            layout.setSpacing(12)
+            layout.setAlignment(Qt.AlignCenter)
+
+            self.badge = IconBadge(colors)
+            self.badge.setFixedSize(74, 74)
+            self.title = QLabel("هنوز داده‌ای بارگذاری نشده است")
+            self.title.setFont(make_font(15, True))
+            self.title.setAlignment(Qt.AlignCenter)
+            self.text = QLabel(
+                "برای دیدن داشبورد، یکی از دو کار زیر را انجام دهید. "
+                "همهٔ داده‌ها در پوشهٔ D:\\DATANEW ذخیره می‌شوند و فایل اصلی شما "
+                "هیچ‌وقت تغییر نمی‌کند."
+            )
+            self.text.setFont(make_font(9))
+            self.text.setWordWrap(True)
+            self.text.setAlignment(Qt.AlignCenter)
+
+            buttons = QHBoxLayout()
+            buttons.setSpacing(10)
+            buttons.setAlignment(Qt.AlignCenter)
+            self.update_button = QPushButton("به‌روزرسانی از فایل ۰۱")
+            self.update_button.setObjectName("Primary")
+            self.update_button.setCursor(Qt.PointingHandCursor)
+            self.update_button.setMinimumHeight(40)
+            self.import_button = QPushButton("بارگذاری کتاب کار (colorcode)")
+            self.import_button.setCursor(Qt.PointingHandCursor)
+            self.import_button.setObjectName("Ghost")
+            self.import_button.setMinimumHeight(40)
+            buttons.addWidget(self.update_button)
+            buttons.addWidget(self.import_button)
+            badge_row = QHBoxLayout()
+            badge_row.setAlignment(Qt.AlignCenter)
+            badge_row.addWidget(self.badge)
+            layout.addLayout(badge_row)
+            layout.addWidget(self.title)
+            layout.addWidget(self.text)
+            layout.addSpacing(6)
+            layout.addLayout(buttons)
+
+            self.suggest_title = QLabel("فایل‌های پیداشده در این رایانه:")
+            self.suggest_title.setFont(make_font(8))
+            self.suggest_title.setAlignment(Qt.AlignCenter)
+            self.suggest_row = QHBoxLayout()
+            self.suggest_row.setSpacing(8)
+            self.suggest_row.setAlignment(Qt.AlignCenter)
+            self.suggest_host = QWidget()
+            self.suggest_host.setLayout(self.suggest_row)
+            layout.addSpacing(8)
+            layout.addWidget(self.suggest_title)
+            layout.addWidget(self.suggest_host)
+            self.suggest_title.hide()
+            self.suggest_host.hide()
+            self.apply_colors(colors)
+
+        def set_suggestions(self, paths: Sequence[str]) -> None:
+            while self.suggest_row.count():
+                item = self.suggest_row.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            paths = [str(path) for path in paths][:4]
+            for path in paths:
+                chip = QPushButton(Path(path).name)
+                chip.setObjectName("Chip")
+                chip.setCursor(Qt.PointingHandCursor)
+                chip.setToolTip(path)
+                chip.clicked.connect(lambda _checked=False, target=path: self.chosen.emit(target))
+                self.suggest_row.addWidget(chip)
+            visible = bool(paths)
+            self.suggest_title.setVisible(visible)
+            self.suggest_host.setVisible(visible)
+
+        chosen = None  # در DashboardPage مقدار می‌گیرد
+
+        def apply_colors(self, colors: Dict[str, str]) -> None:
+            self.colors = colors
+            self.setStyleSheet(
+                f"QFrame#Empty {{ background: {colors['surface']};"
+                f" border: 1px solid {colors['border']}; border-radius: 20px; }}"
+                f" QFrame#Empty QLabel {{ background: transparent; border: none; }}"
+                f" QPushButton#Primary {{ background: {colors['brand']}; color: white;"
+                f" border: none; border-radius: 11px; padding: 9px 22px;"
+                f" font-weight: bold; }}"
+                f" QPushButton#Primary:hover {{ background: {colors['brand2']}; }}"
+                f" QPushButton#Ghost {{ background: {colors['surface2']};"
+                f" color: {colors['ink']}; border: 1px solid {colors['border']};"
+                f" border-radius: 11px; padding: 9px 18px; }}"
+                f" QPushButton#Ghost:hover {{ background: {colors['brand_soft']}; }}"
+                f" QPushButton#Chip {{ background: {colors['brand_soft']};"
+                f" color: {colors['brand']}; border: none; border-radius: 9px;"
+                f" padding: 6px 12px; }}"
+            )
+            self.title.setStyleSheet(f"color: {colors['ink']};")
+            self.text.setStyleSheet(f"color: {colors['ink2']};")
+            self.suggest_title.setStyleSheet(f"color: {colors['ink3']};")
+            if hasattr(self, "badge"):
+                self.badge.apply_colors(colors)
 
     class DashboardPage(QWidget):
         """صفحهٔ داشبورد: درصد کل، کارت‌ها و توزیع‌ها."""
+
+        import_requested = pyqtSignal()
+        update_requested = pyqtSignal()
+        file_chosen = pyqtSignal(str)
 
         def __init__(self, colors: Dict[str, str], parent=None) -> None:
             super().__init__(parent)
             self.colors = colors
             outer = QVBoxLayout(self)
             outer.setContentsMargins(0, 0, 0, 0)
+            self.stack = QStackedWidget()
+            outer.addWidget(self.stack)
+
+            self.empty = EmptyState(colors)
+            self.empty.chosen = self.file_chosen
+            empty_host = QWidget()
+            empty_layout = QVBoxLayout(empty_host)
+            empty_layout.setContentsMargins(24, 28, 24, 28)
+            empty_layout.addStretch(1)
+            row = QHBoxLayout()
+            row.addStretch(1)
+            self.empty.setMaximumWidth(760)
+            row.addWidget(self.empty, 3)
+            row.addStretch(1)
+            empty_layout.addLayout(row, 2)
+            empty_layout.addStretch(1)
+            self.stack.addWidget(empty_host)
+
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.NoFrame)
-            outer.addWidget(scroll)
+            self.stack.addWidget(scroll)
             content = QWidget()
             scroll.setWidget(content)
             layout = QVBoxLayout(content)
-            layout.setContentsMargins(18, 16, 18, 18)
-            layout.setSpacing(12)
+            layout.setContentsMargins(20, 18, 20, 22)
+            layout.setSpacing(14)
 
-            self.hero = Card("", "", colors)
-            hero_layout = QHBoxLayout()
-            hero_layout.setSpacing(18)
-            left = QVBoxLayout()
-            self.hero_title = QLabel("درصد پیشرفت کل قراردادها")
-            self.hero_title.setFont(make_font(10))
-            self.hero_value = QLabel("—")
-            self.hero_value.setFont(make_font(34, True))
-            self.hero_note = QLabel("")
-            self.hero_note.setFont(make_font(8))
-            left.addWidget(self.hero_title)
-            left.addWidget(self.hero_value)
-            left.addWidget(self.hero_note)
-            hero_layout.addLayout(left, 1)
-            right = QVBoxLayout()
-            self.progress = QProgressBar()
-            self.progress.setRange(0, 1000)
-            self.progress.setTextVisible(False)
-            self.progress.setFixedHeight(14)
-            self.hero_count = QLabel("")
-            self.hero_count.setFont(make_font(9, True))
-            self.hero_source = QLabel("")
-            self.hero_source.setFont(make_font(8))
-            right.addWidget(self.hero_count)
-            right.addWidget(self.progress)
-            right.addWidget(self.hero_source)
-            hero_layout.addLayout(right, 1)
-            self.hero.body.addLayout(hero_layout)
+            self.hero = HeroCard()
             layout.addWidget(self.hero)
+            self.hero_title = self.hero.title_label
+            self.hero_value = self.hero.value_label
+            self.hero_note = self.hero.legend
+            self.hero_count = self.hero.subtitle
+            self.hero_source = self.hero.source
+            self.progress = self.hero.bar
 
             kpi_row = QHBoxLayout()
-            kpi_row.setSpacing(10)
+            kpi_row.setSpacing(12)
             self.kpi_total = StatCard("کل قراردادها", colors)
             self.kpi_deductions = StatCard("قراردادهای ناقص", colors, colors["warn"])
             self.kpi_open = StatCard("اسناد باز (M)", colors, colors["danger"])
@@ -2231,24 +2940,27 @@ if QT_READY:
                 kpi_row.addWidget(card, 1)
             layout.addLayout(kpi_row)
 
-            status_card = Card("وضعیت اسناد", "تعداد قراردادهای علامت‌دار", colors)
+            status_card = Card("وضعیت اسناد", "تعداد قراردادهایی که این مدرک را ندارند", colors)
+            self.status_card = status_card
             grid = QGridLayout()
-            grid.setSpacing(8)
-            self.flag_cards: Dict[str, StatCard] = {}
+            grid.setSpacing(9)
+            self.flag_cards: Dict[str, StatusCard] = {}
+            accents = [colors["brand"], colors["brand"], colors["danger"], colors["warn"],
+                       colors["ok"], colors["brand"], colors["danger"], colors["ok"]]
             for index, (key, label, _column) in enumerate(FLAG_DEFS):
-                card = StatCard(label, colors)
+                card = StatusCard(label, colors, accents[index % len(accents)])
                 self.flag_cards[key] = card
                 grid.addWidget(card, index // 4, index % 4)
             status_card.body.addLayout(grid)
             layout.addWidget(status_card)
 
             charts = QHBoxLayout()
-            charts.setSpacing(10)
-            self.type_card = Card("توزیع نوع قرارداد", "", colors)
+            charts.setSpacing(12)
+            self.type_card = Card("توزیع نوع قرارداد", "بر اساس تعداد قرارداد", colors)
             self.type_chart = BarList(colors)
             self.type_card.body.addWidget(self.type_chart)
             charts.addWidget(self.type_card, 1)
-            self.pending_card = Card("اسناد باز (بیشترین)", "", colors)
+            self.pending_card = Card("بیشترین اسناد باز", "مدرک‌هایی که ثبت نشده‌اند", colors)
             self.pending_chart = BarList(colors)
             self.pending_card.body.addWidget(self.pending_chart)
             charts.addWidget(self.pending_card, 1)
@@ -2259,36 +2971,32 @@ if QT_READY:
             self.type_status.body.addWidget(self.status_chart)
             layout.addWidget(self.type_status)
             layout.addStretch(1)
+
+            self.empty.import_button.clicked.connect(self.import_requested.emit)
+            self.empty.update_button.clicked.connect(self.update_requested.emit)
             self.apply_colors(colors)
+
+        def set_suggestions(self, paths: Sequence[str]) -> None:
+            self.empty.set_suggestions(paths)
 
         def apply_colors(self, colors: Dict[str, str]) -> None:
             self.colors = colors
-            for widget in (self.hero, self.kpi_total, self.kpi_deductions, self.kpi_open,
-                           self.kpi_percent, self.type_card, self.pending_card,
+            self.hero.apply_colors(colors)
+            self.empty.apply_colors(colors)
+            for widget in (self.status_card, self.type_card, self.pending_card,
                            self.type_status):
                 widget.apply_colors(colors)
+            for card in (self.kpi_total, self.kpi_deductions, self.kpi_open, self.kpi_percent):
+                card.apply_colors(colors)
             for card in self.flag_cards.values():
                 card.apply_colors(colors)
-            self.type_chart.apply_colors(colors)
-            self.status_chart.apply_colors(colors)
-            self.pending_chart.apply_colors(colors)
-            self.hero_title.setStyleSheet(f"color: {colors['ink2']};")
-            self.hero_value.setStyleSheet(f"color: {colors['brand']};")
-            self.hero_note.setStyleSheet(f"color: {colors['ink3']};")
-            self.hero_count.setStyleSheet(f"color: {colors['ink']};")
-            self.hero_source.setStyleSheet(f"color: {colors['ink3']};")
-            self.progress.setStyleSheet(
-                f"QProgressBar {{ background: {colors['surface2']}; border-radius: 7px; }}"
-                f" QProgressBar::chunk {{ background: {colors['brand']}; border-radius: 7px; }}"
-            )
+            for chart in (self.type_chart, self.status_chart, self.pending_chart):
+                chart.apply_colors(colors)
 
         def show_data(self, data: Optional[Dashboard]) -> None:
             if data is None or not data.contracts:
-                self.hero_value.setText("—")
-                self.hero_count.setText("هنوز داده‌ای بارگذاری نشده است")
-                self.hero_source.setText("از دکمهٔ «بارگذاری کتاب کار» یا «به‌روزرسانی از فایل ۰۱» شروع کنید")
-                self.hero_note.setText("")
-                self.progress.setValue(0)
+                self.stack.setCurrentIndex(0)
+                self.hero.clear()
                 for card in self.flag_cards.values():
                     card.set_value("—")
                 for card in (self.kpi_total, self.kpi_deductions, self.kpi_open, self.kpi_percent):
@@ -2297,25 +3005,24 @@ if QT_READY:
                 self.pending_chart.set_items([])
                 self.status_chart.set_items([])
                 return
+            self.stack.setCurrentIndex(1)
             percent = data.percent or 0.0
-            self.hero_value.setText(f"{fa(round(percent, 2))}٪")
-            self.progress.setValue(int(max(0, min(100, percent)) * 10))
-            self.hero_count.setText(f"{fa(data.total)} قرارداد")
-            self.hero_source.setText(
-                f"{data.source_name} — {data.note}" if data.note else data.source_name
-            )
-            self.hero_note.setText(
-                f"{fa(data.open_documents)} مدرک باز، "
-                f"{fa(data.incomplete)} قرارداد ناقص"
-            )
-            self.kpi_total.set_value(fa(data.total), "قرارداد در کتاب کار")
-            self.kpi_deductions.set_value(fa(data.incomplete),
-                                          "حداقل یک مدرک باز (M)")
-            self.kpi_open.set_value(fa(data.open_documents), "مدرک لازمِ ثبت‌نشده")
-            self.kpi_percent.set_value(f"{fa(round(percent, 2))}٪", "میانگین ستون AK")
+            self.hero.set_data(percent, data.total, data.open_documents,
+                               data.incomplete, data.source_name + (
+                                   f" — {data.note}" if data.note else ""))
+            total = max(1, data.total)
+            self.kpi_total.set_value(fa(data.total), "قرارداد در کتاب کار", 1.0)
+            self.kpi_deductions.set_value(fa(data.incomplete), "حداقل یک مدرک باز (M)",
+                                          data.incomplete / total)
+            self.kpi_open.set_value(fa(data.open_documents), "مدرک لازمِ ثبت‌نشده",
+                                    data.open_documents / max(1, total * 23))
+            self.kpi_percent.set_value(f"{fa(round(percent, 2))}٪", "میانگین ستون AK",
+                                       percent / 100.0)
             counts = data.flag_counts()
+            highest = max([1] + list(counts.values()))
             for key, _label, _column in FLAG_DEFS:
-                self.flag_cards[key].set_value(fa(counts.get(key, 0)), "قرارداد")
+                count = counts.get(key, 0)
+                self.flag_cards[key].set_value(fa(count), count / highest)
             self.type_chart.set_items(data.type_counts()[:8])
             self.pending_chart.set_items(
                 [(label[:30], count) for label, count in data.pending_docs()[:8]])
@@ -2351,8 +3058,12 @@ if QT_READY:
             for key, label, _column in FLAG_DEFS:
                 self.filter.addItem(label, key)
             self.filter.currentIndexChanged.connect(lambda _index: self.apply_filter())
-            toolbar.addWidget(self.filter, 1)
+            self.filter.setMinimumWidth(180)
+            self.filter.setMaximumWidth(260)
+            toolbar.addWidget(self.filter)
             self.count_label = QLabel("")
+            self.count_label.setMinimumWidth(90)
+            self.count_label.setAlignment(Qt.AlignCenter)
             toolbar.addWidget(self.count_label)
             layout.addLayout(toolbar)
 
@@ -2362,11 +3073,14 @@ if QT_READY:
                 ["ردیف", "شمارهٔ قرارداد", "نام شرکت", "نوع", "درصد", "وضعیت", "باز"]
             )
             self.table.verticalHeader().setVisible(False)
+            self.table.verticalHeader().setDefaultSectionSize(30)
             self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
             self.table.setSelectionMode(QAbstractItemView.SingleSelection)
             self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             self.table.setAlternatingRowColors(True)
             header = self.table.horizontalHeader()
+            header.setHighlightSections(False)
+            header.setDefaultAlignment(Qt.AlignCenter)
             header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
             header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -2382,11 +3096,14 @@ if QT_READY:
             self.detail_title.setFont(make_font(10, True))
             self.detail_title.setWordWrap(True)
             self.detail_meta = QLabel("")
+            self.detail_meta.setTextFormat(Qt.RichText)
             self.detail_meta.setFont(make_font(8))
             self.detail_meta.setWordWrap(True)
             self.detail_docs = QLabel("")
+            self.detail_docs.setTextFormat(Qt.RichText)
             self.detail_docs.setFont(make_font(8))
             self.detail_docs.setWordWrap(True)
+            self.detail_docs.setAlignment(Qt.AlignTop | Qt.AlignRight)
             self.notes_label = QLabel("یادداشت‌ها")
             self.notes_label.setFont(make_font(9, True))
             self.notes_box = QPlainTextEdit()
@@ -2407,17 +3124,26 @@ if QT_READY:
             action_row.addWidget(self.bookmark_button)
             action_row.addWidget(self.pdf_button)
             action_row.addStretch(1)
+            docs_scroll = QScrollArea()
+            docs_scroll.setWidget(self.detail_docs)
+            docs_scroll.setWidgetResizable(True)
+            docs_scroll.setFrameShape(QFrame.NoFrame)
+            docs_scroll.setMinimumHeight(120)
+            docs_scroll.setMaximumHeight(240)
+            docs_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.detail.body.addWidget(self.detail_title)
             self.detail.body.addWidget(self.detail_meta)
-            self.detail.body.addWidget(self.detail_docs)
+            self.detail.body.addWidget(docs_scroll)
             self.detail.body.addWidget(self.notes_label)
             self.detail.body.addWidget(self.notes_box)
             self.detail.body.addLayout(note_row)
             self.detail.body.addLayout(action_row)
             self.detail.body.addStretch(1)
             splitter.addWidget(self.detail)
-            splitter.setStretchFactor(0, 3)
+            splitter.setStretchFactor(0, 5)
             splitter.setStretchFactor(1, 2)
+            splitter.setSizes([900, 380])
+            self.detail.setMinimumWidth(320)
             layout.addWidget(splitter, 1)
             self.apply_colors(colors)
 
@@ -2433,7 +3159,13 @@ if QT_READY:
                 f" gridline-color: {colors['border']}; alternate-background-color:"
                 f" {colors['surface2']}; }}"
                 f" QHeaderView::section {{ background: {colors['brand_soft']};"
-                f" color: {colors['ink']}; border: none; padding: 6px; font-weight: bold; }}"
+                f" color: {colors['ink']}; border: none; padding: 7px 6px;"
+                f" font-weight: bold; }}"
+                f" QTableWidget::item {{ padding: 3px 6px; }}"
+                f" QTableWidget::item:selected {{ background: {colors['brand_soft']};"
+                f" color: {colors['ink']}; }}"
+                f" QTableCornerButton::section {{ background: {colors['brand_soft']};"
+                f" border: none; }}"
                 f" QPushButton {{ background: {colors['surface2']}; color: {colors['ink']};"
                 f" border: 1px solid {colors['border']}; border-radius: 8px; padding: 6px 12px; }}"
                 f" QPushButton:hover {{ background: {colors['brand_soft']}; }}"
@@ -2493,26 +3225,52 @@ if QT_READY:
                 self.render_detail(self.current)
 
         def render_detail(self, item: Contract) -> None:
-            self.detail_title.setText(
-                f"{item.company or '—'} — {item.contract_no or item.contract_id or '—'}"
-            )
-            lines = [
-                f"شناسهٔ کندو: {item.contract_id or '—'}    نوع: {item.contract_type or '—'}",
-                "درصد پیشرفت: "
-                + (f"{fa(round((item.percent or 0) * 100, 2))}٪" if item.percent is not None else "—")
-                + f"    وضعیت: {item.status or '—'}",
-                f"کارفرما: {item.employer or '—'}",
-                f"موضوع: {item.subject or '—'}",
+            colors = self.colors
+            company = item.company or "—"
+            if len(company) > 62:
+                company = company[:60] + "…"
+            self.detail_title.setText(company)
+            percent = (f"{fa(round((item.percent or 0) * 100, 2))}٪"
+                       if item.percent is not None else "—")
+            rows = [
+                ("شمارهٔ قرارداد", item.contract_no or "—"),
+                ("شناسهٔ کندو", item.contract_id or "—"),
+                ("نوع قرارداد", item.contract_type or "—"),
+                ("درصد پیشرفت", percent),
+                ("وضعیت در سامانه", item.status or "—"),
+                ("کارفرما", item.employer or "—"),
+                ("موضوع", item.subject or "—"),
             ]
             if item.has_problem:
-                lines.append(f"شرح مشکل / کسورات: {item.problem[:400]}")
-            self.detail_meta.setText("\n".join(lines))
+                rows.append(("شرح مشکل", item.problem[:300]))
+            cells = "".join(
+                f"<tr><td width='96' style='color:{colors['ink3']};"
+                f" padding:4px 8px 4px 0; white-space:nowrap;'>{key}</td>"
+                f"<td style='color:{colors['ink']}; padding:4px 0;'>{value}</td></tr>"
+                for key, value in rows
+            )
+            open_count = sum(1 for state in item.docs if state == "M")
+            summary = (f"<div style='color:{colors['danger']}; font-weight:bold;"
+                       f" padding-top:6px;'>{fa(open_count)} مدرک باز از "
+                       f"{fa(len(item.docs))}</div>") if open_count else (
+                f"<div style='color:{colors['ok']}; font-weight:bold; padding-top:6px;'>"
+                f"همهٔ مدارک لازم ثبت شده است</div>")
+            self.detail_meta.setText(
+                f"<div dir='rtl'><table width='100%' cellspacing='0' cellpadding='0'"
+                f" style='border-collapse:collapse;'>{cells}</table>{summary}</div>"
+            )
             if item.docs:
                 chips = []
                 for index, state in enumerate(item.docs):
                     name = DOC_NAMES[index] if index < len(DOC_NAMES) else f"مدرک {index + 1}"
-                    chips.append(f"{'⚠️ ' if state == 'M' else '✅ '}{name}")
-                self.detail_docs.setText("\n".join(chips))
+                    if state == "M":
+                        chips.append(f"<div style='color:{colors['danger']};"
+                                     f" padding:2px 0;'>■ {name}</div>")
+                    elif state == "OK":
+                        chips.append(f"<div style='color:{colors['ink3']};"
+                                     f" padding:2px 0;'>□ {name}</div>")
+                self.detail_docs.setText(
+                    "<div dir='rtl'>" + "".join(chips) + "</div>")
             else:
                 self.detail_docs.setText("")
             notes = notes_for(item.key)
@@ -2551,69 +3309,183 @@ if QT_READY:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     class ReportPage(QWidget):
-        """گزارش خلاصه + خروجی‌ها."""
+        """گزارش خلاصه + جدول وضعیت‌ها + خروجی‌ها."""
 
         def __init__(self, colors: Dict[str, str], parent=None) -> None:
             super().__init__(parent)
             self.colors = colors
             self.data: Optional[Dashboard] = None
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(18, 16, 18, 16)
-            layout.setSpacing(10)
-            self.summary = Card("گزارش مدیریتی", "خلاصهٔ وضعیت قراردادها", colors)
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            outer.addWidget(scroll)
+            content = QWidget()
+            scroll.setWidget(content)
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(20, 18, 20, 22)
+            layout.setSpacing(12)
+
+            self.kpi_row = QHBoxLayout()
+            self.kpi_row.setSpacing(12)
+            self.kpi_total = StatCard("کل قراردادها", colors)
+            self.kpi_percent = StatCard("درصد پیشرفت", colors, colors["ok"])
+            self.kpi_open = StatCard("اسناد باز (M)", colors, colors["danger"])
+            self.kpi_incomplete = StatCard("قراردادهای ناقص", colors, colors["warn"])
+            for card in (self.kpi_total, self.kpi_percent, self.kpi_open, self.kpi_incomplete):
+                self.kpi_row.addWidget(card, 1)
+            layout.addLayout(self.kpi_row)
+
+            self.summary = Card("جمع‌بندی", "خلاصهٔ کتاب کار فعلی", colors)
             self.summary_text = QLabel("داده‌ای بارگذاری نشده است.")
-            self.summary_text.setFont(make_font(9))
+            self.summary_text.setFont(make_font(8))
             self.summary_text.setWordWrap(True)
+            self.summary_text.setTextFormat(Qt.RichText)
+            self.summary_grid = QGridLayout()
+            self.summary_grid.setHorizontalSpacing(22)
+            self.summary_grid.setVerticalSpacing(6)
+            self.summary_values: Dict[str, QLabel] = {}
+            summary_keys = ("کتاب کار", "شیت", "درصد پیشرفت", "قراردادهای ناقص",
+                            "اسناد باز (M)", "زمان خواندن")
+            for index, key in enumerate(summary_keys):
+                row, column = index % 3, (index // 3) * 2
+                title = QLabel(key)
+                title.setFont(make_font(8))
+                title.setStyleSheet(f"color: {colors['ink3']};")
+                value = QLabel("—")
+                value.setFont(make_font(9, True))
+                self.summary_grid.addWidget(title, row, column)
+                self.summary_grid.addWidget(value, row, column + 1)
+                self.summary_values[key] = value
+            self.summary_grid.setColumnStretch(1, 1)
+            self.summary_grid.setColumnStretch(3, 1)
+            self.summary.body.addLayout(self.summary_grid)
             self.summary.body.addWidget(self.summary_text)
-            self.actions = Card("خروجی‌ها", "", colors)
+            self.summary.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            layout.addWidget(self.summary, 0, Qt.AlignTop)
+
+            self.status_card = Card("وضعیت اسناد", "تعداد و سهم هر مدرک", colors)
+            self.status_table = QTableWidget(0, 3)
+            self.status_table.setHorizontalHeaderLabels(["مدرک", "تعداد قرارداد", "سهم"])
+            self.status_table.verticalHeader().setVisible(False)
+            self.status_table.horizontalHeader().setHighlightSections(False)
+            self.status_table.verticalHeader().setDefaultSectionSize(30)
+            self.status_table.setSelectionMode(QAbstractItemView.NoSelection)
+            self.status_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            head = self.status_table.horizontalHeader()
+            head.setSectionResizeMode(0, QHeaderView.Stretch)
+            head.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            head.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            self.status_table.setMinimumHeight(280)
+            self.status_card.body.addWidget(self.status_table)
+            self.status_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            layout.addWidget(self.status_card, 0, Qt.AlignTop)
+
+            self.actions = Card("خروجی‌ها", "فایل‌های ساخته‌شده در پوشهٔ exports", colors)
             row = QHBoxLayout()
+            row.setSpacing(8)
             self.export_button = QPushButton("خروجی اکسل قراردادها")
             self.report_button = QPushButton("گزارش مدیریتی (چهار شیت)")
             self.print_button = QPushButton("چاپ / ذخیرهٔ PDF")
-            row.addWidget(self.export_button)
-            row.addWidget(self.report_button)
-            row.addWidget(self.print_button)
+            self.export_button.setObjectName("Primary")
+            for button in (self.export_button, self.report_button, self.print_button):
+                button.setCursor(Qt.PointingHandCursor)
+                button.setMinimumHeight(36)
+                row.addWidget(button)
             row.addStretch(1)
             self.actions.body.addLayout(row)
-            self.note = QLabel("فایل‌ها در پوشهٔ exports داخل D:\\DATANEW ذخیره می‌شوند.")
+            self.note = QLabel("همهٔ فایل‌ها در D:\\DATANEW\\exports ذخیره می‌شوند.")
             self.note.setFont(make_font(8))
             self.actions.body.addWidget(self.note)
-            layout.addWidget(self.summary)
-            layout.addWidget(self.actions)
+            self.actions.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            layout.addWidget(self.actions, 0, Qt.AlignTop)
             layout.addStretch(1)
             self.apply_colors(colors)
 
         def apply_colors(self, colors: Dict[str, str]) -> None:
             self.colors = colors
-            self.summary.apply_colors(colors)
-            self.actions.apply_colors(colors)
+            for card in (self.summary, self.status_card, self.actions,
+                         self.kpi_total, self.kpi_percent, self.kpi_open,
+                         self.kpi_incomplete):
+                card.apply_colors(colors)
             self.setStyleSheet(
-                f"QPushButton {{ background: {colors['surface2']}; color: {colors['ink']};"
-                f" border: 1px solid {colors['border']}; border-radius: 9px;"
-                f" padding: 8px 14px; }} QPushButton:hover {{ background: {colors['brand_soft']}; }}"
+                f"QTableWidget {{ background: {colors['surface']}; color: {colors['ink']};"
+                f" border: 1px solid {colors['border']}; border-radius: 10px;"
+                f" gridline-color: {colors['border']};"
+                f" alternate-background-color: {colors['surface2']}; }}"
+                f" QHeaderView::section {{ background: {colors['brand_soft']};"
+                f" color: {colors['ink']}; border: none; padding: 7px 6px;"
+                f" font-weight: bold; }}"
+                f" QPushButton {{ background: {colors['surface2']}; color: {colors['ink']};"
+                f" border: 1px solid {colors['border']}; border-radius: 10px;"
+                f" padding: 8px 14px; }}"
+                f" QPushButton:hover {{ background: {colors['brand_soft']}; }}"
+                f" QPushButton#Primary {{ background: {colors['brand']}; color: #FFFFFF;"
+                f" border: none; font-weight: bold; }}"
+                f" QPushButton#Primary:hover {{ background: {colors['brand2']}; }}"
             )
             self.note.setStyleSheet(f"color: {colors['ink3']};")
+            for label in self.summary_values.values():
+                label.setStyleSheet(f"color: {colors['ink']};")
 
         def show_data(self, data: Optional[Dashboard]) -> None:
             self.data = data
             if data is None or not data.contracts:
                 self.summary_text.setText("داده‌ای بارگذاری نشده است.")
+                for label in self.summary_values.values():
+                    label.setText("—")
+                for card in (self.kpi_total, self.kpi_percent, self.kpi_open,
+                             self.kpi_incomplete):
+                    card.set_value("—")
+                self.status_table.setRowCount(0)
                 return
+            colors = self.colors
+            percent = data.percent or 0.0
+            total = max(1, data.total)
+            self.kpi_total.set_value(fa(data.total), "قرارداد", 1.0)
+            self.kpi_percent.set_value(f"{fa(round(percent, 2))}٪", "میانگین ستون AK",
+                                       percent / 100)
+            self.kpi_open.set_value(fa(data.open_documents), "مدرک لازمِ ثبت‌نشده",
+                                    data.open_documents / max(1, total * 23))
+            self.kpi_incomplete.set_value(fa(data.incomplete), "حداقل یک مدرک باز",
+                                          data.incomplete / total)
+
             counts = data.flag_counts()
-            lines = [
-                f"کتاب کار: {data.source_name} — {fa(data.total)} قرارداد",
-                f"درصد پیشرفت کل: {fa(round(data.percent or 0, 2))}٪",
-                f"قراردادهای ناقص (دارای مدرک باز): {fa(data.incomplete)}",
-                f"اسناد باز (M): {fa(data.open_documents)}",
-                "",
-                "وضعیت‌ها: " + "، ".join(
-                    f"{label}={fa(counts.get(key, 0))}"
-                    for key, label, _column in FLAG_DEFS),
-                "",
-                "نوع قرارداد: " + "، ".join(f"{label}={fa(count)}"
-                                            for label, count in data.type_counts()[:6]),
-            ]
-            self.summary_text.setText("\n".join(lines))
+            values = {
+                "کتاب کار": data.source_name,
+                "شیت": data.sheet_name,
+                "درصد پیشرفت": f"{fa(round(percent, 2))}٪",
+                "قراردادهای ناقص": fa(data.incomplete),
+                "اسناد باز (M)": fa(data.open_documents),
+                "زمان خواندن": (data.loaded_at.strftime("%Y-%m-%d %H:%M")
+                                if data.loaded_at else "—"),
+            }
+            for key, label in self.summary_values.items():
+                label.setText(values.get(key, "—"))
+            types = "، ".join(f"{label} ({fa(count)})"
+                             for label, count in data.type_counts()[:6])
+            self.summary_text.setText(
+                f"<div dir='rtl' style='color:{colors['ink2']}; padding-top:6px;'>"
+                f"توزیع نوع قرارداد: {types}</div>"
+            )
+
+            self.status_table.setRowCount(len(FLAG_DEFS))
+            for index, (key, label, _column) in enumerate(FLAG_DEFS):
+                count = counts.get(key, 0)
+                share = count / total
+                name_cell = QTableWidgetItem(label)
+                name_cell.setFont(make_font(9))
+                count_cell = QTableWidgetItem(fa(count))
+                count_cell.setTextAlignment(Qt.AlignCenter)
+                count_cell.setFont(make_font(9, True))
+                share_cell = QTableWidgetItem(
+                    "\u200f" + fa(round(share * 100, 1)) + "٪")
+                share_cell.setTextAlignment(Qt.AlignCenter)
+                share_cell.setFont(make_font(9))
+                self.status_table.setItem(index, 0, name_cell)
+                self.status_table.setItem(index, 1, count_cell)
+                self.status_table.setItem(index, 2, share_cell)
 
     class SettingsPage(QWidget):
         """تنظیمات، دیتابیس و پوشهٔ داده."""
@@ -2634,10 +3506,21 @@ if QT_READY:
             layout.setSpacing(10)
 
             self.path_card = Card("محل داده‌ها", "همه‌چیز در D:\\DATANEW", colors)
-            self.path_label = QLabel("")
-            self.path_label.setFont(make_font(9))
-            self.path_label.setWordWrap(True)
-            self.path_card.body.addWidget(self.path_label)
+            self.path_grid = QGridLayout()
+            self.path_grid.setHorizontalSpacing(14)
+            self.path_grid.setVerticalSpacing(5)
+            self.path_values: Dict[str, QLabel] = {}
+            for index, key in enumerate(("پوشهٔ داده", "دیتابیس", "کتاب کارها", "خروجی‌ها")):
+                title = QLabel(f"{key}:")
+                title.setFont(make_font(8))
+                path_value = QLabel("—")
+                path_value.setFont(make_font(8))
+                path_value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                self.path_grid.addWidget(title, index, 0)
+                self.path_grid.addWidget(path_value, index, 1)
+                self.path_values[key] = path_value
+            self.path_grid.setColumnStretch(1, 1)
+            self.path_card.body.addLayout(self.path_grid)
             path_row = QHBoxLayout()
             self.open_folder = QPushButton("باز کردن پوشه")
             self.reset_button = QPushButton("ساخت دیتابیس از صفر")
@@ -2650,14 +3533,17 @@ if QT_READY:
             self.db_label = QLabel("")
             self.db_label.setFont(make_font(9))
             self.db_label.setWordWrap(True)
+            self.db_label.setAlignment(Qt.AlignTop | Qt.AlignRight)
+            self.db_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             self.db_card.body.addWidget(self.db_label)
             self.workbooks_table = QTableWidget(0, 4)
             self.workbooks_table.setHorizontalHeaderLabels(
                 ["شناسه", "نام کتاب کار", "قرارداد", "زمان"])
             self.workbooks_table.verticalHeader().setVisible(False)
+            self.workbooks_table.horizontalHeader().setHighlightSections(False)
             self.workbooks_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
             self.workbooks_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            self.workbooks_table.setMaximumHeight(180)
+            self.workbooks_table.setFixedHeight(150)
             head = self.workbooks_table.horizontalHeader()
             head.setSectionResizeMode(0, QHeaderView.ResizeToContents)
             head.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -2698,15 +3584,14 @@ if QT_READY:
             self.log_card = Card("گزارش برنامه", "", colors)
             self.log_box = QPlainTextEdit()
             self.log_box.setReadOnly(True)
-            self.log_box.setMaximumHeight(180)
+            self.log_box.setFixedHeight(150)
             self.log_card.body.addWidget(self.log_box)
             refresh = QPushButton("تازه‌سازی گزارش")
             self.log_card.body.addWidget(refresh, 0, Qt.AlignLeft)
 
-            layout.addWidget(self.path_card)
-            layout.addWidget(self.db_card)
-            layout.addWidget(self.pref_card)
-            layout.addWidget(self.log_card)
+            for card in (self.path_card, self.db_card, self.pref_card, self.log_card):
+                card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+                layout.addWidget(card, 0, Qt.AlignTop)
             layout.addStretch(1)
             self.apply_colors(colors)
 
@@ -2727,16 +3612,19 @@ if QT_READY:
                 f" color: {colors['ink']}; border: none; padding: 5px; }}"
             )
             self.db_label.setStyleSheet(f"color: {colors['ink2']};")
-            self.path_label.setStyleSheet(f"color: {colors['ink']};")
+            for label in self.path_values.values():
+                label.setStyleSheet(f"color: {colors['ink']};")
 
         def refresh(self) -> None:
             root = data_root()
-            self.path_label.setText(
-                f"پوشهٔ داده: {root}\n"
-                f"دیتابیس: {database_path()}\n"
-                f"کتاب کارها: {root / 'workbooks'}\n"
-                f"خروجی‌ها: {root / 'exports'}"
-            )
+            values = {
+                "پوشهٔ داده": str(root),
+                "دیتابیس": str(database_path()),
+                "کتاب کارها": str(root / "workbooks"),
+                "خروجی‌ها": str(root / "exports"),
+            }
+            for key, label in self.path_values.items():
+                label.setText(values.get(key, "—"))
             summary = database_summary()
             self.db_label.setText(
                 f"{fa(summary['workbooks'])} کتاب کار، {fa(summary['contracts'])} قرارداد، "
@@ -2744,6 +3632,7 @@ if QT_READY:
             )
             rows = list_workbooks()
             self.workbooks_table.setRowCount(len(rows))
+            self.workbooks_table.setFixedHeight(46 + 30 * max(1, min(4, len(rows))))
             for index, item in enumerate(rows):
                 values = [fa(item.get("id")), item.get("filename"),
                           fa(item.get("rows")), str(item.get("imported_at") or "")[:16]]
@@ -2763,6 +3652,8 @@ if QT_READY:
             self.colors = THEMES.get(self.theme_name, THEMES["light"])
             self.font_size = int(setting_get("font_size", "10") or 10)
             self.pdf_folder = setting_get("pdf_folder", "") or ""
+            self.quiet_import = False
+            self.auto_import_done = False
             self.setWindowTitle(f"{APP_NAME} — نسخهٔ {APP_VERSION}")
             self.resize(1440, 900)
             self._build()
@@ -2807,6 +3698,7 @@ if QT_READY:
             rail.addWidget(self.data_label)
 
             center = QWidget()
+            center.setObjectName("Center")
             layout = QVBoxLayout(center)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(0)
@@ -2815,16 +3707,24 @@ if QT_READY:
             topbar.setFixedHeight(66)
             bar = QHBoxLayout(topbar)
             bar.setContentsMargins(18, 10, 18, 10)
+            titles = QVBoxLayout()
+            titles.setSpacing(0)
             self.page_title = QLabel("داشبورد")
             self.page_title.setFont(make_font(12, True))
-            bar.addWidget(self.page_title)
+            self.page_sub = QLabel("")
+            self.page_sub.setFont(make_font(7))
+            titles.addWidget(self.page_title)
+            titles.addWidget(self.page_sub)
+            bar.addLayout(titles)
             bar.addStretch(1)
             self.update_button = QPushButton("به‌روزرسانی از فایل ۰۱")
             self.update_button.setObjectName("Primary")
             self.update_button.setCursor(Qt.PointingHandCursor)
+            self.update_button.setToolTip("خواندن فایل ۰۱ و ساختن نسخهٔ به‌روز کتاب کار")
             self.update_button.clicked.connect(self.start_update)
             bar.addWidget(self.update_button)
             self.reload_button = QPushButton("بازخوانی")
+            self.reload_button.setToolTip("خواندن دوبارهٔ داده از دیتابیس داخلی")
             self.reload_button.clicked.connect(self.load_initial)
             bar.addWidget(self.reload_button)
             self.theme_button = QPushButton("تیره")
@@ -2864,6 +3764,9 @@ if QT_READY:
                 1 if self.theme_name == "dark" else 0)
             self.settings_page.font_spin.setValue(self.font_size)
 
+            self.dashboard_page.import_requested.connect(self.import_workbook)
+            self.dashboard_page.update_requested.connect(self.start_update)
+            self.dashboard_page.file_chosen.connect(self.import_workbook)
             self.report_page.export_button.clicked.connect(self.export_contracts)
             self.report_page.report_button.clicked.connect(self.export_report)
             self.report_page.print_button.clicked.connect(self.print_report)
@@ -2874,31 +3777,53 @@ if QT_READY:
             self.font_size = int(font_size)
             app = QApplication.instance()
             if app is not None:
-                base = make_font(self.font_size)
-                app.setFont(base)
+                app.setFont(make_font(self.font_size))
                 app.setLayoutDirection(Qt.RightToLeft)
             colors = self.colors
             self.setStyleSheet(
                 f"QWidget {{ color: {colors['ink']}; font-family: Tahoma;"
-                f" font-size: {self.font_size}pt; }}"
+                f" font-size: {self.font_size}pt; background: transparent; }}"
                 f" QWidget#Rail {{ background: {colors['surface']};"
                 f" border-left: 1px solid {colors['border']}; }}"
                 f" QFrame#Topbar {{ background: {colors['surface']};"
                 f" border-bottom: 1px solid {colors['border']}; }}"
-                f" QPushButton#Primary {{ background: {colors['brand']}; color: white;"
-                f" border: none; border-radius: 9px; padding: 8px 16px; font-weight: bold; }}"
-                f" QPushButton#Primary:hover {{ background: {colors['brand']}; }}"
-                f" QMainWindow, QWidget {{ background: {colors['bg']}; }}"
+                f" QScrollArea, QScrollArea > QWidget > QWidget"
+                f" {{ background: {colors['bg']}; }}"
+                f" QPushButton#Primary {{ background: {colors['brand']}; color: #FFFFFF;"
+                f" border: none; border-radius: 11px; padding: 9px 20px;"
+                f" font-weight: bold; }}"
+                f" QPushButton#Primary:hover {{ background: {colors['brand2']}; }}"
+                f" QPushButton#Primary:disabled {{ background: {colors['track']};"
+                f" color: {colors['ink3']}; }}"
+                f" QPushButton {{ background: {colors['surface2']};"
+                f" color: {colors['ink2']}; border: 1px solid {colors['border']};"
+                f" border-radius: 10px; padding: 7px 14px; }}"
+                f" QPushButton:hover {{ background: {colors['brand_soft']};"
+                f" color: {colors['brand']}; }}"
+                f" QToolTip {{ background: {colors['surface']}; color: {colors['ink']};"
+                f" border: 1px solid {colors['border']}; padding: 4px; }}"
+                f" QScrollBar:vertical {{ background: transparent; width: 10px;"
+                f" margin: 2px; }}"
+                f" QScrollBar::handle:vertical {{ background: {colors['border']};"
+                f" border-radius: 5px; min-height: 30px; }}"
+                f" QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical"
+                f" {{ height: 0; }}"
+                f" QMainWindow, QWidget#Center {{ background: {colors['bg']}; }}"
             )
             self.brand.setStyleSheet(f"color: {colors['brand']};")
             self.version_label.setStyleSheet(f"color: {colors['ink3']};")
-            self.data_label.setStyleSheet(f"color: {colors['ink3']};")
+            self.data_label.setStyleSheet(
+                f"color: {colors['ink3']}; background: transparent;"
+            )
+            self.page_title.setStyleSheet(f"color: {colors['ink']};")
+            self.page_sub.setStyleSheet(f"color: {colors['ink3']};")
             for key, button in self.nav_buttons.items():
                 button.setStyleSheet(
-                    f"QPushButton {{ text-align: right; padding: 9px 12px;"
-                    f" border: none; border-radius: 9px; background: transparent;"
+                    f"QPushButton {{ text-align: right; padding: 10px 14px;"
+                    f" border: none; border-radius: 10px; background: transparent;"
                     f" color: {colors['ink2']}; }}"
-                    f" QPushButton:hover {{ background: {colors['surface2']}; }}"
+                    f" QPushButton:hover {{ background: {colors['surface2']};"
+                    f" color: {colors['ink']}; }}"
                     f" QPushButton:checked {{ background: {colors['brand_soft']};"
                     f" color: {colors['brand']}; font-weight: bold; }}"
                 )
@@ -2908,6 +3833,16 @@ if QT_READY:
             self.settings_page.apply_colors(colors)
             setting_set("theme", self.theme_name)
             setting_set("font_size", self.font_size)
+
+        def _refresh_subtitle(self) -> None:
+            data = getattr(self, "data", None)
+            if data is None or not data.contracts:
+                self.page_sub.setText(f"پوشهٔ داده: {data_root()}")
+                return
+            self.page_sub.setText(
+                f"{fa(data.total)} قرارداد  •  {fa(round(data.percent or 0, 2))}٪ پیشرفت"
+                f"  •  {data.source_name}"
+            )
 
         def toggle_theme(self) -> None:
             self.apply_theme("light" if self.theme_name == "dark" else "dark",
@@ -2919,6 +3854,7 @@ if QT_READY:
                       "report": "گزارش مدیریتی", "settings": "تنظیمات"}
             self.stack.setCurrentIndex(pages.get(name, 0))
             self.page_title.setText(titles.get(name, "داشبورد"))
+            self._refresh_subtitle()
             for key, button in self.nav_buttons.items():
                 button.setChecked(key == name)
             if name == "settings":
@@ -2934,12 +3870,17 @@ if QT_READY:
             self.dashboard_page.show_data(data)
             self.contracts_page.set_data(data, self.pdf_folder)
             self.report_page.show_data(data)
-            if data is None:
+            if data is None or not data.contracts:
+                try:
+                    self.dashboard_page.set_suggestions(guess_workbooks())
+                except Exception:
+                    pass
                 self.data_label.setText("داده‌ای در دیتابیس نیست")
                 return
             self.data_label.setText(
                 f"{fa(data.total)} قرارداد\n{fa(round(data.percent or 0, 2))}٪ پیشرفت"
             )
+            self._refresh_subtitle()
 
         def load_initial(self) -> None:
             workbook_id = int(setting_get("current_workbook", "0") or 0)
@@ -2947,9 +3888,23 @@ if QT_READY:
                                "در حال خواندن داده‌ها…")
 
         def _on_loaded(self, data: Optional[Dashboard]) -> None:
-            if data is None:
-                log_line("هیچ کتاب کاری در دیتابیس نیست؛ منتظر بارگذاری می‌مانیم.")
+            if data is not None and data.contracts:
+                self.apply_data(data)
+                return
             self.apply_data(data)
+            if getattr(self, "auto_import_done", False):
+                return
+            self.auto_import_done = True
+            candidates = []
+            try:
+                candidates = guess_workbooks(strong_only=True)
+            except Exception as exc:
+                log_line(f"جستجوی کتاب کار ممکن نشد: {exc}")
+            if not candidates:
+                log_line("هیچ کتاب کاری در دیتابیس نیست؛ منتظر بارگذاری می‌مانیم.")
+                return
+            log_line(f"کتاب کار پیدا شد و خودکار بارگذاری می‌شود: {candidates[0]}")
+            self.import_workbook(candidates[0], quiet=True)
 
         def _start_worker(self, job, on_done, message: str = "") -> None:
             if self.worker is not None and self.worker.isRunning():
@@ -3007,7 +3962,8 @@ if QT_READY:
             return {0: "dashboard", 1: "contracts", 2: "report", 3: "settings"}.get(index, "dashboard")
 
         # ---------- عملیات ----------
-        def import_workbook(self, path: str = "") -> None:
+        def import_workbook(self, path: str = "", quiet: bool = False) -> None:
+            self.quiet_import = bool(quiet)
             if not path:
                 path, _filter = QFileDialog.getOpenFileName(
                     self, "انتخاب کتاب کار (دارای شیت colorcode)", str(data_root()),
@@ -3035,6 +3991,12 @@ if QT_READY:
             self.apply_data(dashboard)
             self.settings_page.refresh()
             self.show_page("dashboard")
+            if getattr(self, "quiet_import", False):
+                self.quiet_import = False
+                self.data_label.setText(
+                    f"{fa(dashboard.total)} قرارداد\n{fa(round(dashboard.percent or 0, 2))}٪ پیشرفت"
+                )
+                return
             QMessageBox.information(
                 self, "بارگذاری شد",
                 f"کتاب کار «{dashboard.source_name}» با {fa(dashboard.total)} قرارداد "
